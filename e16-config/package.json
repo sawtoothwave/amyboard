@@ -1,0 +1,10 @@
+{
+  "name": "amyboard-e16-config",
+  "version": "1.0.0",
+  "description": "OXI e16 scene configuration for AMYboard",
+  "main": "generate-scene.js",
+  "type": "commonjs",
+  "scripts": {
+    "generate": "node generate-scene.js amyboard.json amyboard.oxie16"
+  }
+}
