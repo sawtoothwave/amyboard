@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+/build/
+/dist/
+/out/
+
+# Dependencies
+node_modules/
+venv/
+.env
+
+# IDE
+.vscode/
+*.sublime-project
+*.sublime-workspace
