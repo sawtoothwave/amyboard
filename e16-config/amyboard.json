@@ -1,0 +1,68 @@
+{
+  "title": "AMYboard",
+  "instrument": "AMYboard.oxiindef",
+  "icon": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  "pages": [
+    {
+      "title": "OSC+FILT",
+      "channel": 1,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "OSC.A", "name": "Osc A Pitch", "cc": 20, "default": 64},
+        {"abbr": "WAVE.A", "name": "Osc A Wave", "cc": 21, "default": 0},
+        {"abbr": "DUTY.A", "name": "Osc A Duty", "cc": 22, "default": 64},
+        {"abbr": "LVL.A", "name": "Osc A Level", "cc": 23, "default": 100},
+        {"abbr": "OSC.B", "name": "Osc B Pitch", "cc": 24, "default": 32},
+        {"abbr": "WAVE.B", "name": "Osc B Wave", "cc": 25, "default": 0},
+        {"abbr": "DUTY.B", "name": "Osc B Duty", "cc": 26, "default": 64},
+        {"abbr": "LVL.B", "name": "Osc B Level", "cc": 27, "default": 100},
+        {"abbr": "CUTOFF", "name": "Filter Cutoff", "cc": 28, "default": 100},
+        {"abbr": "RESO", "name": "Filter Reso", "cc": 29, "default": 0},
+        {"abbr": "F.ENV", "name": "Filter Env", "cc": 30, "default": 0},
+        {"abbr": "F.TYPE", "name": "Filter Type", "cc": 31, "default": 0},
+        {"abbr": "K.SCALE", "name": "Key Scale", "cc": 32, "default": 0}
+      ]
+    },
+    {
+      "title": "MODS",
+      "channel": 1,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "VCF.A", "name": "VCF Attack", "cc": 40, "default": 0},
+        {"abbr": "VCF.D", "name": "VCF Decay", "cc": 41, "default": 50},
+        {"abbr": "VCF.S", "name": "VCF Sustain", "cc": 42, "default": 100},
+        {"abbr": "VCF.R", "name": "VCF Release", "cc": 43, "default": 50},
+        {"abbr": "VCA.A", "name": "VCA Attack", "cc": 44, "default": 0},
+        {"abbr": "VCA.D", "name": "VCA Decay", "cc": 45, "default": 50},
+        {"abbr": "VCA.S", "name": "VCA Sustain", "cc": 46, "default": 100},
+        {"abbr": "VCA.R", "name": "VCA Release", "cc": 47, "default": 50},
+        {"abbr": "LFO.F", "name": "LFO Freq", "cc": 48, "default": 30},
+        {"abbr": "LFO.D", "name": "LFO Depth", "cc": 49, "default": 0},
+        {"abbr": "LFO.SH", "name": "LFO Shape", "cc": 50, "default": 0},
+        {"abbr": "", "name": "", "cc": 51},
+        {"abbr": "OSC.AMT", "name": "LFO->Pitch", "cc": 52, "default": 0},
+        {"abbr": "PWM.AMT", "name": "LFO->PWM", "cc": 53, "default": 0},
+        {"abbr": "FLT.AMT", "name": "LFO->Filter", "cc": 54, "default": 0}
+      ]
+    },
+    {
+      "title": "FX",
+      "channel": 1,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "ECHO.L", "name": "Echo Level", "cc": 60, "default": 0},
+        {"abbr": "ECHO.DL", "name": "Echo Delay", "cc": 61, "default": 30},
+        {"abbr": "ECHO.FB", "name": "Echo Fdbk", "cc": 62, "default": 50},
+        {"abbr": "", "name": "", "cc": 63},
+        {"abbr": "REV.L", "name": "Reverb Level", "cc": 64, "default": 0},
+        {"abbr": "REV.LV", "name": "Reverb Live", "cc": 65, "default": 50},
+        {"abbr": "REV.DM", "name": "Reverb Damp", "cc": 66, "default": 50},
+        {"abbr": "", "name": "", "cc": 67},
+        {"abbr": "CHO.L", "name": "Chorus Level", "cc": 68, "default": 0},
+        {"abbr": "CHO.F", "name": "Chorus Freq", "cc": 69, "default": 30},
+        {"abbr": "CHO.D", "name": "Chorus Depth", "cc": 70, "default": 30},
+        {"abbr": "", "name": "", "cc": 71}
+      ]
+    }
+  ]
+}

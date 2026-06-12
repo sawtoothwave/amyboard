@@ -26,3 +26,12 @@ venv/
 .vscode/
 *.sublime-project
 *.sublime-workspace
+
+# E16 config build artifacts
+e16-config/tmp/
+e16-config/*.oxie16
+e16-config/node_modules/
+
+# AMYboard state files
+amyboard_state.json
+/user/
