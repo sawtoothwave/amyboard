@@ -100,7 +100,7 @@ function buildTurn(def) {
     parameter: 0,
     display: def.display ?? 10,
     mode: def.mode ?? 5,  // Mode 5 for CC encoders
-    channel: def.channel ?? 1,
+    channel: def.channel ?? 10,  // Channel 10 = active MIDI for OXI
     lower: def.lower ?? 0,
     upper: def.upper ?? 127,
     defaultValue: def.default ?? def.defaultValue ?? 0,
