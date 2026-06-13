@@ -26,6 +26,9 @@
         {"abbr": "K.SCALE", "name": "Key Scale", "cc": 32, "default": 0}
       ]
     },
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
     {
       "title": "MODS",
       "channel": 1,
@@ -47,6 +50,9 @@
         {"abbr": "FLT.AMT", "name": "LFO->Filter", "cc": 54, "default": 0}
       ]
     },
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
     {
       "title": "FX",
       "channel": 1,
@@ -62,8 +68,6 @@
         {"abbr": "CHO.F", "name": "Chorus Freq", "cc": 69, "default": 30},
         {"abbr": "CHO.D", "name": "Chorus Depth", "cc": 70, "default": 30}
       ]
-    },
-    {"title": "", "channel": 1, "type": "cc", "encoders": []},
-    {"title": "", "channel": 1, "type": "cc", "encoders": []}
+    }
   ]
 }

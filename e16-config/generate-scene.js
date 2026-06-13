@@ -145,12 +145,27 @@ function buildPushAction(def) {
 
 // Build empty encoder
 function emptyEncoder() {
+  const fallbackTurn = {
+    instrument: 127,
+    parameter: 0,
+    type: 0,
+    display: 10,
+    mode: 3,
+    channel: 0,
+    lower: 0,
+    upper: 127,
+    defaultValue: 0,
+    nr1: 0,
+    nr2: 0,
+    output: 12
+  };
+
   return {
     name: "",
     abbr: "",
     color: 22,
     push_action: DISABLED_PUSH,
-    turn_actions: [DISABLED_TURN],
+    turn_actions: [DISABLED_TURN, fallbackTurn],
     color2: 0
   };
 }
@@ -166,12 +181,28 @@ function buildEncoder(def, pageDefaults = {}, instrumentDef = null) {
   const pushAction = buildPushAction({ type, ...def });
   const color = getColorForParam(def.abbr, def.name);
 
+  // OXI requires 2 turn actions: primary (active) + secondary (fallback/disabled)
+  const fallbackTurn = {
+    instrument: 127,
+    parameter: 0,
+    type: 0,
+    display: 10,
+    mode: 3,
+    channel: 0,
+    lower: 0,
+    upper: 127,
+    defaultValue: 0,
+    nr1: 0,
+    nr2: 0,
+    output: 12
+  };
+
   return {
     name: def.name ?? "",
     abbr: def.abbr ?? "",
     color,
     push_action: pushAction,
-    turn_actions: [turnAction],
+    turn_actions: [turnAction, fallbackTurn],
     color2: 0
   };
 }
