@@ -3,6 +3,9 @@
   "instrument": "AMYboard.oxiindef",
   "icon": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   "pages": [
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
     {
       "title": "OSC+FILT",
       "channel": 1,
@@ -39,7 +42,6 @@
         {"abbr": "LFO.F", "name": "LFO Freq", "cc": 48, "default": 30},
         {"abbr": "LFO.D", "name": "LFO Depth", "cc": 49, "default": 0},
         {"abbr": "LFO.SH", "name": "LFO Shape", "cc": 50, "default": 0},
-        {"abbr": "", "name": "", "cc": 51},
         {"abbr": "OSC.AMT", "name": "LFO->Pitch", "cc": 52, "default": 0},
         {"abbr": "PWM.AMT", "name": "LFO->PWM", "cc": 53, "default": 0},
         {"abbr": "FLT.AMT", "name": "LFO->Filter", "cc": 54, "default": 0}
@@ -53,16 +55,15 @@
         {"abbr": "ECHO.L", "name": "Echo Level", "cc": 60, "default": 0},
         {"abbr": "ECHO.DL", "name": "Echo Delay", "cc": 61, "default": 30},
         {"abbr": "ECHO.FB", "name": "Echo Fdbk", "cc": 62, "default": 50},
-        {"abbr": "", "name": "", "cc": 63},
         {"abbr": "REV.L", "name": "Reverb Level", "cc": 64, "default": 0},
         {"abbr": "REV.LV", "name": "Reverb Live", "cc": 65, "default": 50},
         {"abbr": "REV.DM", "name": "Reverb Damp", "cc": 66, "default": 50},
-        {"abbr": "", "name": "", "cc": 67},
         {"abbr": "CHO.L", "name": "Chorus Level", "cc": 68, "default": 0},
         {"abbr": "CHO.F", "name": "Chorus Freq", "cc": 69, "default": 30},
-        {"abbr": "CHO.D", "name": "Chorus Depth", "cc": 70, "default": 30},
-        {"abbr": "", "name": "", "cc": 71}
+        {"abbr": "CHO.D", "name": "Chorus Depth", "cc": 70, "default": 30}
       ]
-    }
+    },
+    {"title": "", "channel": 1, "type": "cc", "encoders": []},
+    {"title": "", "channel": 1, "type": "cc", "encoders": []}
   ]
 }

@@ -53,8 +53,8 @@ const DISABLED_PUSH = {
 };
 
 const DISABLED_TURN = {
-  instrument: 127, parameter: 0, type: 0, display: 10, mode: 3,
-  channel: 0, lower: 0, upper: 127, defaultValue: 0, nr1: 0, nr2: 0, output: 12
+  instrument: 127, parameter: 0, type: 0, display: 10, mode: 5,
+  channel: 0, lower: 0, upper: 127, defaultValue: 0, nr1: 0, nr2: 0, output: 1
 };
 
 const DEFAULT_ICON = [56, 28, 84, 34, 146, 69, 146, 73, 130, 65, 68, 34, 56, 28, 0, 0, 0, 0, 56, 28, 68, 34, 162, 65, 146, 73, 130, 69, 68, 34, 56, 28];
@@ -99,17 +99,17 @@ function buildTurn(def) {
     instrument: 127,
     parameter: 0,
     display: def.display ?? 10,
-    mode: def.mode ?? 3,
+    mode: def.mode ?? 5,  // Mode 5 for CC encoders
     channel: def.channel ?? 1,
     lower: def.lower ?? 0,
     upper: def.upper ?? 127,
     defaultValue: def.default ?? def.defaultValue ?? 0,
-    output: def.output ?? 12
+    output: def.output ?? 1  // Output 1 for standard MIDI
   };
 
   switch (def.type) {
     case 'cc':
-      return { ...base, type: 0, nr1: def.cc, nr2: 0 };
+      return { ...base, type: 0, nr1: def.cc, nr2: 1 };
     case 'nrpn':
       return { ...base, type: 11, nr1: def.lsb, nr2: def.msb };
     default:
