@@ -48,13 +48,18 @@ function loadInstrumentDef(filePath, basePath = '.') {
 
 // Templates
 const DISABLED_PUSH = {
-  instrument: 127, parameter: 0, type: 2, display: 0, mode: 2,
-  channel: 1, lower: 0, upper: 127, nr1: 119, nr2: 1, output: 1
+  instrument: 127, parameter: 0, type: 0, display: 0, mode: 0,
+  channel: 0, lower: 0, upper: 127, nr1: 0, nr2: 0, output: 12
+};
+
+const DEFAULT_PUSH = {
+  instrument: 127, parameter: 0, type: 4, display: 0, mode: 0,
+  channel: 0, lower: 0, upper: 127, nr1: 0, nr2: 0, output: 12
 };
 
 const DISABLED_TURN = {
-  instrument: 127, parameter: 0, type: 0, display: 10, mode: 5,
-  channel: 0, lower: 0, upper: 127, defaultValue: 0, nr1: 0, nr2: 0, output: 1
+  instrument: 127, parameter: 0, type: 0, display: 10, mode: 3,
+  channel: 0, lower: 0, upper: 127, defaultValue: 0, nr1: 0, nr2: 0, output: 12
 };
 
 const DEFAULT_ICON = [56, 28, 84, 34, 146, 69, 146, 73, 130, 65, 68, 34, 56, 28, 0, 0, 0, 0, 56, 28, 68, 34, 162, 65, 146, 73, 130, 69, 68, 34, 56, 28];
@@ -99,19 +104,19 @@ function buildTurn(def) {
     instrument: 127,
     parameter: 0,
     display: def.display ?? 10,
-    mode: def.mode ?? 5,  // Mode 5 for CC encoders
-    channel: def.channel ?? 10,  // Channel 10 = active MIDI for OXI
+    mode: def.mode ?? 3,
+    channel: def.channel ?? 0,
     lower: def.lower ?? 0,
     upper: def.upper ?? 127,
     defaultValue: def.default ?? def.defaultValue ?? 0,
-    output: def.output ?? 1  // Output 1 for standard MIDI
+    output: def.output ?? 12
   };
 
   switch (def.type) {
     case 'cc':
-      return { ...base, type: 0, nr1: def.cc, nr2: 1 };
+      return { ...base, type: 3, nr1: def.cc, nr2: 0 };
     case 'nrpn':
-      return { ...base, type: 11, nr1: def.lsb, nr2: def.msb };
+      return { ...base, type: 9, nr1: def.lsb, nr2: def.msb };
     default:
       return DISABLED_TURN;
   }
@@ -125,19 +130,20 @@ function buildPushAction(def) {
     instrument: 127,
     parameter: 0,
     display: 0,
-    mode: 2,
-    channel: def.channel ?? 1,
+    mode: 0,
+    channel: def.channel ?? 0,
     lower: 0,
     upper: 127,
-    nr1: 119,
-    nr2: 1,
-    output: 1
+    output: def.output ?? 12
   };
 
   switch (def.type) {
+    case 'default':
+      return { ...base, type: 4, nr1: 0, nr2: 0 };
     case 'cc':
+      return { ...base, type: 2, nr1: def.cc ?? 0, nr2: def.value ?? 127 };
     case 'nrpn':
-      return { ...base, type: 2 };  // Set to default
+      return { ...base, type: 4, nr1: 0, nr2: 0 };
     default:
       return DISABLED_PUSH;
   }
@@ -145,27 +151,12 @@ function buildPushAction(def) {
 
 // Build empty encoder
 function emptyEncoder() {
-  const fallbackTurn = {
-    instrument: 127,
-    parameter: 0,
-    type: 0,
-    display: 10,
-    mode: 3,
-    channel: 0,
-    lower: 0,
-    upper: 127,
-    defaultValue: 0,
-    nr1: 0,
-    nr2: 0,
-    output: 12
-  };
-
   return {
     name: "",
     abbr: "",
     color: 22,
     push_action: DISABLED_PUSH,
-    turn_actions: [DISABLED_TURN, fallbackTurn],
+    turn_actions: [DISABLED_TURN, DISABLED_TURN],
     color2: 0
   };
 }
@@ -178,31 +169,15 @@ function buildEncoder(def, pageDefaults = {}, instrumentDef = null) {
 
   const type = pageDefaults.type ?? 'cc';
   const turnAction = buildTurn({ type, ...def });
-  const pushAction = buildPushAction({ type, ...def });
+  const pushAction = DEFAULT_PUSH;
   const color = getColorForParam(def.abbr, def.name);
-
-  // OXI requires 2 turn actions: primary (active) + secondary (fallback/disabled)
-  const fallbackTurn = {
-    instrument: 127,
-    parameter: 0,
-    type: 0,
-    display: 10,
-    mode: 3,
-    channel: 0,
-    lower: 0,
-    upper: 127,
-    defaultValue: 0,
-    nr1: 0,
-    nr2: 0,
-    output: 12
-  };
 
   return {
     name: def.name ?? "",
     abbr: def.abbr ?? "",
     color,
     push_action: pushAction,
-    turn_actions: [turnAction, fallbackTurn],
+    turn_actions: [turnAction, DISABLED_TURN],
     color2: 0
   };
 }

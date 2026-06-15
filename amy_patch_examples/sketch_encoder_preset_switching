@@ -1,0 +1,113 @@
+# AMYboard Sketch
+# DESCRIPTION: Encoder on MIDI CC 114 scrolls patches 1-256 (wraps); display shows patch number on top half and a sine-wave oscilloscope on bottom half.
+
+import amy, amyboard, midi, math
+from patches import patches as PRESETS
+
+# Patches: index 0-255 map to AMY patches 0-255.
+# The request says patches 1-256 (1-indexed display), wrapping from 256 back to 1.
+# Internally we use 0-255 as AMY patch numbers, displayed as 1-256.
+
+NUM_PATCHES = 256
+current_patch = 0  # AMY patch index 0-255
+
+# Boot with default patch
+amy.send(synth=1, patch=0, num_voices=6)
+
+# Display setup
+try:
+    amyboard.init_display()
+    HAS_DISPLAY = True
+except Exception:
+    HAS_DISPLAY = False
+
+# --- Oscilloscope state ---
+# We draw a simple animated sine wave on the bottom half of the 128x64 OLED
+# (rows 32-63). The wave animates each loop() call.
+osc_phase = 0.0
+
+def draw():
+    if not HAS_DISPLAY:
+        return
+    d = amyboard.display
+    d.fill(0)
+
+    # --- Top half: patch info (rows 0-31) ---
+    display_num = current_patch + 1  # Show 1-256
+    d.text("PATCH: %d / 256" % display_num, 0, 0, 255)
+
+    # Patch name (truncated to 16 chars)
+    if current_patch < len(PRESETS):
+        name = PRESETS[current_patch].strip()
+    else:
+        name = "Patch %d" % display_num
+    if len(name) > 16:
+        name = name[:16]
+    d.text(name, 0, 12, 255)
+
+    # Patch type label
+    if current_patch < 128:
+        ptype = "Juno-6"
+    elif current_patch < 256:
+        ptype = "DX7 FM"
+    else:
+        ptype = "Piano"
+    d.text(ptype, 0, 22, 255)
+
+    # --- Divider line at row 32 ---
+    for x in range(128):
+        d.pixel(x, 32, 255)
+
+    # --- Bottom half: oscilloscope sine wave (rows 33-63) ---
+    # Draw a sine wave across the 128-pixel width, centered at row 48 (middle of bottom half)
+    center_y = 48
+    amplitude = 12  # pixels
+    global osc_phase
+    prev_y = center_y + int(amplitude * math.sin(osc_phase))
+    for x in range(1, 128):
+        angle = osc_phase + (x / 127.0) * 2.0 * math.pi * 2
+        y = center_y + int(amplitude * math.sin(angle))
+        # Clamp to bottom half
+        y = max(33, min(63, y))
+        prev_y_clamped = max(33, min(63, prev_y))
+        # Draw a vertical segment between prev_y and y to avoid gaps
+        y0 = min(prev_y_clamped, y)
+        y1 = max(prev_y_clamped, y)
+        for py in range(y0, y1 + 1):
+            d.pixel(x, py, 255)
+        prev_y = y
+
+    amyboard.display_refresh()
+
+draw()
+
+# --- MIDI CC 114 callback ---
+def midi_cb(m):
+    global current_patch
+    if not m or len(m) < 3:
+        return
+    status = m[0] & 0xF0
+    cc_num = m[1]
+    cc_val = m[2]
+    # CC message: status byte high nibble = 0xB0
+    if status == 0xB0 and cc_num == 114:
+        # CC value 0-63 = increment (turn right), 64-127 = decrement (turn left)
+        # Standard relative encoder (two's complement style):
+        if cc_val == 1 or (1 <= cc_val <= 63):
+            # increment
+            current_patch = (current_patch + 1) % NUM_PATCHES
+        elif cc_val == 127 or (65 <= cc_val <= 127):
+            # decrement
+            current_patch = (current_patch - 1) % NUM_PATCHES
+        amy.send(synth=1, patch=current_patch, num_voices=6)
+        draw()
+
+midi.add_callback(midi_cb)
+
+def loop():
+    global osc_phase
+    # Animate the oscilloscope wave
+    osc_phase += 0.25
+    if osc_phase > 2.0 * math.pi:
+        osc_phase -= 2.0 * math.pi
+    draw()

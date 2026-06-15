@@ -1,27 +1,61 @@
 # CC Mapping Reference
 
-This document defines all MIDI CC assignments for AMYboard control via the OXI e16.
+This document is the frozen baseline MIDI CC map for the AMYboard rebuild.
 
-## Overview
+`sketch.py` is currently considered a dead end and is not the source of truth for control behavior. Until a rebuild is complete, this file is the authoritative mapping reference.
+
+## Frozen Baseline
 
 - **MIDI Channel**: 1
-- **CC Range**: 20-70 (organized by section)
-- **Architecture**: Pages 4, 8, and 12 of the e16 scene map to these CCs
+- **Frozen CC Range**: 20-32, 40-47, 71, 74
+- **Status**: verified as the intended controller layout, not as a verified live implementation
+
+## Frozen CC Assignments
+
+| Knob | Parameter | CC | Range | Notes |
+|------|-----------|----|----|-------|
+| 1 | Osc A Pitch | 20 | 0-127 | Baseline pitch control |
+| 2 | Osc A Wave | 21 | 0-127 | Baseline waveform control |
+| 3 | Osc A Duty | 22 | 0-127 | Baseline pulse-width / duty control |
+| 4 | Osc A Level | 23 | 0-127 | Baseline oscillator level control |
+| 5 | Osc B Pitch | 24 | 0-127 | Baseline pitch control |
+| 6 | Osc B Wave | 25 | 0-127 | Baseline waveform control |
+| 7 | Osc B Duty | 26 | 0-127 | Baseline pulse-width / duty control |
+| 8 | Osc B Level | 27 | 0-127 | Baseline oscillator level control |
+| 9 | Filter Cutoff | 74 | 0-127 | Baseline filter cutoff control |
+| 10 | Filter Resonance | 71 | 0-127 | Baseline filter resonance control |
+| 11 | Filter Envelope Amount | 30 | 0-127 | Baseline filter envelope depth control |
+| 12 | Filter Type | 31 | 0-127 | Baseline filter mode control |
+| 13 | Key Scale | 32 | 0-127 | Baseline filter keyboard tracking control |
+| 14 | VCF Attack | 40 | 0-127 | Baseline filter envelope attack |
+| 15 | VCF Decay | 41 | 0-127 | Baseline filter envelope decay |
+| 16 | VCF Sustain | 42 | 0-127 | Baseline filter envelope sustain |
+| 17 | VCF Release | 43 | 0-127 | Baseline filter envelope release |
+| 18 | VCA Attack | 44 | 0-127 | Baseline amp envelope attack |
+| 19 | VCA Decay | 45 | 0-127 | Baseline amp envelope decay |
+| 20 | VCA Sustain | 46 | 0-127 | Baseline amp envelope sustain |
+| 21 | VCA Release | 47 | 0-127 | Baseline amp envelope release |
+
+## Rebuild Rule
+
+Any future rebuild of `sketch.py` should treat the table above as fixed unless the user explicitly changes the mapping.
+
+## Controller Pages
 
 ## Page 4: Oscillators + Filter
 
 | Knob | Parameter | CC | Range | Notes |
 |------|-----------|----|----|-------|
 | 1 | Osc A Pitch | 20 | 0-127 | 440 Hz at CC 64; -2 to +2 octaves |
-| 2 | Osc A Wave | 21 | 0-127 | Sine, Tri, Saw, Pulse, Noise |
+| 2 | Osc A Wave | 21 | 0-127 | Current sketch uses six equal buckets: Sine, Pulse, Saw Up, Saw Down, Triangle, Noise |
 | 3 | Osc A Duty | 22 | 0-127 | Pulse width; 64 = 50% |
 | 4 | Osc A Level | 23 | 0-127 | Amplitude; 100 ≈ unity |
 | 5 | Osc B Pitch | 24 | 0-127 | 220 Hz at CC 32 (octave below A) |
-| 6 | Osc B Wave | 25 | 0-127 | Sine, Tri, Saw, Pulse, Noise |
+| 6 | Osc B Wave | 25 | 0-127 | Current sketch uses six equal buckets: Sine, Pulse, Saw Up, Saw Down, Triangle, Noise |
 | 7 | Osc B Duty | 26 | 0-127 | Pulse width; 64 = 50% |
 | 8 | Osc B Level | 27 | 0-127 | Amplitude; 100 ≈ unity |
-| 9 | Filter Cutoff | 28 | 0-127 | 100 Hz to 8 kHz; 100 ≈ typical |
-| 10 | Filter Resonance | 29 | 0-127 | Filter Q; 0 = flat, 127 = self-oscillating |
+| 9 | Filter Cutoff | 74 | 0-127 | 50 Hz to 8 kHz; native firmware default |
+| 10 | Filter Resonance | 71 | 0-127 | Native firmware default |
 | 11 | Filter Envelope | 30 | 0-127 | Envelope modulation depth |
 | 12 | Filter Type | 31 | 0-127 | 0-42 = LP, 43-84 = BP, 85-127 = HP |
 | 13 | Key Scale | 32 | 0-127 | Cutoff tracking; 0 = off |
@@ -81,12 +115,15 @@ This document defines all MIDI CC assignments for AMYboard control via the OXI e
 
 ## Waveform Selection
 
-All waveform selectors (Osc A/B Wave, LFO Shape) use:
-- CC 0-25: Sine
-- CC 26-51: Triangle
-- CC 52-76: Sawtooth
-- CC 77-102: Pulse/Square
-- CC 103-127: Noise
+Osc A/B wave selection in the current sketch uses six buckets in this order:
+- CC 0-20: Sine
+- CC 21-41: Pulse
+- CC 42-63: Saw Up
+- CC 64-84: Saw Down
+- CC 85-105: Triangle
+- CC 106-127: Noise
+
+LFO shape selection remains part of the planned / not-yet-implemented control set.
 
 ## Filter Type Selection
 
@@ -94,6 +131,7 @@ Filter Type (CC 31):
 - CC 0-42: Low-pass (default)
 - CC 43-84: Band-pass
 - CC 85-127: High-pass
+
 
 ## Default Values (On Power-Up)
 

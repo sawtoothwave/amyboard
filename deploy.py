@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Deploy sketch.py to AMYboard via REPL
+Deploy sketch.py to AMYboard via a manually pasted MicroPython REPL payload.
 
-This generates a command that can be pasted directly into the MicroPython REPL
-to deploy the sketch to /user/current/sketch.py
+This keeps deployment explicit and simple: generate a board-safe command block,
+paste it into an existing mpremote REPL session, then reset the board.
 """
 
 import base64
 import sys
+
+
+CHUNK_SIZE = 180
 
 def create_deploy_command():
     """Read sketch.py and create a deployable REPL command"""
@@ -22,11 +25,18 @@ def create_deploy_command():
     # Encode the code in base64 to avoid quote/escaping issues
     encoded = base64.b64encode(code.encode('utf-8')).decode('ascii')
     
-    # Create a compact deploy command
-    deploy_cmd = f"""import base64,os
-os.makedirs('/user/current',exist_ok=True)
-with open('/user/current/sketch.py','w') as f:f.write(base64.b64decode('{encoded}').decode('utf-8'))
-print('✓ sketch.py deployed to /user/current/sketch.py')
+    chunks = [encoded[i:i + CHUNK_SIZE] for i in range(0, len(encoded), CHUNK_SIZE)]
+    chunk_list = ',\n'.join(f"    '{chunk}'" for chunk in chunks)
+
+    # Create a REPL-safe deploy command split into manageable chunks.
+    deploy_cmd = f"""chunks = [
+{chunk_list}
+]
+import ubinascii
+f = open('/user/current/sketch.py', 'w')
+f.write(ubinascii.a2b_base64(''.join(chunks)).decode())
+f.close()
+print(len(open('/user/current/sketch.py').read()))
 """
     
     return deploy_cmd, code
@@ -35,11 +45,12 @@ def main():
     deploy_cmd, orig_code = create_deploy_command()
     
     print("=" * 70)
-    print("AMYboard sketch.py Deployment Instructions")
+    print("AMYboard sketch.py Deploy Instructions")
     print("=" * 70)
     print()
-    print("1. Connect to AMYboard REPL using screen:")
-    print("   $ screen /dev/cu.usbmodem11401 115200")
+    print("1. Connect to AMYboard REPL using mpremote:")
+    print("   $ source .venv/bin/activate")
+    print("   $ mpremote connect /dev/cu.usbmodem1101 repl")
     print()
     print("2. You should see the Python >>> prompt")
     print()
@@ -48,12 +59,11 @@ def main():
     print(deploy_cmd)
     print("-" * 70)
     print()
-    print("4. Press Enter. You should see:")
-    print("   ✓ sketch.py deployed to /user/current/sketch.py")
+    print("4. Press Enter. You should see the file size in bytes.")
     print()
-    print("5. Reset the board (press Ctrl-D or physically reset)")
+    print("5. Reset the board (press the physical RST button)")
     print()
-    print("6. Exit screen: Press Ctrl-A, then Ctrl-\\ (or Ctrl-A, then 'quit')")
+    print("6. Exit mpremote REPL with Ctrl-X")
     print()
     print("=" * 70)
     print()

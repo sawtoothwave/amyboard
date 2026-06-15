@@ -6,6 +6,7 @@
 2. Once the user has agreed, make an explicit promise to the user that if you think you need to do something out of scope to make the app better, simpler, more elegant or more robust, that you'll stop working and explain why expanding the scope accords with our organizing principle of lowering cognitive load for new devs and prioritizing simplicity over cleverness.
 3. When you complete a task, after you run tests, ask the user if they want you to "perform a code review and see if any cleanup is required now that this task complete to see if there is anything messy or inelegant?" If they say yes, review uncommitted changes.
 4. Update this document to keep it in parallel with requests the user makes of your behavior.
+5. Whenever a change affects live CC assignments or control behavior in `sketch.py`, update `docs/CC_MAPPING.md` in the same task.
 
 ## User Guidance
 
