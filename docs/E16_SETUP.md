@@ -13,8 +13,8 @@ This guide walks through setting up the OXI e16 to control AMYboard.
 
 The AMYboard control uses three dedicated pages on the e16:
 - **Page 4**: Oscillators + Filter
-- **Page 8**: Modulators (Envelopes + LFO)  
-- **Page 12**: Effects
+- **Page 8**: Envelopes (VCF + VCA)
+- **Page 12**: LFO
 
 Pages 1-3 are reserved for your existing MFT configuration and will be preserved.
 

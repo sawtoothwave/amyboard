@@ -1,25 +1,29 @@
 # AMYboard Sketch
 # DESCRIPTION: 2-oscillator (A/B) analog-style synth matching the frozen CC map.
 #   Stepped musical tuning per osc, 6-way wave buckets (no wavetable/PCM/ALGO),
-#   resonant filter with VCF envelope + key tracking, VCA envelope. 6-voice
-#   polyphony. MIDI ch1 notes (auto-routed to synth 1 by AMY) + CCs (20-32,
-#   40-47, 71, 74) handled via midi.add_callback; CV1 1V/oct + CV2 gate.
+#   resonant filter with VCF envelope + key tracking, VCA envelope, plus a
+#   per-voice LFO routed to pitch, PWM and filter. 6-voice polyphony. MIDI ch1
+#   notes (auto-routed to synth 1 by AMY) + CCs (20-32, 40-47, 71, 74, 76-80)
+#   handled via midi.add_callback; CV1 1V/oct + CV2 gate.
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
 import amy, amyboard, midi, math
 
 SYNTH = 1
 NUM_VOICES = 6
-OSCS_PER_VOICE = 3
+OSCS_PER_VOICE = 4
 
 # Per-voice oscillator layout. Osc 0 is a SILENT "filter head": AMY sums the
 # chained oscillators (A then B) into its buffer, then applies a single shared
 # filter + VCA envelope to that sum. This is the only way one filter can affect
 # both oscillators -- a non-silent head filters only itself and the chained
-# oscillators are mixed in afterward (i.e. unfiltered).
+# oscillators are mixed in afterward (i.e. unfiltered). Osc 3 is a per-voice
+# LFO: it is named as the mod_source of the head + A + B, so AMY keeps it
+# silent and routes its output to their freq/duty/filter_freq 'mod' coefs.
 FILT_OSC = 0
 OSC_A    = 1
 OSC_B    = 2
+LFO_OSC  = 3
 
 # ---------------------------------------------------------------------------
 # Frozen CC map (docs/CC_MAPPING.md). MIDI channel 1.
@@ -45,6 +49,13 @@ CC_VCA_SUS     = 46
 CC_VCA_REL     = 47
 CC_FLT_RES     = 71
 CC_FLT_CUTOFF  = 74
+# LFO controls. Freq (76) and pitch/osc depth (77) use the default AMYboard LFO
+# CCs; waveshape (78), PWM depth (79) and filter depth (80) use spare CCs.
+CC_LFO_FREQ    = 76
+CC_LFO_PITCH   = 77
+CC_LFO_WAVE    = 78
+CC_LFO_PWM     = 79
+CC_LFO_FILT    = 80
 
 # Filter type buckets for CC 31 (4 even bands across 0-127).
 FILTER_TYPES = [amy.FILTER_LPF24, amy.FILTER_LPF, amy.FILTER_BPF, amy.FILTER_HPF]
@@ -69,6 +80,16 @@ RES_MAX = 8.0
 # Envelope time range (ms) for ADSR CCs; quadratic for finer control low down.
 ENV_TIME_MIN_MS = 1
 ENV_TIME_MAX_MS = 5000
+
+# LFO ranges. Rate is logarithmic (CC 76). Depths apply the LFO's bipolar
+# output through each target's 'mod' coef: pitch (CC 77) is quadratic in octave
+# units so low knob = subtle vibrato; PWM (CC 79) sweeps the pulse duty; filter
+# (CC 80) is octave-style depth, matching the filter envelope amount.
+LFO_FREQ_MIN_HZ = 0.05
+LFO_FREQ_MAX_HZ = 20.0
+LFO_PITCH_DEPTH_MAX = 0.5    # octaves (quadratic curve; full = +/- 6 semitones)
+LFO_PWM_DEPTH_MAX   = 0.45   # duty modulation depth around the set duty
+LFO_FILT_DEPTH_MAX  = 2.0    # octaves (matches FLT_ENV_AMT_MAX)
 
 # CV input
 CV_GATE_THRESHOLD = 1.0
@@ -96,6 +117,13 @@ key_scale   = 0.0
 vcf_env = {'a': 5, 'd': 350, 's': 0.2, 'r': 300}
 vca_env = {'a': 5, 'd': 200, 's': 0.85, 'r': 350}
 
+# LFO defaults: depths start at 0 so the LFO is inaudible until a knob is moved.
+lfo_freq        = 5.0
+lfo_wave        = amy.SINE
+lfo_pitch_depth = 0.0
+lfo_pwm_depth   = 0.0
+lfo_filt_depth  = 0.0
+
 cv_gate_active  = False
 cv_current_note = 69
 
@@ -122,11 +150,11 @@ def cc_to_detune_cents(cc):
     if cc <= 51:
         return -700.0                               # perfect fifth down
     if cc <= 59:
-        return -35.0 + (cc - 52) * (30.0 / 7.0)     # fine -35..-5 cents
+        return -35.0 + (cc - 52) * (34.0 / 7.0)     # fine -35..-1 cents
     if cc <= 68:
         return 0.0                                  # dead zone at reference
     if cc <= 76:
-        return 5.0 + (cc - 69) * (30.0 / 7.0)       # fine +5..+35 cents
+        return 1.0 + (cc - 69) * (34.0 / 7.0)       # fine +1..+35 cents
     if cc <= 88:
         return 700.0                                # perfect fifth up
     if cc <= 104:
@@ -177,6 +205,23 @@ def cc_to_time_ms(cc):
     return int(ENV_TIME_MIN_MS + (u * u) * (ENV_TIME_MAX_MS - ENV_TIME_MIN_MS))
 
 
+def cc_to_lfo_freq(cc):
+    return LFO_FREQ_MIN_HZ * math.pow(LFO_FREQ_MAX_HZ / LFO_FREQ_MIN_HZ, cc_unit(cc))
+
+
+def cc_to_lfo_pitch(cc):
+    u = cc_unit(cc)
+    return (u * u) * LFO_PITCH_DEPTH_MAX           # octaves, quadratic
+
+
+def cc_to_lfo_pwm(cc):
+    return cc_unit(cc) * LFO_PWM_DEPTH_MAX
+
+
+def cc_to_lfo_filt(cc):
+    return cc_unit(cc) * LFO_FILT_DEPTH_MAX
+
+
 def cv_volts_to_midi(volts):
     n = int(round(CV1_BASE_NOTE + volts * 12.0))
     return clamp(n, 0, 127)
@@ -187,7 +232,14 @@ def cv_volts_to_midi(volts):
 # ---------------------------------------------------------------------------
 def osc_freq(cents):
     # const in Hz at note 69, note coef 1.0 -> tracks keyboard with cents offset.
-    return {'const': REF_HZ * math.pow(2.0, cents / 1200.0), 'note': 1}
+    # 'mod' adds LFO pitch modulation (vibrato) in unit-per-octave depth.
+    return {'const': REF_HZ * math.pow(2.0, cents / 1200.0), 'note': 1,
+            'mod': lfo_pitch_depth}
+
+
+def osc_duty(duty):
+    # Pulse duty as a constant, plus LFO 'mod' depth for pulse-width modulation.
+    return {'const': clamp(duty, 0.0, 1.0), 'mod': lfo_pwm_depth}
 
 
 def osc_amp(level):
@@ -210,7 +262,8 @@ def flt_bp():
 
 
 def filter_freq_coefs():
-    return {'const': flt_cutoff, 'eg1': flt_env_amt, 'note': key_scale}
+    return {'const': flt_cutoff, 'eg1': flt_env_amt, 'note': key_scale,
+            'mod': lfo_filt_depth}
 
 
 def init_synth():
@@ -226,16 +279,25 @@ def init_synth():
              filter_type=flt_type, filter_freq=filter_freq_coefs(),
              resonance=flt_res,
              bp0=vca_bp(), bp1=flt_bp(),
+             mod_source=LFO_OSC,
              chained_osc=OSC_A)
 
     amy.send(synth=SYNTH, osc=OSC_A,
-             wave=a_wave, freq=osc_freq(a_cents), duty=a_duty,
+             wave=a_wave, freq=osc_freq(a_cents), duty=osc_duty(a_duty),
              amp=osc_amp(a_level),
+             mod_source=LFO_OSC,
              chained_osc=OSC_B)
 
     amy.send(synth=SYNTH, osc=OSC_B,
-             wave=b_wave, freq=osc_freq(b_cents), duty=b_duty,
-             amp=osc_amp(b_level))
+             wave=b_wave, freq=osc_freq(b_cents), duty=osc_duty(b_duty),
+             amp=osc_amp(b_level),
+             mod_source=LFO_OSC)
+
+    # Per-voice LFO. amp=1.0 sets full modulation strength (per-target depth is
+    # set by each 'mod' coef); no vel is sent and it is named as a mod_source,
+    # so AMY keeps it silent and free-running.
+    amy.send(synth=SYNTH, osc=LFO_OSC,
+             wave=lfo_wave, freq=lfo_freq, amp=1.0)
 
 
 def update_filter_freq():
@@ -250,6 +312,20 @@ def update_vcf():
     amy.send(synth=SYNTH, osc=FILT_OSC, bp1=flt_bp())
 
 
+def update_lfo():
+    amy.send(synth=SYNTH, osc=LFO_OSC, wave=lfo_wave, freq=lfo_freq)
+
+
+def update_lfo_pitch():
+    amy.send(synth=SYNTH, osc=OSC_A, freq={'mod': lfo_pitch_depth})
+    amy.send(synth=SYNTH, osc=OSC_B, freq={'mod': lfo_pitch_depth})
+
+
+def update_lfo_pwm():
+    amy.send(synth=SYNTH, osc=OSC_A, duty={'mod': lfo_pwm_depth})
+    amy.send(synth=SYNTH, osc=OSC_B, duty={'mod': lfo_pwm_depth})
+
+
 # ---------------------------------------------------------------------------
 # CC dispatch -- each CC updates only its parameter live (no voice reset, so
 # held notes are never cut off).
@@ -258,6 +334,7 @@ def handle_cc(cc, val):
     global a_cents, a_wave, a_duty, a_level
     global b_cents, b_wave, b_duty, b_level
     global flt_cutoff, flt_res, flt_type, flt_env_amt, key_scale
+    global lfo_freq, lfo_wave, lfo_pitch_depth, lfo_pwm_depth, lfo_filt_depth
 
     if cc == CC_OSC_A_PITCH:
         a_cents = cc_to_detune_cents(val)
@@ -267,7 +344,7 @@ def handle_cc(cc, val):
         amy.send(synth=SYNTH, osc=OSC_A, wave=a_wave)
     elif cc == CC_OSC_A_DUTY:
         a_duty = cc_to_duty(val)
-        amy.send(synth=SYNTH, osc=OSC_A, duty=a_duty)
+        amy.send(synth=SYNTH, osc=OSC_A, duty=osc_duty(a_duty))
     elif cc == CC_OSC_A_LEVEL:
         a_level = cc_unit(val)
         amy.send(synth=SYNTH, osc=OSC_A, amp=osc_amp(a_level))
@@ -279,7 +356,7 @@ def handle_cc(cc, val):
         amy.send(synth=SYNTH, osc=OSC_B, wave=b_wave)
     elif cc == CC_OSC_B_DUTY:
         b_duty = cc_to_duty(val)
-        amy.send(synth=SYNTH, osc=OSC_B, duty=b_duty)
+        amy.send(synth=SYNTH, osc=OSC_B, duty=osc_duty(b_duty))
     elif cc == CC_OSC_B_LEVEL:
         b_level = cc_unit(val)
         amy.send(synth=SYNTH, osc=OSC_B, amp=osc_amp(b_level))
@@ -322,8 +399,21 @@ def handle_cc(cc, val):
     elif cc == CC_VCA_REL:
         vca_env['r'] = cc_to_time_ms(val)
         update_vca()
-
-
+    elif cc == CC_LFO_FREQ:
+        lfo_freq = cc_to_lfo_freq(val)
+        update_lfo()
+    elif cc == CC_LFO_PITCH:
+        lfo_pitch_depth = cc_to_lfo_pitch(val)
+        update_lfo_pitch()
+    elif cc == CC_LFO_WAVE:
+        lfo_wave = cc_to_wave(val)
+        update_lfo()
+    elif cc == CC_LFO_PWM:
+        lfo_pwm_depth = cc_to_lfo_pwm(val)
+        update_lfo_pwm()
+    elif cc == CC_LFO_FILT:
+        lfo_filt_depth = cc_to_lfo_filt(val)
+        update_filter_freq()
 # ---------------------------------------------------------------------------
 # MIDI (channel 1): AMY auto-routes notes to synth 1; this callback only needs
 # to handle Control Change messages. Registered via midi.add_callback so it

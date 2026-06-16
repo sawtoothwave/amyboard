@@ -28,7 +28,7 @@ control surface.
 ### Oxi e16
 
 - **Encoders**: Real-time parameter control via the frozen CC range
-  (20-32, 40-47, 71, 74). See [CC_MAPPING.md](CC_MAPPING.md) for the full map.
+  (20-32, 40-47, 71, 74, 76-80). See [CC_MAPPING.md](CC_MAPPING.md) for the full map.
 - **Buttons / scene pages**: Layout intent is documented under "Controller
   Pages" in [CC_MAPPING.md](CC_MAPPING.md)
 
@@ -38,5 +38,5 @@ control surface.
   voices or cuts held notes.
 - CC value ranges are implementation choices in `sketch.py` and can be retuned
   without changing the frozen CC assignments.
-- Not yet implemented: LFO controls, effects (reverb / echo / chorus), mod
+- Not yet implemented: effects (reverb / echo / chorus), mod
   wheel / pitch bend routing, and onboard OLED/encoder navigation.

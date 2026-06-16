@@ -5,8 +5,8 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 ## Frozen Baseline
 
 - **MIDI Channel**: 1
-- **Frozen CC Range**: 20-32, 40-47, 71, 74
-- **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs. The implementation column below records the live behavior.
+- **Frozen CC Range**: 20-32, 40-47, 71, 74, 76-80
+- **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony, plus a per-voice LFO. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs; the LFO (CC 76-80) modulates pitch, PWM and filter cutoff. The implementation column below records the live behavior.
 
 ## Frozen CC Assignments
 
@@ -33,6 +33,11 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 | 19 | VCA Decay | 45 | 0-127 | Baseline amp envelope decay |
 | 20 | VCA Sustain | 46 | 0-127 | Baseline amp envelope sustain |
 | 21 | VCA Release | 47 | 0-127 | Baseline amp envelope release |
+| 22 | LFO Freq | 76 | 0-127 | Default AMYboard LFO rate control |
+| 23 | LFO → Osc (Pitch) | 77 | 0-127 | Default AMYboard LFO-to-oscillator (vibrato) depth |
+| 24 | LFO Waveshape | 78 | 0-127 | LFO waveform select (spare CC) |
+| 25 | LFO → PWM | 79 | 0-127 | LFO-to-pulse-width depth (spare CC) |
+| 26 | LFO → Filter | 80 | 0-127 | LFO-to-filter-cutoff depth (spare CC) |
 
 ## Live Implementation Notes
 
@@ -51,8 +56,15 @@ These describe how `sketch.py` currently maps each CC (0-127) to an AMY paramete
 | 32 | Key Scale | Filter `note` tracking coefficient, 0.0-1.0 (0 = none, 1 = full keyboard tracking). |
 | 40-43 | VCF A/D/S/R | Filter EG1 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
 | 44-47 | VCA A/D/S/R | Amp EG0 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
+| 76 | LFO Freq | LFO rate, logarithmic ~0.05-20 Hz. |
+| 77 | LFO → Osc (Pitch) | Vibrato depth on Osc A + B, quadratic, 0 to ±6 semitones (0.5 octave). |
+| 78 | LFO Waveshape | Six-wave buckets (same map as CC 21/25): Sine, Pulse, Saw Down, Saw Up, Triangle, Noise. |
+| 79 | LFO → PWM | Pulse-width modulation depth on Osc A + B duty, 0.0-0.45. |
+| 80 | LFO → Filter | Filter-cutoff modulation depth, 0.0-2.0 octaves (matches CC 30 env amount). |
 
 A single shared filter processes both oscillators per voice. Each voice has three oscillators: a `SILENT` filter-head (osc 0) chained to Osc A (osc 1) chained to Osc B (osc 2). AMY sums A and B into the silent head's buffer, then applies the VCA envelope and one filter to that combined signal, so the filter affects Osc A and Osc B equally. Velocity sensitivity and the VCA envelope live on the head; Osc A/B carry steady mix levels. Parameter changes are applied live per-CC, so turning a knob never resets voices or cuts off held notes.
+
+A fourth per-voice oscillator (osc 3) is the LFO. It is named as the `mod_source` of the head, Osc A and Osc B, so AMY keeps it silent and free-running and routes its bipolar output into their `mod` control coefficients: Osc A/B `freq` (vibrato, CC 77), Osc A/B `duty` (PWM, CC 79) and the filter head's `filter_freq` (CC 80). One shared LFO drives all three targets; rate (CC 76) and waveshape (CC 78) are common. LFO depths default to 0, so the LFO is inaudible until a depth knob is moved.
 
 Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison at the center of the tuning map. To reintroduce a per-oscillator reference (for example an octave-down sub on Osc B), change `REF_HZ` handling in `sketch.py`.
 
@@ -91,11 +103,18 @@ These page groupings are retained only as controller-layout intent. They do not 
 - VCA Sustain: CC 46
 - VCA Release: CC 47
 
+### Page 12: LFO
+
+- LFO Freq: CC 76
+- LFO → Osc (Pitch): CC 77
+- LFO Waveshape: CC 78
+- LFO → PWM: CC 79
+- LFO → Filter: CC 80
+
 ## Deferred Controls
 
 The following areas are not part of the frozen baseline and are not implemented in the current build:
 
-- LFO controls
 - Effects controls (reverb / echo / chorus)
 - OLED display and onboard encoder/button navigation
 - Preset save/recall
@@ -109,8 +128,8 @@ The two maps below are the specification the live `sketch.py` implements for the
 The pitch tune controls use a stepped musical map rather than a smooth linear sweep. Both oscillators reference 440 Hz, so the map is unison at center; the same stepped shape applies to each oscillator independently (CC 20 for Osc A, CC 24 for Osc B).
 
 - CC 60-68: dead zone at the reference pitch
-- CC 52-59: fine detune from about -35 cents up to -5 cents
-- CC 69-76: fine detune from about +5 cents up to +35 cents
+- CC 52-59: fine detune from about -35 cents up to -1 cent
+- CC 69-76: fine detune from about +1 cent up to +35 cents
 - CC 40-51: fixed perfect fifth down, about -700 cents
 - CC 77-88: fixed perfect fifth up, about +700 cents
 - CC 24-39: one octave down
