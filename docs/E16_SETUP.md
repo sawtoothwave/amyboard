@@ -67,9 +67,10 @@ Transfer `e16 templates/MFT replace.oxie16` to your e16 using the OXI app or you
 - **CC Channel**: All AMYboard CCs are on MIDI channel 1
 - **Push to Reset**: Pressing any knob returns it to its default value
 - **Frequency Defaults**: 
-  - Osc A pitch → 440 Hz (turn until CC=64)
-  - Osc B pitch → 220 Hz (turn until CC=32)
-- **Persistence**: Settings survive power cycles (stored on AMYboard)
+  - Osc A pitch → 440 Hz (center dead zone, CC 60-68)
+  - Osc B pitch → 440 Hz (center dead zone, CC 60-68)
+  - Both oscillators reference 440 Hz, so they are unison at center; the stepped tuning map adds fifths/octaves away from center.
+- **Persistence**: Knob positions are stored on the e16 scene, not on the AMYboard
 
 ## CC Reference
 
@@ -79,9 +80,9 @@ See [CC_MAPPING.md](CC_MAPPING.md) for complete MIDI CC assignments and default 
 
 The AMYboard runs `sketch.py` which:
 1. Listens to MIDI CCs on channel 1
-2. Maps them to AMY synthesizer parameters
-3. Saves all settings to persistent storage
-4. Restores settings on power-up
+2. Maps them to AMY synthesizer parameters live (no voice reset on change)
+3. Plays channel-1 notes on a 6-voice polyphonic synth
+4. Also supports CV1 (1V/oct pitch) and CV2 (gate) for monophonic CV play
 
 To deploy: Upload `sketch.py` to `/user/current/sketch.py` on the AMYboard.
 

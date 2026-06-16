@@ -54,11 +54,11 @@ These describe how `sketch.py` currently maps each CC (0-127) to an AMY paramete
 
 A single shared filter processes both oscillators per voice. Each voice has three oscillators: a `SILENT` filter-head (osc 0) chained to Osc A (osc 1) chained to Osc B (osc 2). AMY sums A and B into the silent head's buffer, then applies the VCA envelope and one filter to that combined signal, so the filter affects Osc A and Osc B equally. Velocity sensitivity and the VCA envelope live on the head; Osc A/B carry steady mix levels. Parameter changes are applied live per-CC, so turning a knob never resets voices or cuts off held notes.
 
-> Note: the original rebuild intent referenced Osc B to 220 Hz (an octave-down sub). The live build instead references both oscillators to 440 Hz (unison at center) per an explicit design decision; change `REF_HZ` handling in `sketch.py` if a per-oscillator reference is reintroduced.
+Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison at the center of the tuning map. To reintroduce a per-oscillator reference (for example an octave-down sub on Osc B), change `REF_HZ` handling in `sketch.py`.
 
 ## Rebuild Rule
 
-Any future rebuild of `sketch.py` should treat the frozen CC assignment table as fixed unless the user explicitly changes the mapping.
+`sketch.py` is the canonical "last good" implementation. Future enhancements should build on it rather than starting over, and should treat the frozen CC assignment table as fixed unless the user explicitly changes the mapping.
 
 ## Controller Pages
 
@@ -106,9 +106,7 @@ The two maps below are the specification the live `sketch.py` implements for the
 
 ### Stepped Oscillator Tuning
 
-The pitch tune controls use a stepped musical map rather than a smooth linear sweep.
-
-In the live build both oscillators reference 440 Hz (unison at center). The original intent had Osc B reference 220 Hz for an octave-down sub; the same stepped shape applies regardless of reference.
+The pitch tune controls use a stepped musical map rather than a smooth linear sweep. Both oscillators reference 440 Hz, so the map is unison at center; the same stepped shape applies to each oscillator independently (CC 20 for Osc A, CC 24 for Osc B).
 
 - CC 60-68: dead zone at the reference pitch
 - CC 52-59: fine detune from about -35 cents up to -5 cents
