@@ -6,9 +6,9 @@
 
 ```
 Controllers → MIDI → AMYboard → Audio Output
-  ├── Keystep Pro (Keyboard/Gate)      → MIDI Channel 1 (Note On/Off)
-  ├── Hermod+ (Sequencer/Clock)        → MIDI Channel 1 (Note/Clock/CV)
-  └── Oxi e16 (Parameters)             → MIDI Channel 1 (CC 20-32, 40-47, 71, 74, 76-80)
+  ├── Keystep Pro (Keyboard/Gate)      → MIDI Channel 12 (Note On/Off)
+  ├── Hermod+ (Sequencer/Clock)        → MIDI Channel 12 (Note/Clock/CV)
+  └── Oxi e16 (Parameters)             → MIDI Channel 12 (CC 20-32, 40-47, 71, 74, 76-80)
 ```
 
 ### System Architecture
@@ -20,7 +20,7 @@ Controllers → MIDI → AMYboard → Audio Output
 - Persistent storage at `/user/` for configuration
 
 **Control Mapping**
-- E16 pages 4, 8, 12 send MIDI CCs on channel 1
+- E16 pages 4, 8, 12 send MIDI CCs on channel 12
 - The frozen rebuild baseline for CC assignments lives in `docs/CC_MAPPING.md`
 - Pages 1-3 reserved for MFT (Keystep Pro) control
 
@@ -33,7 +33,7 @@ Controllers → MIDI → AMYboard → Audio Output
 - Osc A/B have independent stepped tuning (CC 20/24), six-wave buckets excluding wavetable/PCM/ALGO (CC 21/25), duty (CC 22/26) and mix level (CC 23/27). Both oscillators reference 440 Hz (unison at center).
 - Shared resonant filter with selectable type (CC 31: LPF24/LPF/BPF/HPF), cutoff (CC 74), resonance (CC 71), envelope amount (CC 30), key tracking (CC 32), plus VCF (CC 40-43) and VCA (CC 44-47) ADSR envelopes.
 - Per-voice LFO with rate (CC 76) and six-wave waveshape (CC 78), routed to pitch/vibrato (CC 77), pulse-width (CC 79) and filter cutoff (CC 80) via each target's `mod` coefficient; depths default to 0 so the LFO is silent until a depth knob moves.
-- MIDI channel-1 notes are auto-routed to synth 1 by AMY; CCs are handled via `midi.add_callback(midi_cb)`. CV1 provides 1V/oct monophonic pitch and CV2 a gate, polled from `loop()`.
+- MIDI channel-12 notes are auto-routed to synth 12 by AMY; CCs are handled via `midi.add_callback(midi_cb)`. CV1 provides 1V/oct monophonic pitch and CV2 a gate, polled from `loop()`.
 - Each CC updates only its parameter live, so turning a knob never resets voices or cuts off held notes.
 
 **OXI E16 Configuration**

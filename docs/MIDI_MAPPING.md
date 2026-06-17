@@ -1,7 +1,7 @@
 # MIDI Mapping
 
-All MIDI is received on **channel 1**. AMY auto-routes channel-1 note-on/off to
-synth 1, so the keyboard and sequencer play the polyphonic engine directly.
+All MIDI is received on **channel 12**. AMY auto-routes channel-12 note-on/off to
+synth 12, so the keyboard and sequencer play the polyphonic engine directly.
 Control Changes are handled in `sketch.py` via `midi.add_callback(midi_cb)`.
 
 The authoritative parameter map (which CC drives which synth parameter, value
@@ -13,14 +13,14 @@ control surface.
 
 ### Arturia Keystep Pro
 
-- **Keys**: Polyphonic note input (channel 1) → 6-voice AMY synth
+- **Keys**: Polyphonic note input (channel 12) → 6-voice AMY synth
 - **Velocity**: Drives note-on strength (velocity sensitivity is applied by the
   filter-head oscillator in each voice)
 - **Mod Wheel / Pitch Bend**: Not yet mapped
 
 ### Squarp Hermod+
 
-- **Sequencer Output**: Melodic sequences on channel 1
+- **Sequencer Output**: Melodic sequences on channel 12
 - **Clock**: Sync timing reference (no clock-driven behavior in `sketch.py` yet)
 - **CV**: External CV can reach the board's CV inputs — CV1 is 1V/oct mono pitch
   and CV2 is a gate, polled in `loop()`

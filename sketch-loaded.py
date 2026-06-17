@@ -2,14 +2,16 @@
 # DESCRIPTION: 2-oscillator (A/B) analog-style synth matching the frozen CC map.
 #   Stepped musical tuning per osc, 6-way wave buckets (no wavetable/PCM/ALGO),
 #   resonant filter with VCF envelope + key tracking, VCA envelope, plus a
-#   per-voice LFO routed to pitch, PWM and filter. 6-voice polyphony. MIDI ch1
-#   notes (auto-routed to synth 1 by AMY) + CCs (20-32, 40-47, 71, 74, 76-80)
+#   per-voice LFO routed to pitch, PWM and filter. 6-voice polyphony. MIDI ch12
+#   notes (auto-routed to synth 12 by AMY) + CCs (20-32, 40-47, 71, 74, 76-80)
 #   handled via midi.add_callback; CV1 1V/oct + CV2 gate.
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
 import amy, amyboard, midi, math
 
-SYNTH = 1
+# AMY maps synth numbers 1-16 to MIDI channels 1-16, so synth 12 receives all
+# notes (auto-routed) and is the target for the CC callback below on channel 12.
+SYNTH = 12
 NUM_VOICES = 6
 OSCS_PER_VOICE = 4
 
@@ -26,7 +28,7 @@ OSC_B    = 2
 LFO_OSC  = 3
 
 # ---------------------------------------------------------------------------
-# Frozen CC map (docs/CC_MAPPING.md). MIDI channel 1.
+# Frozen CC map (docs/CC_MAPPING.md). MIDI channel 12.
 # ---------------------------------------------------------------------------
 CC_OSC_A_PITCH = 20
 CC_OSC_A_WAVE  = 21
@@ -101,24 +103,24 @@ CV1_BASE_NOTE = 60
 a_cents = 0.0
 a_wave  = amy.SAW_DOWN
 a_duty  = 0.5
-a_level = 0.80
+a_level = 1.0
 
 b_cents = 0.0
-b_wave  = amy.SAW_UP
+b_wave  = amy.SINE
 b_duty  = 0.5
-b_level = 0.70
+b_level = 0.00
 
-flt_cutoff  = 2500.0
-flt_res     = 1.2
-flt_type    = amy.FILTER_LPF24
+flt_cutoff  = 16000.0
+flt_res     = 0.0
+flt_type    = amy.FILTER_LPF
 flt_env_amt = 0.8
 key_scale   = 0.0
 
-vcf_env = {'a': 5, 'd': 350, 's': 0.2, 'r': 300}
-vca_env = {'a': 5, 'd': 200, 's': 0.85, 'r': 350}
+vcf_env = {'a': 0, 'd': 350, 's': 0.2, 'r': 300}
+vca_env = {'a': 0, 'd': 200, 's': 1, 'r': 350}
 
 # LFO defaults: depths start at 0 so the LFO is inaudible until a knob is moved.
-lfo_freq        = 5.0
+lfo_freq        = 0.0
 lfo_wave        = amy.SINE
 lfo_pitch_depth = 0.0
 lfo_pwm_depth   = 0.0
@@ -267,7 +269,7 @@ def filter_freq_coefs():
 
 
 def init_synth():
-    # Allocate voices once. AMY auto-routes incoming MIDI channel-1 notes to
+    # Allocate voices once. AMY auto-routes incoming MIDI channel-12 notes to
     # this synth; note-ons propagate down the chain (head -> A -> B).
     amy.send(synth=SYNTH, num_voices=0)
     amy.send(synth=SYNTH, num_voices=NUM_VOICES, oscs_per_voice=OSCS_PER_VOICE)
@@ -415,7 +417,7 @@ def handle_cc(cc, val):
         lfo_filt_depth = cc_to_lfo_filt(val)
         update_filter_freq()
 # ---------------------------------------------------------------------------
-# MIDI (channel 1): AMY auto-routes notes to synth 1; this callback only needs
+# MIDI (channel 12): AMY auto-routes notes to synth 12; this callback only needs
 # to handle Control Change messages. Registered via midi.add_callback so it
 # coexists with the firmware's default MIDI dispatch (which owns the low-level
 # tulip.midi_callback hook).
@@ -425,7 +427,7 @@ def midi_cb(m):
         return
     if (m[0] & 0xF0) != 0xB0:        # Control Change only
         return
-    if (m[0] & 0x0F) != 0:           # MIDI channel 1
+    if (m[0] & 0x0F) != 11:          # MIDI channel 12
         return
     handle_cc(m[1], m[2])
 

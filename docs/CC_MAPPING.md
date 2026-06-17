@@ -4,7 +4,7 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 
 ## Frozen Baseline
 
-- **MIDI Channel**: 1
+- **MIDI Channel**: 12
 - **Frozen CC Range**: 20-32, 40-47, 71, 74, 76-80
 - **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony, plus a per-voice LFO. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs; the LFO (CC 76-80) modulates pitch, PWM and filter cutoff. The implementation column below records the live behavior.
 
@@ -127,14 +127,14 @@ The two maps below are the specification the live `sketch.py` implements for the
 
 The pitch tune controls use a stepped musical map rather than a smooth linear sweep. Both oscillators reference 440 Hz, so the map is unison at center; the same stepped shape applies to each oscillator independently (CC 20 for Osc A, CC 24 for Osc B).
 
-- CC 60-68: dead zone at the reference pitch
-- CC 52-59: fine detune from about -35 cents up to -1 cent
-- CC 69-76: fine detune from about +1 cent up to +35 cents
-- CC 40-51: fixed perfect fifth down, about -700 cents
-- CC 77-88: fixed perfect fifth up, about +700 cents
-- CC 24-39: one octave down
-- CC 89-104: one octave up
 - CC 0-23: two octaves down
+- CC 24-39: one octave down
+- CC 40-51: fixed perfect fifth down, about -700 cents
+- CC 52-59: fine detune from about -35 cents up to -1 cent
+- CC 60-68: dead zone at the reference pitch
+- CC 69-76: fine detune from about +1 cent up to +35 cents
+- CC 77-88: fixed perfect fifth up, about +700 cents
+- CC 89-104: one octave up
 - CC 105-127: two octaves up
 
 This stepped map gives a musically useful center detune zone with fast access to fifths and octaves.

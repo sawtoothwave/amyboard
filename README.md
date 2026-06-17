@@ -8,20 +8,28 @@ This project provides instrument/control code for an [AMYboard](https://github.c
 
 ## Current Status
 
-- The current `sketch.py` should be treated as discarded design work, not as a stable synth implementation.
-- The serial deploy and verification workflow is the part of the repo currently considered reliable:
+- `sketch.py` is the canonical instrument implementation: a 2-oscillator (A/B)
+  analog-style synth with 6-voice polyphony, a shared resonant filter with VCF
+  envelope and key tracking, a VCA envelope, and a per-voice LFO routed to
+  pitch, PWM and filter cutoff. It implements the frozen CC map and updates each
+  parameter live (no voice reset, so held notes are never cut off).
+- All MIDI is received on **channel 12**: AMY auto-routes channel-12 notes to
+  synth 12, and Control Changes are handled via `midi.add_callback(midi_cb)`.
+  CV1 provides 1V/oct monophonic pitch and CV2 a gate.
+- The frozen baseline for MIDI CC assignments lives in `docs/CC_MAPPING.md`.
+- The serial deploy and verification workflow is reliable:
 	- `deploy_auto.py`
 	- `verify.py`
 	- `board_serial.py`
-- The frozen rebuild baseline for MIDI CC assignments lives in `docs/CC_MAPPING.md`.
-- The most useful architectural reference for a future rebuild is `amy_patch_examples/sketch_5osc_analog.py`, specifically its explicit Python-defined synth graph.
+- Additional synth graph references live in `amy_patch_examples/`, notably
+  `sketch_5osc_analog.py` and its explicit Python-defined synth graph.
 
 ## Control Setup
 
 - **Keyboard**: Arturia Keystep Pro
 - **Sequencer**: Squarp Hermod+
-- **Parameter Controller**: Oxi One 16
-- **Interface**: MIDI
+- **Parameter Controller**: Oxi e16
+- **Interface**: MIDI (channel 12)
 
 ## Planned Hardware Enhancements
 
@@ -32,7 +40,9 @@ This project provides instrument/control code for an [AMYboard](https://github.c
 
 - [Development Guidelines](docs/AGENTS.md) - Agent collaboration rules and architectural guidance
 - [Architecture](docs/ARCHITECTURE.md) - High-level system design
-- [CC Mapping](docs/CC_MAPPING.md) - Frozen rebuild baseline for controller assignments
+- [CC Mapping](docs/CC_MAPPING.md) - Frozen CC baseline and live parameter behavior
+- [MIDI Mapping](docs/MIDI_MAPPING.md) - Control surface roles and channel assignment
+- [E16 Setup](docs/E16_SETUP.md) - Oxi e16 configuration and deployment notes
 
 ## Resources
 
