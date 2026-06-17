@@ -77,7 +77,7 @@ FLT_ENV_AMT_MAX = 2.0
 
 # Resonance (AMY range 0.5-16); keep the usable musical span.
 RES_MIN = 0.7
-RES_MAX = 8.0
+RES_MAX = 7.0
 
 # Envelope time range (ms) for ADSR CCs; quadratic for finer control low down.
 ENV_TIME_MIN_MS = 1
@@ -113,7 +113,7 @@ b_level = 0.00
 flt_cutoff  = 16000.0
 flt_res     = 0.0
 flt_type    = amy.FILTER_LPF
-flt_env_amt = 0.8
+flt_env_amt = 0.0
 key_scale   = 0.0
 
 vcf_env = {'a': 0, 'd': 350, 's': 0.2, 'r': 300}
