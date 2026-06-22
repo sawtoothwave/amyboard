@@ -20,7 +20,13 @@
 # Dependencies
 node_modules/
 venv/
+.venv/
 .env
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
 
 # IDE
 .vscode/
