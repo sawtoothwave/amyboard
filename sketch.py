@@ -7,7 +7,7 @@
 #   handled via midi.add_callback; CV1 1V/oct + CV2 gate.
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
-import amy, amyboard, midi, math
+import amy, amyboard, midi, math, time
 
 # AMY maps synth numbers 1-16 to MIDI channels 1-16, so synth 12 receives all
 # notes (auto-routed) and is the target for the CC callback below on channel 12.
@@ -17,11 +17,14 @@ OSCS_PER_VOICE = 4
 
 # Per-voice oscillator layout. Osc 0 is a SILENT "filter head": AMY sums the
 # chained oscillators (A then B) into its buffer, then applies a single shared
-# filter + VCA envelope to that sum. This is the only way one filter can affect
-# both oscillators -- a non-silent head filters only itself and the chained
-# oscillators are mixed in afterward (i.e. unfiltered). Osc 3 is a per-voice
-# LFO: it is named as the mod_source of the head + A + B, so AMY keeps it
-# silent and routes its output to their freq/duty/filter_freq 'mod' coefs.
+# filter to that sum. This is the only way one filter can affect both
+# oscillators -- a non-silent head filters only itself and the chained
+# oscillators are mixed in afterward (i.e. unfiltered). The VCA (velocity + amp
+# envelope) lives on the sounding oscs A and B, not the head, so they fade and
+# self-terminate on note-off and can never out-live (and get stranded by) the
+# head's reaper. Osc 3 is a per-voice LFO: it is named as the mod_source of the
+# head + A + B, so AMY keeps it silent and routes its output to their
+# freq/duty/filter_freq 'mod' coefs.
 FILT_OSC = 0
 OSC_A    = 1
 OSC_B    = 2
@@ -76,8 +79,8 @@ CUTOFF_MAX_HZ = 16000.0
 FLT_ENV_AMT_MAX = 2.0
 
 # Resonance (AMY range 0.5-16); keep the usable musical span.
-RES_MIN = 0.7
-RES_MAX = 7.0
+RES_MIN = 0.0
+RES_MAX = 6.0
 
 # Envelope time range (ms) for ADSR CCs; quadratic for finer control low down.
 ENV_TIME_MIN_MS = 1
@@ -96,6 +99,62 @@ LFO_FILT_DEPTH_MAX  = 2.0    # octaves (matches FLT_ENV_AMT_MAX)
 # CV input
 CV_GATE_THRESHOLD = 1.0
 CV1_BASE_NOTE = 60
+
+# ---------------------------------------------------------------------------
+# Display modes. The OLED (firmware-owned amyboard.display) is driven by a
+# pluggable "display mode": exactly one mode is active at a time and owns what
+# the screen shows. The first mode is "CC Monitor" (live CC values); more modes
+# (e.g. a patch view or settings menu, once the push encoder is installed) can
+# be added to DISPLAY_MODES and selected by swapping active_display_mode via
+# set_display_mode().
+#
+# Every mode must respect the same audio-safety rules, because MicroPython runs
+# the whole sketch on one thread and a long OLED blit blocks audio + MIDI:
+#   (1) the MIDI callback only records state (never draws),
+#   (2) loop() drives drawing at a throttled rate (DISPLAY_REFRESH_MS) and only
+#       when content changed,
+#   (3) drawing pushes ONLY the framebuffer rows that changed -- the SSD1327 has
+#       no partial-refresh in firmware, so a full display.show() blits the whole
+#       8KB framebuffer over the 400kHz I2C bus (~150-180ms of blocking time);
+#       _push_rows() windows it to the changed rows (~1KB / ~5-20ms), and
+#       DISPLAY_MAX_ROWS_PER_REFRESH caps rows-per-refresh so a busy screen can
+#       never hold the bus long enough to delay a note-off.
+# ---------------------------------------------------------------------------
+DISPLAY_MAX_LINES   = 6       # rows of CCs shown at once (newest at bottom)
+DISPLAY_REFRESH_MS  = 100     # min gap between refreshes (~10 fps cap)
+DISPLAY_MAX_ROWS_PER_REFRESH = 2  # cap rows blitted per refresh so a busy screen
+                                  # can't hold the I2C bus long enough to delay
+                                  # note-offs; extra changed rows wait for the
+                                  # next refresh (catches up within a few frames)
+CC_EXPIRE_MS        = 6000    # drop a CC from the list this long after last touch
+BOOT_CLEAR_MS       = 3000    # show the firmware boot banner this long, then wipe
+DISPLAY_LINE_H      = 16      # vertical pixels per row
+DISPLAY_TOP_Y       = 4       # y of the first row
+DISPLAY_TEXT_COLOR  = 255     # full-brightness grayscale
+DISPLAY_WIDTH       = 128     # panel width in pixels
+
+# Short labels (<=7 chars) for the frozen CC map; unknown CCs fall back to "CC".
+# Used by the CC Monitor display mode.
+CC_LABELS = {
+    CC_OSC_A_PITCH: 'A PIT',  CC_OSC_A_WAVE: 'A WAV',
+    CC_OSC_A_DUTY:  'A DTY',  CC_OSC_A_LEVEL: 'A LVL',
+    CC_OSC_B_PITCH: 'B PIT',  CC_OSC_B_WAVE: 'B WAV',
+    CC_OSC_B_DUTY:  'B DTY',  CC_OSC_B_LEVEL: 'B LVL',
+    CC_FLT_ENV_AMT: 'F ENV',  CC_FLT_TYPE: 'F TYP',  CC_KEY_SCALE: 'KEY',
+    CC_VCF_ATK: 'VCF A',  CC_VCF_DEC: 'VCF D',
+    CC_VCF_SUS: 'VCF S',  CC_VCF_REL: 'VCF R',
+    CC_VCA_ATK: 'VCA A',  CC_VCA_DEC: 'VCA D',
+    CC_VCA_SUS: 'VCA S',  CC_VCA_REL: 'VCA R',
+    CC_FLT_RES: 'RES',    CC_FLT_CUTOFF: 'CUTOFF',
+    CC_LFO_FREQ: 'LFO HZ',  CC_LFO_PITCH: 'LFO PT',
+    CC_LFO_WAVE: 'LFO WV',  CC_LFO_PWM: 'LFO PW',  CC_LFO_FILT: 'LFO FL',
+}
+
+# Shared display state (owned by the display dispatcher, not by any one mode).
+DISPLAY_OK = False
+_display_last_render = 0      # ticks_ms of the last refresh (throttle gate)
+_boot_ms = 0                  # ticks_ms at display init; gates the boot-banner wipe
+_boot_cleared = False
 
 # ---------------------------------------------------------------------------
 # Live patch state (musical defaults; overwritten by incoming CCs)
@@ -232,6 +291,11 @@ def cv_volts_to_midi(volts):
 # ---------------------------------------------------------------------------
 # AMY graph builders
 # ---------------------------------------------------------------------------
+# Unity pass-through amp for the SILENT filter head: constant 1.0, no velocity
+# or envelope (the VCA lives on A/B). map_60dB_to_01f(1.0) == 1.0, so amp == 1.
+HEAD_AMP = {'const': 1.0, 'vel': 0, 'eg0': 0}
+
+
 def osc_freq(cents):
     # const in Hz at note 69, note coef 1.0 -> tracks keyboard with cents offset.
     # 'mod' adds LFO pitch modulation (vibrato) in unit-per-octave depth.
@@ -245,14 +309,15 @@ def osc_duty(duty):
 
 
 def osc_amp(level):
-    # Per-oscillator mix level as a constant amp coefficient. vel/eg0 are zeroed
-    # so A/B contribute a steady level; velocity and the VCA envelope contour
-    # are applied once, by the SILENT filter head.
-    return {'const': clamp(level, 0.0, 1.0), 'vel': 0, 'eg0': 0}
+    # Per-oscillator amp for the sounding oscs A/B: the mix level (const) is
+    # multiplied by note velocity (vel) and the VCA envelope (eg0 -> bp0). Giving
+    # A/B their own VCA means they fade out and self-terminate on note-off rather
+    # than depending on the SILENT head to silence them.
+    return {'const': clamp(level, 0.0, 1.0), 'vel': 1, 'eg0': 1}
 
 
 def vca_bp():
-    # VCA amplitude envelope (EG0) on the filter head; shapes the summed A+B mix.
+    # VCA amplitude envelope (EG0) carried by oscs A and B; shapes each osc's mix.
     return '%d,1,%d,%g,%d,0' % (vca_env['a'], vca_env['d'],
                                 vca_env['s'], vca_env['r'])
 
@@ -274,25 +339,30 @@ def init_synth():
     amy.send(synth=SYNTH, num_voices=0)
     amy.send(synth=SYNTH, num_voices=NUM_VOICES, oscs_per_voice=OSCS_PER_VOICE)
 
-    # Filter head: SILENT, so A+B sum into its buffer before one shared filter
-    # and the VCA envelope are applied. Velocity sensitivity lives here.
+    # Filter head: SILENT, so A+B sum into its buffer before one shared filter is
+    # applied. The head is a unity pass-through (amp=HEAD_AMP, no VCA envelope);
+    # it carries only the filter and its EG1 filter envelope (bp1). It naturally
+    # falls silent once A+B have faded, so it needs no amp release of its own.
     amy.send(synth=SYNTH, osc=FILT_OSC,
              wave=amy.SILENT,
+             amp=HEAD_AMP,
              filter_type=flt_type, filter_freq=filter_freq_coefs(),
              resonance=flt_res,
-             bp0=vca_bp(), bp1=flt_bp(),
+             bp1=flt_bp(),
              mod_source=LFO_OSC,
              chained_osc=OSC_A)
 
+    # Sounding oscs A and B carry the VCA: velocity + amp envelope (bp0) so they
+    # release and self-terminate on note-off.
     amy.send(synth=SYNTH, osc=OSC_A,
              wave=a_wave, freq=osc_freq(a_cents), duty=osc_duty(a_duty),
-             amp=osc_amp(a_level),
+             amp=osc_amp(a_level), bp0=vca_bp(),
              mod_source=LFO_OSC,
              chained_osc=OSC_B)
 
     amy.send(synth=SYNTH, osc=OSC_B,
              wave=b_wave, freq=osc_freq(b_cents), duty=osc_duty(b_duty),
-             amp=osc_amp(b_level),
+             amp=osc_amp(b_level), bp0=vca_bp(),
              mod_source=LFO_OSC)
 
     # Per-voice LFO. amp=1.0 sets full modulation strength (per-target depth is
@@ -307,11 +377,26 @@ def update_filter_freq():
 
 
 def update_vca():
-    amy.send(synth=SYNTH, osc=FILT_OSC, bp0=vca_bp())
+    # VCA envelope now lives on the sounding oscs, so update both A and B.
+    amy.send(synth=SYNTH, osc=OSC_A, bp0=vca_bp())
+    amy.send(synth=SYNTH, osc=OSC_B, bp0=vca_bp())
 
 
 def update_vcf():
     amy.send(synth=SYNTH, osc=FILT_OSC, bp1=flt_bp())
+
+
+def keep_filter_head_alive():
+    # The SILENT filter head (FILT_OSC) applies the shared filter to the summed
+    # A+B output. If BOTH A and B fall silent, AMY's zero-amp reaper suspends the
+    # head. Raising a level (CC 23/27) then revives just that sounding osc while
+    # the head is still suspended, so for a moment the osc renders directly to
+    # the bus, bypassing the filter. (Loudness is unaffected now that the VCA
+    # travels with the osc -- this only keeps the filter in the path.) Re-
+    # asserting the head's amp revives it (AMY treats an amp change as a wake-up)
+    # on the same control change. Cheap and harmless when the head is already
+    # alive; it never revives a released note (revival needs an unset note_off).
+    amy.send(synth=SYNTH, osc=FILT_OSC, amp=HEAD_AMP)
 
 
 def update_lfo():
@@ -350,6 +435,7 @@ def handle_cc(cc, val):
     elif cc == CC_OSC_A_LEVEL:
         a_level = cc_unit(val)
         amy.send(synth=SYNTH, osc=OSC_A, amp=osc_amp(a_level))
+        keep_filter_head_alive()
     elif cc == CC_OSC_B_PITCH:
         b_cents = cc_to_detune_cents(val)
         amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
@@ -362,6 +448,7 @@ def handle_cc(cc, val):
     elif cc == CC_OSC_B_LEVEL:
         b_level = cc_unit(val)
         amy.send(synth=SYNTH, osc=OSC_B, amp=osc_amp(b_level))
+        keep_filter_head_alive()
     elif cc == CC_FLT_CUTOFF:
         flt_cutoff = cc_to_cutoff(val)
         update_filter_freq()
@@ -429,6 +516,7 @@ def midi_cb(m):
         return
     if (m[0] & 0x0F) != 11:          # MIDI channel 12
         return
+    active_display_mode.on_cc(m[1], m[2])   # cheap: record state for the display
     handle_cc(m[1], m[2])
 
 
@@ -437,10 +525,259 @@ def setup_midi():
 
 
 # ---------------------------------------------------------------------------
+# Display infrastructure (shared by every display mode). All drawing happens via
+# service_display(), called only from loop() -- never from the MIDI callback --
+# and is fully wrapped so a display fault can never disturb audio/MIDI/CV.
+# ---------------------------------------------------------------------------
+def init_display():
+    # The firmware already owns/initializes the panel (it prints the boot
+    # banner), so we just confirm amyboard.display is reachable. We still call
+    # init_display() defensively in case a fresh handle is needed; any error is
+    # swallowed so the synth boots regardless of display state.
+    global DISPLAY_OK, _boot_ms
+    try:
+        amyboard.init_display()
+    except Exception:
+        pass
+    try:
+        DISPLAY_OK = amyboard.display is not None
+    except Exception:
+        DISPLAY_OK = False
+    _boot_ms = time.ticks_ms()
+
+
+def _push_rows(y0, y1):
+    # Windowed refresh: send only framebuffer rows [y0, y1] to the panel instead
+    # of the whole 8KB frame. Only the SSD1327 is handled directly (it lacks a
+    # partial show() in firmware); return False for anything else so the caller
+    # falls back to a normal full refresh. Any failure also falls back.
+    try:
+        hw = amyboard.display._hw
+    except Exception:
+        hw = None
+    if hw is None or not hasattr(hw, 'col_addr') or not hasattr(hw, 'row_addr'):
+        return False
+    try:
+        y0 = max(0, min(127, int(y0)))
+        y1 = max(0, min(127, int(y1)))
+        if y1 < y0:
+            return False
+        row_bytes = hw.width // 2          # 64 bytes/row at 128px wide, 4bpp
+        hw.write_cmd(0x15)                 # SSD1327 SET_COL_ADDR
+        hw.write_cmd(hw.col_addr[0])
+        hw.write_cmd(hw.col_addr[1])
+        hw.write_cmd(0x75)                 # SSD1327 SET_ROW_ADDR
+        hw.write_cmd(y0)
+        hw.write_cmd(y1)
+        hw.write_data(memoryview(hw.buffer)[y0 * row_bytes:(y1 + 1) * row_bytes])
+        return True
+    except Exception:
+        return False
+
+
+def _boot_wipe(now):
+    # One-time boot wipe: leave the firmware banner up for BOOT_CLEAR_MS, then
+    # clear the whole panel once so mode output doesn't overprint leftover
+    # pixels. Returns True while still booting (caller should not draw yet).
+    global _boot_cleared
+    if _boot_cleared:
+        return False
+    if time.ticks_diff(now, _boot_ms) < BOOT_CLEAR_MS:
+        return True
+    try:
+        amyboard.display.fill(0)
+        amyboard.display_refresh()
+    except Exception:
+        pass
+    _boot_cleared = True
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Display modes. Subclass DisplayMode and add an instance to DISPLAY_MODES to
+# make a new screen available; set_display_mode() switches the active one (a
+# future push-encoder menu will call it).
+# ---------------------------------------------------------------------------
+class DisplayMode:
+    # Human-readable name, e.g. for a future mode-select menu.
+    name = 'mode'
+
+    def on_cc(self, cc, val):
+        # Called from the MIDI callback for every channel-12 CC while this mode
+        # is active. Must stay cheap and must NOT draw (record state only).
+        pass
+
+    def on_activate(self):
+        # Called when this mode becomes the active one (e.g. via the menu).
+        # Clear the panel and reset any cached frame so it redraws from scratch.
+        pass
+
+    def render(self, now):
+        # Called from loop() at the throttled refresh rate. Draw to the panel,
+        # pushing only changed rows (see audio-safety rules above).
+        pass
+
+
+class CCMonitorMode(DisplayMode):
+    # Live CC monitor: shows the most-recently-touched CCs and their raw 0-127
+    # values, newest at the bottom, each expiring CC_EXPIRE_MS after its last
+    # touch.
+    name = 'CC Monitor'
+
+    def __init__(self):
+        # entries: insertion-ordered [cc, value, last_touch_ticks_ms]; oldest at
+        # index 0 (top of screen), newest at the end (bottom).
+        self.entries = []
+        self.prev = []        # (cc, value) currently shown, by row
+        self.blanked = False
+
+    def on_cc(self, cc, val):
+        # Update an existing entry in place (so a sweep doesn't reshuffle the
+        # list -> single-row redraw), or append a brand-new CC at the bottom.
+        # render() does the pixel work later.
+        now = time.ticks_ms()
+        for entry in self.entries:
+            if entry[0] == cc:
+                entry[1] = val
+                entry[2] = now
+                return
+        self.entries.append([cc, val, now])
+
+    def on_activate(self):
+        # Clear the panel and force a fresh redraw on the next render().
+        global _display_last_render
+        try:
+            amyboard.display.fill(0)
+            amyboard.display_refresh()
+        except Exception:
+            pass
+        self.prev = []
+        self.blanked = True
+        _display_last_render = time.ticks_ms()
+
+    def _label(self, cc):
+        return CC_LABELS.get(cc, 'CC')
+
+    def _active_lines(self, now):
+        # Expire stale entries (preserving order), drop the oldest from the top
+        # if we exceed the row budget, and return (cc, value) pairs oldest-first
+        # so the newest sits at the bottom and survivors shift up as items above
+        # them fade.
+        i = 0
+        while i < len(self.entries):
+            if time.ticks_diff(now, self.entries[i][2]) > CC_EXPIRE_MS:
+                self.entries.pop(i)
+            else:
+                i += 1
+        while len(self.entries) > DISPLAY_MAX_LINES:
+            self.entries.pop(0)
+        return [(e[0], e[1]) for e in self.entries]
+
+    def render(self, now):
+        # Repaint only the rows that differ from the last frame, capped at
+        # DISPLAY_MAX_ROWS_PER_REFRESH per call, so the I2C bus (and thus the
+        # audio) is held as briefly as possible.
+        d = amyboard.display
+        lines = self._active_lines(now)
+
+        # Idle: no active CCs -> clear just the rows we were using, once.
+        if not lines:
+            if self.blanked:
+                return
+            if self.prev:
+                span = DISPLAY_TOP_Y + len(self.prev) * DISPLAY_LINE_H
+                d.fill_rect(0, DISPLAY_TOP_Y, DISPLAY_WIDTH,
+                            len(self.prev) * DISPLAY_LINE_H, 0)
+                if not _push_rows(DISPLAY_TOP_Y, span - 1):
+                    amyboard.display_refresh()
+            self.blanked = True
+            self.prev = []
+            return
+
+        # Nothing visible changed since last frame.
+        if lines == self.prev:
+            return
+
+        rows = max(len(lines), len(self.prev))
+        # Track which rows have been committed so deferred ones retry next call.
+        new_prev = list(self.prev)
+        if len(new_prev) < len(lines):
+            new_prev += [None] * (len(lines) - len(new_prev))
+        pushed = 0
+        for i in range(rows):
+            if pushed >= DISPLAY_MAX_ROWS_PER_REFRESH:
+                break                          # defer the rest to the next refresh
+            new = lines[i] if i < len(lines) else None
+            old = self.prev[i] if i < len(self.prev) else None
+            if new == old:
+                continue
+            y = DISPLAY_TOP_Y + i * DISPLAY_LINE_H
+            d.fill_rect(0, y, DISPLAY_WIDTH, DISPLAY_LINE_H, 0)
+            if new is not None:
+                cc, v = new
+                d.text('%-3d %-6s %3d' % (cc, self._label(cc), v),
+                       0, y, DISPLAY_TEXT_COLOR)
+            # Push just this one row, so non-contiguous changes never drag
+            # unchanged rows along (the bounding-span trap that let a busy
+            # screen blit the whole frame and stall audio/MIDI).
+            if not _push_rows(y, y + DISPLAY_LINE_H - 1):
+                amyboard.display_refresh()
+            new_prev[i] = new
+            pushed += 1
+        # Drop trailing rows that were removed and have now been cleared.
+        while len(new_prev) > len(lines) and new_prev[-1] is None:
+            new_prev.pop()
+        self.prev = new_prev
+        self.blanked = False
+
+
+# Available display modes. A future push-encoder menu will index this list to
+# let the user pick which one drives the OLED.
+CC_MONITOR_MODE = CCMonitorMode()
+DISPLAY_MODES = [CC_MONITOR_MODE]
+
+# The mode currently driving the OLED. Defaults to the CC monitor; swap it with
+# set_display_mode() (no menu yet, so this is the only active mode for now).
+active_display_mode = CC_MONITOR_MODE
+
+
+def set_display_mode(mode):
+    # Switch the active display mode (intended for a future encoder menu). Clears
+    # the panel and lets the incoming mode redraw from scratch.
+    global active_display_mode
+    active_display_mode = mode
+    if DISPLAY_OK:
+        try:
+            mode.on_activate()
+        except Exception:
+            pass
+
+
+def service_display():
+    # Throttled dispatch to the active display mode: handles the one-time boot
+    # wipe, bounds the refresh rate, and routes drawing to whatever mode is
+    # currently selected. Any mode error is swallowed so audio/MIDI/CV continue.
+    global _display_last_render
+    if not DISPLAY_OK:
+        return
+    now = time.ticks_ms()
+    if _boot_wipe(now):
+        return
+    if time.ticks_diff(now, _display_last_render) < DISPLAY_REFRESH_MS:
+        return
+    try:
+        active_display_mode.render(now)
+    except Exception:
+        pass
+    _display_last_render = now
+
+
+# ---------------------------------------------------------------------------
 # Boot
 # ---------------------------------------------------------------------------
 init_synth()
 setup_midi()
+init_display()
 
 
 def loop():
@@ -449,20 +786,23 @@ def loop():
     try:
         cv1 = amyboard.cv_in(0)
         cv2 = amyboard.cv_in(1)
+
+        gate_high = cv2 >= CV_GATE_THRESHOLD
+        new_note = cv_volts_to_midi(cv1)
+
+        if gate_high and not cv_gate_active:
+            cv_current_note = new_note
+            cv_gate_active = True
+            amy.send(synth=SYNTH, note=cv_current_note, vel=0.8)
+        elif gate_high and cv_gate_active and new_note != cv_current_note:
+            amy.send(synth=SYNTH, note=cv_current_note, vel=0)
+            cv_current_note = new_note
+            amy.send(synth=SYNTH, note=cv_current_note, vel=0.8)
+        elif not gate_high and cv_gate_active:
+            cv_gate_active = False
+            amy.send(synth=SYNTH, note=cv_current_note, vel=0)
     except Exception:
-        return
+        pass
 
-    gate_high = cv2 >= CV_GATE_THRESHOLD
-    new_note = cv_volts_to_midi(cv1)
-
-    if gate_high and not cv_gate_active:
-        cv_current_note = new_note
-        cv_gate_active = True
-        amy.send(synth=SYNTH, note=cv_current_note, vel=0.8)
-    elif gate_high and cv_gate_active and new_note != cv_current_note:
-        amy.send(synth=SYNTH, note=cv_current_note, vel=0)
-        cv_current_note = new_note
-        amy.send(synth=SYNTH, note=cv_current_note, vel=0.8)
-    elif not gate_high and cv_gate_active:
-        cv_gate_active = False
-        amy.send(synth=SYNTH, note=cv_current_note, vel=0)
+    # Display last so a CV read error never blocks the screen, and vice versa.
+    service_display()

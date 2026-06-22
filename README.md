@@ -41,6 +41,7 @@ This project provides instrument/control code for an [AMYboard](https://github.c
 - [Development Guidelines](docs/AGENTS.md) - Agent collaboration rules and architectural guidance
 - [Architecture](docs/ARCHITECTURE.md) - High-level system design
 - [CC Mapping](docs/CC_MAPPING.md) - Frozen CC baseline and live parameter behavior
+- [Display Modes](docs/DISPLAY_MODES.md) - Pluggable OLED display modes (CC Monitor, etc.)
 - [MIDI Mapping](docs/MIDI_MAPPING.md) - Control surface roles and channel assignment
 - [E16 Setup](docs/E16_SETUP.md) - Oxi e16 configuration and deployment notes
 
