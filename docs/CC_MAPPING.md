@@ -5,8 +5,8 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 ## Frozen Baseline
 
 - **MIDI Channel**: 12
-- **Frozen CC Range**: 20-32, 40-47, 71, 74, 76-80
-- **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony, plus a per-voice LFO. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs; the LFO (CC 76-80) modulates pitch, PWM and filter cutoff. The implementation column below records the live behavior.
+- **Frozen CC Range**: 20-32, 40-47, 71, 74, 76-82
+- **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony, plus a per-voice LFO. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs; the LFO (CC 76-82) modulates pitch, PWM, filter cutoff and per-oscillator amplitude (tremolo). The implementation column below records the live behavior.
 
 ## Frozen CC Assignments
 
@@ -38,6 +38,8 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 | 24 | LFO Waveshape | 78 | 0-127 | LFO waveform select (spare CC) |
 | 25 | LFO → PWM | 79 | 0-127 | LFO-to-pulse-width depth (spare CC) |
 | 26 | LFO → Filter | 80 | 0-127 | LFO-to-filter-cutoff depth (spare CC) |
+| 27 | LFO → Osc A Amp (Tremolo) | 81 | 0-127 | LFO-to-Osc-A amplitude (tremolo) depth (spare CC) |
+| 28 | LFO → Osc B Amp (Tremolo) | 82 | 0-127 | LFO-to-Osc-B amplitude (tremolo) depth (spare CC) |
 
 ## Live Implementation Notes
 
@@ -61,10 +63,12 @@ These describe how `sketch.py` currently maps each CC (0-127) to an AMY paramete
 | 78 | LFO Waveshape | Six-wave buckets (same map as CC 21/25): Sine, Pulse, Saw Down, Saw Up, Triangle, Noise. |
 | 79 | LFO → PWM | Pulse-width modulation depth on Osc A + B duty, 0.0-0.45. |
 | 80 | LFO → Filter | Filter-cutoff modulation depth, 0.0-2.0 octaves (matches CC 30 env amount). |
+| 81 | LFO → Osc A Amp (Tremolo) | Downward tremolo depth on Osc A, 0.0-0.5. The LFO modulates Osc A's amplitude (via its amp `mod` coef) so the peak never exceeds Osc A's set level and the trough ducks toward silence at full depth (never above level, never below 0). |
+| 82 | LFO → Osc B Amp (Tremolo) | Downward tremolo depth on Osc B, 0.0-0.5 (independent of Osc A; same bounded `mod`-coef routing). |
 
 A single shared filter processes both oscillators per voice. Each voice has three oscillators: a `SILENT` filter-head (osc 0) chained to Osc A (osc 1) chained to Osc B (osc 2). AMY sums A and B into the silent head's buffer, then applies one filter to that combined signal, so the filter affects Osc A and Osc B equally. Velocity sensitivity and the VCA (amp) envelope live on Osc A/B themselves, so each sounding oscillator fades and self-terminates on note-off rather than relying on the head to silence it (this prevents occasional stuck/over-sustained notes). The head is a unity pass-through that carries only the filter and its EG1 filter envelope. Parameter changes are applied live per-CC, so turning a knob never resets voices or cuts off held notes.
 
-A fourth per-voice oscillator (osc 3) is the LFO. It is named as the `mod_source` of the head, Osc A and Osc B, so AMY keeps it silent and free-running and routes its bipolar output into their `mod` control coefficients: Osc A/B `freq` (vibrato, CC 77), Osc A/B `duty` (PWM, CC 79) and the filter head's `filter_freq` (CC 80). One shared LFO drives all three targets; rate (CC 76) and waveshape (CC 78) are common. LFO depths default to 0, so the LFO is inaudible until a depth knob is moved.
+A fourth per-voice oscillator (osc 3) is the LFO. It is named as the `mod_source` of the head, Osc A and Osc B, so AMY keeps it silent and free-running and routes its bipolar output into their `mod` control coefficients: Osc A/B `freq` (vibrato, CC 77), Osc A/B `duty` (PWM, CC 79), the filter head's `filter_freq` (CC 80) and Osc A/B `amp` (tremolo, CC 81 for A and CC 82 for B, independent depths). One shared LFO drives all targets; rate (CC 76) and waveshape (CC 78) are common. Because the tremolo is applied inside AMY's audio engine (the LFO feeds the amp `mod` coef, ramped at the audio block rate), it is perfectly smooth — unlike trying to automate the level CC from a ~15 Hz sketch loop, which stair-steps ("zippers"). AMY's amp `mod` is logarithmic (`amp = level × vel × eg0 × 10**(3 × depth × lfo)`), so the sketch pre-scales each osc's base amp by `10**(-3 × depth)`: this makes the tremolo strictly *downward*, with the LFO peak landing exactly on the oscillator's set level and the trough ducking toward 0 — it never boosts above the level. LFO depths default to 0, so the LFO is inaudible until a depth knob is moved.
 
 Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison at the center of the tuning map. To reintroduce a per-oscillator reference (for example an octave-down sub on Osc B), change `REF_HZ` handling in `sketch.py`.
 
@@ -110,6 +114,8 @@ These page groupings are retained only as controller-layout intent. They do not 
 - LFO Waveshape: CC 78
 - LFO → PWM: CC 79
 - LFO → Filter: CC 80
+- LFO → Osc A Amp (Tremolo): CC 81
+- LFO → Osc B Amp (Tremolo): CC 82
 
 ## Deferred Controls
 

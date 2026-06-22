@@ -98,7 +98,12 @@ class BoardSerialSession:
         return self._read_until_idle(timeout)
 
     def _read_until_prompt(self, timeout, idle_window=0.2):
-        output = self._read_until(idle_window=idle_window, timeout=timeout)
+        # Wait specifically for the REPL prompt token. The running sketch keeps
+        # executing in the background on this firmware (Ctrl-C does not kill it),
+        # so its output interleaves with ours in bursts; idle-based stopping
+        # would bail during a gap before the prompt arrives. Anchoring on the
+        # prompt token reads through that chatter until the REPL is actually back.
+        output = self._read_until(idle_window=idle_window, timeout=timeout, until=PROMPT)
         if PROMPT not in output:
             raise BoardSerialError('Board did not return to the MicroPython prompt.')
         return output.decode('utf-8', errors='replace')
@@ -107,10 +112,11 @@ class BoardSerialSession:
         output = self._read_until(idle_window=idle_window, timeout=timeout)
         return output.decode('utf-8', errors='replace')
 
-    def _read_until(self, idle_window, timeout):
+    def _read_until(self, idle_window, timeout, until=None):
         deadline = time.monotonic() + timeout
         last_data_at = None
         chunks = []
+        buffer = b''
 
         while time.monotonic() < deadline:
             waiting = self.serial.in_waiting or 1
@@ -118,9 +124,17 @@ class BoardSerialSession:
             if data:
                 chunks.append(data)
                 last_data_at = time.monotonic()
+                if until is not None:
+                    buffer += data
+                    if until in buffer:
+                        return b''.join(chunks)
                 continue
 
-            if last_data_at is not None and (time.monotonic() - last_data_at) >= idle_window:
+            # With an explicit sentinel, idle gaps are expected (background sketch
+            # output is bursty); keep reading until the token appears or we time
+            # out. Without one, fall back to idle-based stopping as before.
+            if until is None and last_data_at is not None \
+                    and (time.monotonic() - last_data_at) >= idle_window:
                 return b''.join(chunks)
 
         if chunks:
