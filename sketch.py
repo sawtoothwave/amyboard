@@ -356,10 +356,23 @@ def filter_freq_coefs():
 
 
 def init_synth():
+    # Respond on MIDI channel 12 ONLY. AMY auto-routes MIDI channel N to synth N,
+    # and the firmware allocates a default instrument on synth 1 (MIDI channel 1)
+    # at boot. Since this sketch lives on synth 12, that default channel-1 synth
+    # would survive and sound whenever channel-1 notes arrive. Silence every synth
+    # except ours by zeroing its voice count -- a synth with no voices cannot
+    # allocate an incoming note, so those channels stay quiet.
+    for other in range(1, 17):
+        if other != SYNTH:
+            amy.send(synth=other, num_voices=0)
+
     # Allocate voices once. AMY auto-routes incoming MIDI channel-12 notes to
     # this synth; note-ons propagate down the chain (head -> A -> B).
     amy.send(synth=SYNTH, num_voices=0)
     amy.send(synth=SYNTH, num_voices=NUM_VOICES, oscs_per_voice=OSCS_PER_VOICE)
+    # Belt-and-suspenders: keep synth 12 from grabbing notes on channels that have
+    # no dedicated synth, so it only ever responds to its own channel 12.
+    amy.send(synth=SYNTH, grab_midi_notes=0)
 
     # Filter head: SILENT, so A+B sum into its buffer before one shared filter is
     # applied. The head is a unity pass-through (amp=HEAD_AMP, no VCA envelope);

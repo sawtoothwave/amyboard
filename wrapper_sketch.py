@@ -33,9 +33,13 @@ import os
 # --- Config -----------------------------------------------------------------
 STATE_FILE = '/user/launcher_state'   # flash: always writable, survives reboot
 # Candidate sketch folders, in priority order. The first one that exists (and,
-# preferably, already holds a .py) wins, so sketches can live on the SD card or
-# on internal flash. Add any number of NN_name.py files there.
-SKETCH_DIRS = ('/sd/sketches', '/user/sketches', '/sketches')
+# preferably, already holds a .py) wins. Internal flash (/user/sketches) is
+# listed first: it is always writable over the serial REPL, so sketches can be
+# deployed straight to the board with deploy_auto.py and never need the SD card.
+# (The board's FatFs can read but not write the 128 GB exFAT SD card, so /sd is
+# kept only as an optional read-only archive fallback.) Add any number of
+# NN_name.py files to the chosen folder.
+SKETCH_DIRS = ('/user/sketches', '/sd/sketches', '/sketches')
 MENU_STATE = 'menu'
 
 # Adafruit Seesaw rotary encoder + push button (front-panel I2C).

@@ -2,12 +2,12 @@
 
 The AMYboard OLED (firmware-owned `amyboard.display`) is driven by a pluggable
 **display mode**. Exactly one mode is active at a time and owns what the screen
-shows. The active mode is held in `active_display_mode` in `sketch.py` and can
+shows. The active mode is held in `active_display_mode` in `sketches/01_polysynth.py` and can
 be swapped with `set_display_mode()` (intended for a future push-encoder menu).
 
 ## Architecture
 
-A display mode is a subclass of `DisplayMode` (in `sketch.py`) implementing three
+A display mode is a subclass of `DisplayMode` (in `sketches/01_polysynth.py`) implementing three
 methods:
 
 | Method | Called from | Responsibility |
@@ -47,7 +47,7 @@ on the control surface, each touched CC appears on its own row showing:
 ```
 
 For example, turning the filter cutoff knob shows `74  CUTOFF  92`. Short labels
-come from the `CC_LABELS` map in `sketch.py` (which mirrors the frozen CC map in
+come from the `CC_LABELS` map in `sketches/01_polysynth.py` (which mirrors the frozen CC map in
 [CC_MAPPING.md](CC_MAPPING.md)); an unmapped CC falls back to the label `CC`.
 
 Behavior:
@@ -69,7 +69,7 @@ patch.
 
 ## Adding a mode
 
-1. Subclass `DisplayMode` in `sketch.py` and implement `on_cc`, `render`, and
+1. Subclass `DisplayMode` in `sketches/01_polysynth.py` and implement `on_cc`, `render`, and
    `on_activate`, following the audio-safety rules above (draw via `_push_rows()`,
    keep `on_cc` cheap).
 2. Add an instance to the `DISPLAY_MODES` list.

@@ -1,8 +1,11 @@
 # MIDI Mapping
 
-All MIDI is received on **channel 12**. AMY auto-routes channel-12 note-on/off to
-synth 12, so the keyboard and sequencer play the polyphonic engine directly.
-Control Changes are handled in `sketch.py` via `midi.add_callback(midi_cb)`.
+All MIDI is received on **channel 12 only**. AMY maps synth number N to MIDI
+channel N, so the engine lives on synth 12 and auto-routes channel-12 note-on/off
+directly. `init_synth()` zeroes the voice count of every other synth (including
+the firmware's default synth on channel 1), so notes on any channel but 12 stay
+silent. Control Changes are handled in `sketches/01_polysynth.py` via
+`midi.add_callback(midi_cb)`.
 
 The authoritative parameter map (which CC drives which synth parameter, value
 ranges, stepped tuning, and wave buckets) lives in
@@ -21,7 +24,7 @@ control surface.
 ### Squarp Hermod+
 
 - **Sequencer Output**: Melodic sequences on channel 12
-- **Clock**: Sync timing reference (no clock-driven behavior in `sketch.py` yet)
+- **Clock**: Sync timing reference (no clock-driven behavior in the sketch yet)
 - **CV**: External CV can reach the board's CV inputs — CV1 is 1V/oct mono pitch
   and CV2 is a gate, polled in `loop()`
 
@@ -36,7 +39,7 @@ control surface.
 
 - Each CC updates only its own parameter live, so moving a control never resets
   voices or cuts held notes.
-- CC value ranges are implementation choices in `sketch.py` and can be retuned
+- CC value ranges are implementation choices in `sketches/01_polysynth.py` and can be retuned
   without changing the frozen CC assignments.
 - Not yet implemented: effects (reverb / echo / chorus), mod
   wheel / pitch bend routing, and onboard OLED/encoder navigation.

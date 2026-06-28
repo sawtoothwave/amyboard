@@ -78,26 +78,29 @@ See [CC_MAPPING.md](CC_MAPPING.md) for complete MIDI CC assignments and default 
 
 ## AMYboard Sketch
 
-The AMYboard runs `sketch.py` which:
+The AMYboard runs `sketches/01_polysynth.py` which:
 1. Listens to MIDI CCs on channel 12
 2. Maps them to AMY synthesizer parameters live (no voice reset on change)
 3. Plays channel-12 notes on a 6-voice polyphonic synth
 4. Also supports CV1 (1V/oct pitch) and CV2 (gate) for monophonic CV play
 
-To deploy: Upload `sketch.py` to `/user/current/sketch.py` on the AMYboard.
+To deploy: `python deploy_auto.py --sketch sketches/01_polysynth.py` writes it to
+internal flash (`/user/sketches/`), which the wrapper launcher loads from. See
+`DEPLOYMENT_COMMAND.txt`. (Sketches go to flash, not the SD card, which the board
+can read but not write.)
 
 ## Troubleshooting
 
 ### E16 pages show, but knobs don't control anything
-1. Check MIDI channel (should be 1)
+1. Check MIDI channel (should be 12)
 2. Verify USB connection between e16 and AMYboard
 3. Check AMYboard logs (connect via `mpremote` and look for errors)
 
 ### Settings don't persist across power cycles
 1. Verify `/user/` directory exists on AMYboard
-2. Check for write permission issues in `sketch.py`
+2. Check for write permission issues in `sketches/01_polysynth.py`
 3. Look at `amyboard_state.json` on the device
 
 ### Wrong frequency mappings
-1. Edit the frequency range in `sketch.py` function `cc_to_freq()`
+1. Edit the frequency range in `sketches/01_polysynth.py` function `cc_to_freq()`
 2. Adjust default CC values in `e16-config/amyboard.json`

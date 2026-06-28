@@ -1,14 +1,30 @@
-One-command AMYboard deploy:
+AMYboard deploy (no SD card needed)
 
-python deploy_auto.py
+Sketches are deployed to INTERNAL FLASH (/user/sketches). The board's FatFs can
+read but not write the large exFAT SD card, so flash is the canonical, directly
+writable location. The wrapper launcher loads from /user/sketches first.
+
+Deploy a sketch to flash and verify it byte-for-byte:
+    python deploy_auto.py --sketch sketches/01_polysynth.py
+  -> writes /user/sketches/01_polysynth.py
+
+Deploy AND boot straight into it (fast iteration loop):
+    python deploy_auto.py --sketch sketches/01_polysynth.py --activate
+  -> also sets /user/launcher_state to the sketch and resets the board
+
+(Re)deploy the global wrapper launcher (the firmware boot file). Rarely needed:
+    python deploy_auto.py --sketch wrapper_sketch.py --dest /user/current/sketch.py --loaded launcher-loaded.py
 
 Notes:
 - Auto-detects the AMYboard USB serial port on macOS.
-- Sends sketch.py over the MicroPython REPL in paste mode using short base64 chunks.
-- Writes directly to /user/current/sketch.py to avoid the web editor's live knob-state splicing.
-- Soft-resets the board after a successful upload.
+- Sends the file over the MicroPython REPL in paste mode using short base64
+  chunks, creates the destination folder, then reads it back and confirms the
+  board copy is identical to the local file.
+- Default destination is /user/sketches/<basename of --sketch>.
 
-Optional:
-- python deploy_auto.py --port /dev/cu.usbmodem1101
-- python deploy_auto.py --sketch sketch.py
-- python deploy_auto.py --no-reset
+Optional flags:
+- --port /dev/cu.usbmodem1101   (skip auto-detect)
+- --dest /user/sketches/foo.py  (override destination path)
+- --activate                    (set launcher_state to this sketch + reset)
+- --no-reset                    (skip the final board reset)
+- --loaded path.py              (save the board readback locally for debugging)
