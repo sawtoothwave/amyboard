@@ -7,7 +7,62 @@
 #   handled via midi.add_callback; CV1 1V/oct + CV2 gate.
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
-import amy, amyboard, midi, math, time
+import amy, amyboard, midi, math, time, json
+
+# --- Launcher integration ---------------------------------------------------
+# The global launcher (wrapper_sketch.py) exec's this sketch with a `launcher`
+# object injected into our namespace. It is the SOLE encoder reader and feeds us
+# abstract input events -- launcher.delta (detents), launcher.click (short
+# press), launcher.back (hold = pop one of our menu levels) -- while reading
+# launcher.menu_depth to know how deep our own menu is (0 = playing); once we
+# report depth 0 a further hold escapes out to the GLOBAL menu. launcher.repaint
+# is set True after a Resume so we redraw the screen the overlay clobbered.
+# If this sketch is ever run WITHOUT the launcher (e.g. straight from the REPL),
+# fall back to an inert stub so the synth still boots and plays; only the
+# encoder-driven menu goes dark.
+try:
+    launcher
+except NameError:
+    class _NoLauncher:
+        delta = 0
+        click = False
+        back = False
+        menu_depth = 0
+        repaint = False
+        resumed = False
+    launcher = _NoLauncher()
+
+# --- Persistent settings ----------------------------------------------------
+# A tiny JSON dict in internal flash (always writable at runtime, survives
+# reboot/reload) remembering user choices like the selected display mode. Writes
+# happen only on explicit selection -- never per frame -- so flash wear is a
+# non-issue. Stage 3 (MIDI channel) reuses this same store.
+SETTINGS_FILE = '/user/polysynth_settings.json'
+
+
+def _load_settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+_settings = _load_settings()
+
+
+def _set_setting(key, value):
+    # Update one key and persist. Guarded so a flash-write fault never disturbs
+    # audio/MIDI -- the setting just won't survive the next reboot.
+    _settings[key] = value
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(_settings, f)
+    except Exception:
+        pass
 
 # AMY maps synth numbers 1-16 to MIDI channels 1-16, so synth 12 receives all
 # notes (auto-routed) and is the target for the CC callback below on channel 12.
@@ -646,6 +701,64 @@ def _boot_wipe(now):
 
 
 # ---------------------------------------------------------------------------
+# Progressive framebuffer flush. A full 128x128 refresh blits ~8KB over the
+# 400kHz I2C bus (~150-180ms) and blocks the single MicroPython thread long
+# enough to drop a note-off. These helpers zero and/or push the framebuffer in
+# bounded row BANDS spread across successive loop() calls, so no single refresh
+# exceeds a few tens of ms (the same budget a two-row menu redraw already uses).
+# Used when entering a display mode (which must clear the previous screen) and by
+# the menu's full repaint.
+# ---------------------------------------------------------------------------
+FLUSH_BAND_ROWS = 12         # pixel-rows pushed per loop() while flushing (~19ms)
+_flush_active = False
+_flush_y = 0
+_flush_y1 = 127
+
+
+def _begin_flush(y0, y1):
+    # Schedule a progressive push of framebuffer rows [y0, y1] across loop calls.
+    global _flush_active, _flush_y, _flush_y1
+    _flush_active = True
+    _flush_y = max(0, min(127, int(y0)))
+    _flush_y1 = max(0, min(127, int(y1)))
+
+
+def _begin_clear():
+    # Zero the framebuffer (cheap RAM op) and schedule a progressive blit of the
+    # cleared panel, so entering a display mode never stalls audio with one big
+    # refresh.
+    if not DISPLAY_OK:
+        return
+    try:
+        amyboard.display.fill(0)
+    except Exception:
+        return
+    _begin_flush(0, 127)
+
+
+def _service_flush():
+    # Push one band per call. Returns True while a flush is still in progress so
+    # the caller defers its own drawing until the panel is settled.
+    global _flush_active, _flush_y
+    if not _flush_active:
+        return False
+    a = _flush_y
+    b = min(_flush_y1, a + FLUSH_BAND_ROWS - 1)
+    if not _push_rows(a, b):
+        # Panel can't do windowed pushes -> one full refresh and give up chunking.
+        try:
+            amyboard.display_refresh()
+        except Exception:
+            pass
+        _flush_active = False
+        return True
+    _flush_y = b + 1
+    if _flush_y > _flush_y1:
+        _flush_active = False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Display modes. Subclass DisplayMode and add an instance to DISPLAY_MODES to
 # make a new screen available; set_display_mode() switches the active one (a
 # future push-encoder menu will call it).
@@ -696,13 +809,9 @@ class CCMonitorMode(DisplayMode):
         self.entries.append([cc, val, now])
 
     def on_activate(self):
-        # Clear the panel and force a fresh redraw on the next render().
+        # Progressively clear the panel and force a fresh redraw on next render().
         global _display_last_render
-        try:
-            amyboard.display.fill(0)
-            amyboard.display_refresh()
-        except Exception:
-            pass
+        _begin_clear()
         self.prev = []
         self.blanked = True
         _display_last_render = time.ticks_ms()
@@ -783,10 +892,84 @@ class CCMonitorMode(DisplayMode):
         self.blanked = False
 
 
-# Available display modes. A future push-encoder menu will index this list to
-# let the user pick which one drives the OLED.
+class ScreensaverMode(DisplayMode):
+    # Minimal screensaver: a small dot drifting around the panel. Only the band
+    # of rows spanning the dot's old + new position is pushed each step, so the
+    # I2C bus (and audio) is never held for a full-frame blit.
+    name = 'Screensaver'
+    SIZE = 6
+    STEP_MS = 120
+
+    def __init__(self):
+        self.x = DISPLAY_WIDTH // 2
+        self.y = 64
+        self.dx = 3
+        self.dy = 2
+        self.last = 0
+
+    def on_activate(self):
+        global _display_last_render
+        _begin_clear()
+        self.last = 0
+        _display_last_render = time.ticks_ms()
+
+    def render(self, now):
+        if time.ticks_diff(now, self.last) < self.STEP_MS:
+            return
+        self.last = now
+        d = amyboard.display
+        ox, oy = self.x, self.y
+        nx, ny = ox + self.dx, oy + self.dy
+        if nx < 0 or nx > DISPLAY_WIDTH - self.SIZE:
+            self.dx = -self.dx
+            nx = ox + self.dx
+        if ny < 0 or ny > 127 - self.SIZE:
+            self.dy = -self.dy
+            ny = oy + self.dy
+        self.x, self.y = nx, ny
+        d.fill_rect(ox, oy, self.SIZE, self.SIZE, 0)
+        d.fill_rect(nx, ny, self.SIZE, self.SIZE, DISPLAY_TEXT_COLOR)
+        y0 = min(oy, ny)
+        y1 = max(oy, ny) + self.SIZE - 1
+        if not _push_rows(y0, y1):
+            amyboard.display_refresh()
+
+
+class OscilloscopeMode(DisplayMode):
+    # Placeholder: a real scope needs a tap into AMY's output samples, which is
+    # not wired up yet. Selectable so the menu is complete, but it only shows a
+    # one-time notice and idles (no per-frame work, no bus load).
+    name = 'Oscilloscope'
+
+    def __init__(self):
+        self.drawn = False
+
+    def on_activate(self):
+        global _display_last_render
+        self.drawn = False
+        _begin_clear()
+        _display_last_render = time.ticks_ms()
+
+    def render(self, now):
+        if self.drawn:
+            return
+        self.drawn = True
+        try:
+            d = amyboard.display
+            d.text('OSCILLOSCOPE', 0, 44, DISPLAY_TEXT_COLOR)
+            d.text('not available yet', 0, 64, 110)
+            if not _push_rows(40, 79):
+                amyboard.display_refresh()
+        except Exception:
+            pass
+
+
+# Available display modes. The on-device menu (see SketchMenu) indexes this list
+# to let the user pick which one drives the OLED.
 CC_MONITOR_MODE = CCMonitorMode()
-DISPLAY_MODES = [CC_MONITOR_MODE]
+SCREENSAVER_MODE = ScreensaverMode()
+OSCILLOSCOPE_MODE = OscilloscopeMode()
+DISPLAY_MODES = [CC_MONITOR_MODE, SCREENSAVER_MODE, OSCILLOSCOPE_MODE]
 
 # The mode currently driving the OLED. Defaults to the CC monitor; swap it with
 # set_display_mode() (no menu yet, so this is the only active mode for now).
@@ -794,7 +977,7 @@ active_display_mode = CC_MONITOR_MODE
 
 
 def set_display_mode(mode):
-    # Switch the active display mode (intended for a future encoder menu). Clears
+    # Switch the active display mode (called by the menu's mode picker). Clears
     # the panel and lets the incoming mode redraw from scratch.
     global active_display_mode
     active_display_mode = mode
@@ -803,6 +986,21 @@ def set_display_mode(mode):
             mode.on_activate()
         except Exception:
             pass
+
+
+def _restore_display_mode():
+    # On boot, re-select the mode saved by the last _pick_mode() so the panel
+    # comes back the way the user left it. Matched by name (robust to list
+    # reordering); unknown/missing -> keep the default. No on_activate() here --
+    # loop()'s first service_display() draws it after the boot wipe.
+    global active_display_mode
+    name = _settings.get('display_mode')
+    if not name:
+        return
+    for m in DISPLAY_MODES:
+        if m.name == name:
+            active_display_mode = m
+            return
 
 
 def service_display():
@@ -815,6 +1013,8 @@ def service_display():
     now = time.ticks_ms()
     if _boot_wipe(now):
         return
+    if _service_flush():        # progressive clear/flush in progress -> defer
+        return
     if time.ticks_diff(now, _display_last_render) < DISPLAY_REFRESH_MS:
         return
     try:
@@ -825,14 +1025,226 @@ def service_display():
 
 
 # ---------------------------------------------------------------------------
+# On-device menu (encoder-driven). Reachable by a short CLICK while playing and
+# owns the OLED while open. It follows the launcher's universal rule -- turn =
+# scroll, click = select / drill in, hold = back out one level -- but the
+# launcher delivers those to us as launcher.delta / .click / .back, and we
+# report our nesting via launcher.menu_depth so that a hold past our top level
+# escapes to the GLOBAL menu. Rendering mirrors the launcher's own menu: a full
+# repaint on each navigation step (blits happen only on discrete input, never
+# continuously, so audio is disturbed at most briefly while navigating).
+# ---------------------------------------------------------------------------
+MENU_LINE_H = 12
+MENU_TOP_Y = 18
+MENU_VISIBLE = 8
+MENU_LABEL_MAX = 18
+MENU_IDLE_MS = 10000     # auto-close the menu to the display mode after this idle
+
+
+class _MenuLevel:
+    __slots__ = ('title', 'items', 'idx')
+
+    def __init__(self, title, items):
+        self.title = title
+        # items: list of (label, callback_or_None). None = non-selectable line.
+        self.items = items if items else [('(empty)', None)]
+        self.idx = 0
+
+
+class SketchMenu:
+    def __init__(self):
+        self.stack = []          # empty => closed (playing)
+        self.dirty = False
+        self._needs_clear = True # force a full repaint (vs per-row diff) next draw
+        self._prev = None        # last drawn frame, for row-level diffing
+
+    @property
+    def is_open(self):
+        return len(self.stack) > 0
+
+    @property
+    def depth(self):
+        return len(self.stack)
+
+    @property
+    def cur(self):
+        return self.stack[-1]
+
+    def open(self):
+        self.stack = [self._root()]
+        self.dirty = True
+        self._needs_clear = True
+
+    def close(self):
+        self.stack = []
+
+    def _root(self):
+        return _MenuLevel('POLYSYNTH', [
+            ('MIDI Control', self._todo),
+            ('Presets', self._open_presets),
+            ('Display Mode', self._open_display),
+            ('MIDI Channel', self._todo),
+            ('Resume Playing', self.close),
+        ])
+
+    def _open_presets(self):
+        # Stage 4 replaces these leaves with the real save/load flows.
+        self.stack.append(_MenuLevel('PRESETS', [
+            ('Save State as Preset', self._todo),
+            ('Load Preset', self._todo),
+        ]))
+        self.dirty = True
+        self._needs_clear = True
+
+    def _open_display(self):
+        items = [(m.name, (lambda m=m: self._pick_mode(m))) for m in DISPLAY_MODES]
+        self.stack.append(_MenuLevel('DISPLAY MODE', items))
+        self.dirty = True
+        self._needs_clear = True
+
+    def _pick_mode(self, mode):
+        set_display_mode(mode)
+        _set_setting('display_mode', mode.name)   # remember across reboot/reload
+        self.close()             # close so the chosen mode is immediately visible
+
+    def _todo(self):
+        self.stack.append(_MenuLevel('COMING SOON', [('(not built yet)', None)]))
+        self.dirty = True
+        self._needs_clear = True
+
+    def handle(self, delta, click, back):
+        if not self.is_open:
+            return
+        if back:                 # hold: pop one level (may close the menu)
+            self.stack.pop()
+            self.dirty = True
+            self._needs_clear = True
+            return
+        lvl = self.cur
+        if delta:
+            n = len(lvl.items)
+            lvl.idx = (lvl.idx + delta) % n
+            self.dirty = True
+        if click:
+            _, cb = lvl.items[lvl.idx]
+            if cb:
+                cb()
+                self.dirty = True
+
+    def _draw_row(self, d, y, kind, payload):
+        d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
+        if kind == 't':
+            d.text(payload, 0, y, 255)
+        else:
+            sel, label = payload
+            if sel:
+                d.text('>', 0, y, 255)
+                d.text(label[:MENU_LABEL_MAX], 12, y, 255)
+            else:
+                d.text(label[:MENU_LABEL_MAX], 12, y, 110)
+
+    def render(self):
+        # If a progressive full-repaint flush is in flight, keep pushing bands
+        # and defer any new drawing until the panel is settled.
+        if _flush_active:
+            _service_flush()
+            return
+        if not self.dirty or not self.is_open:
+            return
+        self.dirty = False
+        try:
+            d = amyboard.display
+            lvl = self.cur
+            n = len(lvl.items)
+            start = 0
+            if n > MENU_VISIBLE:
+                start = lvl.idx - MENU_VISIBLE // 2
+                if start < 0:
+                    start = 0
+                if start > n - MENU_VISIBLE:
+                    start = n - MENU_VISIBLE
+            # Current frame = title row + visible item rows, as diffable tuples.
+            frame = [(0, 't', lvl.title)]
+            y = MENU_TOP_Y
+            i = start
+            while i < n and i < start + MENU_VISIBLE:
+                frame.append((y, 'i', (i == lvl.idx, lvl.items[i][0])))
+                y += MENU_LINE_H
+                i += 1
+            # Full repaint on open / level change (clears whatever was on screen
+            # before), pushed progressively in bands so audio isn't stalled.
+            # Otherwise push ONLY the rows that changed -- a cursor move touches
+            # just two rows -- so navigating never holds the I2C bus for long.
+            if self._needs_clear or self._prev is None or len(self._prev) != len(frame):
+                d.fill(0)
+                for (ry, kind, payload) in frame:
+                    self._draw_row(d, ry, kind, payload)
+                _begin_flush(0, 127)
+                self._needs_clear = False
+            else:
+                for idx in range(len(frame)):
+                    if frame[idx] != self._prev[idx]:
+                        ry, kind, payload = frame[idx]
+                        self._draw_row(d, ry, kind, payload)
+                        if not _push_rows(ry, ry + MENU_LINE_H - 1):
+                            amyboard.display_refresh()
+            self._prev = frame
+        except Exception:
+            pass
+
+
+menu = SketchMenu()
+_prev_menu_open = False
+_last_input_ms = 0
+
+
+def _pump_menu():
+    # Feed the launcher's abstract input to the menu, report our depth, and flag
+    # a repaint whenever we drop back to playing so the display mode redraws over
+    # the menu's leftover pixels. After MENU_IDLE_MS with no encoder input the
+    # menu auto-closes back to the active (selected) display mode.
+    global _prev_menu_open, _last_input_ms
+    now = time.ticks_ms()
+    # Returning from the global overlay: close our own menu so Resume always
+    # lands on playing, repaint the display mode, and start a fresh idle window.
+    if launcher.resumed:
+        launcher.resumed = False
+        menu.close()
+        launcher.repaint = True
+        _last_input_ms = now
+        _prev_menu_open = False
+    if launcher.delta or launcher.click or launcher.back:
+        _last_input_ms = now
+    if menu.is_open:
+        menu.handle(launcher.delta, launcher.click, launcher.back)
+        if menu.is_open and time.ticks_diff(now, _last_input_ms) >= MENU_IDLE_MS:
+            menu.close()         # idle timeout -> show the active display mode
+    elif launcher.click or launcher.delta:   # a click OR a turn opens our menu
+        menu.open()              # the opening input just opens (no scroll yet)
+    if _prev_menu_open and not menu.is_open:
+        launcher.repaint = True
+    _prev_menu_open = menu.is_open
+    launcher.menu_depth = menu.depth
+
+
+def _force_display_redraw():
+    if DISPLAY_OK:
+        try:
+            active_display_mode.on_activate()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Boot
 # ---------------------------------------------------------------------------
 init_synth()
 setup_midi()
 init_display()
+_restore_display_mode()
 
 
-def loop():
+def _service_cv():
     # Monophonic CV: CV1 = 1V/oct pitch, CV2 = gate.
     global cv_gate_active, cv_current_note
     try:
@@ -855,6 +1267,25 @@ def loop():
             amy.send(synth=SYNTH, note=cv_current_note, vel=0)
     except Exception:
         pass
+
+
+def loop():
+    # Drive the encoder-driven menu from the launcher's input events first.
+    _pump_menu()
+
+    # The instrument stays live even while the menu is open: keep servicing CV
+    # (notes/audio also keep running via the MIDI callback regardless).
+    _service_cv()
+
+    if menu.is_open:
+        menu.render()                # the menu owns the OLED while open
+        return
+
+    # Playing: after returning from our menu or a global Resume, repaint once so
+    # the display mode redraws over any leftover menu/overlay pixels.
+    if launcher.repaint:
+        launcher.repaint = False
+        _force_display_redraw()
 
     # Display last so a CV read error never blocks the screen, and vice versa.
     service_display()

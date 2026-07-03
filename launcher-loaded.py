@@ -2,9 +2,8 @@
 # ============================================================================
 # This single file is the PERMANENT launcher. It is deployed to
 # /user/current/sketch.py (the file the firmware boots) and is never
-# overwritten. Instead of swapping the booted file, it reads a tiny state file
-# to decide, on each cold boot, whether to show the global menu or run a sketch
-# that lives on the SD card.
+# overwritten. On each cold boot it reads a tiny state file to decide whether to
+# show the global menu or run a chosen sketch from flash.
 #
 # Firmware execution model (verified against the working sketch.py + the
 # amy_patch_examples encoder sketch): the firmware runs this file's top-level
@@ -12,19 +11,66 @@
 # run our own `while True` loop -- doing so would block MIDI/audio servicing and
 # hang the deploy readback.
 #
-# Two modes, chosen at boot from STATE_FILE:
-#   "menu"        -> draw the wrapper menu; encoder turn/click/hold navigates.
-#   "<name>.py"   -> mount SD and exec /sd/sketches/<name>.py. That sketch's own
-#                    module-level loop() is then driven from our loop().
+# Runtime states (no reset between the first two):
+#   sketch  : a sketch is exec'd and resident; its module-level loop() is driven
+#             from our loop(). Its MIDI callback + audio keep running.
+#   overlay : the GLOBAL menu is drawn OVER a still-resident sketch. We stop
+#             calling the sketch's loop() (display/CV pause) but its MIDI
+#             callback + audio stay live, so held notes never drop. Choosing
+#             "Resume" just flips back to `sketch` -- no reset, instant.
+#   menu    : cold boot with no sketch resident -> the global menu with only
+#             "Load Sketch".
 #
-# Transitions are a clean cold boot (machine.reset()), which gives each side a
-# fresh AMY/display state (brief audio dropout is accepted, per design):
-#   menu  : click a sketch     -> write its filename to STATE_FILE -> reset.
-#   sketch: long-press encoder -> write "menu" to STATE_FILE       -> reset.
+# Only ONE transition resets the board: "Load Sketch" -> write the choice to
+# STATE_FILE -> machine.reset(). The reset is REQUIRED for correctness, not just
+# cleanliness: exec'ing a new sketch without a reset would leave the previous
+# sketch's midi.add_callback registered, so two synths would answer MIDI. A cold
+# boot tears the old namespace + callbacks down.
 #
-# The launcher owns the loop, so the long-press "home" gesture is GLOBAL: any
-# sketch can be exited back to the menu without the sketch implementing
-# anything. A loaded sketch (e.g. 01_polysynth.py) therefore needs no changes.
+# --- Universal navigation gesture -------------------------------------------
+# ONE rule everywhere: click goes IN, hold backs OUT.
+#   turn  : scroll within a menu.
+#   click : enter / select / drill in.
+#   hold  : auto-REPEATS -- each ~600 ms of continuous hold acts once more.
+#
+#   From "playing" (no menu open) the three obvious gestures -- turn, click, and
+#   a short hold -- ALL open the sketch's own menu. Once a menu is open, a hold
+#   backs out one level per tick, so continuing to hold from playing escalates
+#   to the global menu. The ladder, deepest -> shallowest:
+#
+#     name-entry -> sub-menu -> sketch (root) menu -> GLOBAL menu
+#                                    ^ first hold from playing opens this
+#
+#   A hold out of the sketch's root menu goes straight to global -- it never
+#   stops at "playing", so it never flashes the display mode on the way. Playing
+#   is the closed-menu base state, re-entered by a "Resume Playing" click or the
+#   menu's idle timeout.
+#
+# --- Launcher <-> sketch contract -------------------------------------------
+# To make hold-to-back-out span both the sketch's own menu levels AND the final
+# hop out to global without two encoder readers fighting, the LAUNCHER is the
+# single encoder reader. It injects a `launcher` object into each sketch's
+# namespace and feeds the sketch abstract input events through it:
+#   launcher.delta      : encoder detents this tick (signed)   [launcher -> sketch]
+#   launcher.click      : True on a short click this tick       [launcher -> sketch]
+#   launcher.back       : True this tick when the sketch should pop ONE of its
+#                         own menu levels (a hold while menu_depth > 0)
+#                                                               [launcher -> sketch]
+#   launcher.menu_depth : how many levels deep the sketch's own menu is; 0 means
+#                         "playing". The sketch keeps this current.
+#                                                               [sketch -> launcher]
+#   launcher.repaint    : launcher sets True on Resume so the sketch forces a
+#                         full redraw (the overlay clobbered the screen).
+#                                                               [launcher -> sketch]
+#   launcher.resumed    : launcher sets True on Resume so the sketch closes its
+#                         own menu -> Resume always returns to playing.
+#                                                               [launcher -> sketch]
+# A hold becomes `back` when the sketch still has menu levels to pop, or opens
+# the global overlay once the sketch is back at playing (menu_depth == 0). A
+# sketch that ignores all of this (never sets menu_depth) simply jumps straight
+# to the global menu on a hold -- which is exactly right, since it has nothing of
+# its own to back out of. Sketches must consume input via these fields rather
+# than reading the encoder directly, so there is only ever one reader.
 # ============================================================================
 
 import amy, amyboard, machine, time
@@ -45,7 +91,7 @@ MENU_STATE = 'menu'
 # Adafruit Seesaw rotary encoder + push button (front-panel I2C).
 SEESAW_ADDR = 0x36
 BTN_PIN = 24
-HOLD_MS = 600            # long-press threshold = "back / home"
+HOLD_MS = 600            # one "back out a level" pop per this much continuous hold
 INVERT_DELTA = False     # turning the encoder right scrolls DOWN the list
 
 # OLED layout (128x128 SSD1327, firmware-owned amyboard.display).
@@ -55,13 +101,104 @@ VISIBLE = 8
 LABEL_MAX = 18
 
 
+# --- Audio-safe display push ------------------------------------------------
+# A full 128x128 refresh blits ~8KB over the 400kHz I2C bus (~150ms) and blocks
+# the single MicroPython thread long enough to drop a note-off -- and the global
+# menu opens OVER a sketch that is still sounding. So the menu never does a full
+# refresh: it pushes only changed rows (a cursor move touches two), and its full
+# repaint (open / level change) is flushed in bounded row BANDS spread across
+# successive loop() calls so no single blit exceeds a few tens of ms.
+FLUSH_BAND_ROWS = 12         # pixel-rows pushed per loop() while flushing (~19ms)
+_flush_active = False
+_flush_y = 0
+_flush_y1 = 127
+
+
+def _push_rows(y0, y1):
+    # Windowed refresh: send only framebuffer rows [y0, y1] (SSD1327 only).
+    # Return False for anything else / on any error so the caller can fall back.
+    try:
+        hw = amyboard.display._hw
+    except Exception:
+        hw = None
+    if hw is None or not hasattr(hw, 'col_addr') or not hasattr(hw, 'row_addr'):
+        return False
+    try:
+        y0 = max(0, min(127, int(y0)))
+        y1 = max(0, min(127, int(y1)))
+        if y1 < y0:
+            return False
+        row_bytes = hw.width // 2          # 64 bytes/row at 128px wide, 4bpp
+        hw.write_cmd(0x15)                 # SSD1327 SET_COL_ADDR
+        hw.write_cmd(hw.col_addr[0])
+        hw.write_cmd(hw.col_addr[1])
+        hw.write_cmd(0x75)                 # SSD1327 SET_ROW_ADDR
+        hw.write_cmd(y0)
+        hw.write_cmd(y1)
+        hw.write_data(memoryview(hw.buffer)[y0 * row_bytes:(y1 + 1) * row_bytes])
+        return True
+    except Exception:
+        return False
+
+
+def _begin_flush(y0, y1):
+    global _flush_active, _flush_y, _flush_y1
+    _flush_active = True
+    _flush_y = max(0, min(127, int(y0)))
+    _flush_y1 = max(0, min(127, int(y1)))
+
+
+def _service_flush():
+    # Push one band per call; return True while a flush is still in progress.
+    global _flush_active, _flush_y
+    if not _flush_active:
+        return False
+    a = _flush_y
+    b = min(_flush_y1, a + FLUSH_BAND_ROWS - 1)
+    if not _push_rows(a, b):
+        try:
+            amyboard.display_refresh()        # non-SSD1327 fallback
+        except Exception:
+            pass
+        _flush_active = False
+        return True
+    _flush_y = b + 1
+    if _flush_y > _flush_y1:
+        _flush_active = False
+    return True
+
+
+# --- Launcher <-> sketch API -------------------------------------------------
+class _LauncherAPI:
+    """Injected into every sketch's namespace as the global `launcher`. Carries
+    abstract encoder events into the sketch and the sketch's menu depth back
+    out. See the contract block at the top of this file."""
+    __slots__ = ('delta', 'click', 'back', 'menu_depth', 'repaint', 'resumed')
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.delta = 0
+        self.click = False
+        self.back = False
+        self.menu_depth = 0
+        self.repaint = False
+        self.resumed = False
+
+
+_api = _LauncherAPI()
+
+
 # --- Encoder ----------------------------------------------------------------
 class Encoder:
     """Reads the Seesaw encoder count + button and reports (delta, click, hold).
 
     delta : signed detents since the last update (CW positive after invert).
-    click : True once on a SHORT press release (select / enter).
-    hold  : True once when the press passes HOLD_MS (back / home).
+    click : True once on a SHORT press release (no hold fired) -> select / enter.
+    hold  : True once per HOLD_MS of continuous press (auto-repeat) -> back out a
+            level. Firing repeatedly while held is what lets one long press walk
+            out through several levels.
     All hardware access is guarded so a missing/unplugged accessory degrades to
     "no input" instead of crashing the launcher.
     """
@@ -74,7 +211,7 @@ class Encoder:
         self._last = self._count()
         self._btn_down = False
         self._down_at = 0
-        self._hold_fired = False
+        self._hold_count = 0     # number of HOLD_MS pops already fired this press
 
     def _count(self):
         try:
@@ -102,14 +239,15 @@ class Encoder:
         if pressed and not self._btn_down:
             self._btn_down = True
             self._down_at = now
-            self._hold_fired = False
+            self._hold_count = 0
         elif pressed and self._btn_down:
-            if not self._hold_fired and time.ticks_diff(now, self._down_at) >= HOLD_MS:
+            n = time.ticks_diff(now, self._down_at) // HOLD_MS
+            if n > self._hold_count:
+                self._hold_count = n     # one pop per HOLD_MS boundary crossed
                 hold = True
-                self._hold_fired = True
         elif (not pressed) and self._btn_down:
             self._btn_down = False
-            if not self._hold_fired:
+            if self._hold_count == 0:    # released before any hold -> a click
                 click = True
         return delta, click, hold
 
@@ -126,18 +264,25 @@ class _Level:
 
 
 class Menu:
-    """Stack-based menu. turn = scroll, click = enter/select, hold = up a level."""
+    """Stack-based global menu. turn = scroll, click = enter/select,
+    hold = back out one level (pop the stack)."""
 
-    def __init__(self, on_launch):
+    def __init__(self, on_launch, on_resume=None, has_sketch=False):
         self.on_launch = on_launch
+        self.on_resume = on_resume
+        self.has_sketch = has_sketch
         self.stack = [self._root()]
         self.dirty = True
+        self._needs_clear = True     # full repaint (vs per-row diff) next draw
+        self._prev = None            # last drawn frame, for row-level diffing
 
     def _root(self):
-        return _Level('AMYBOARD', [
-            ('Load Sketch', self._open_sketches),
-            ('Display Mode', self._open_display),
-        ])
+        items = []
+        # "Resume" only exists when a sketch is resident to return to.
+        if self.has_sketch and self.on_resume:
+            items.append(('Resume', self.on_resume))
+        items.append(('Load Sketch', self._open_sketches))
+        return _Level('AMYBOARD', items)
 
     @property
     def cur(self):
@@ -160,11 +305,7 @@ class Menu:
         else:
             items = [('(no sketches found)', None)]
         self.stack.append(_Level('LOAD SKETCH', items))
-
-    def _open_display(self):
-        # TODO: wire up real display modes (idle takeover). Navigation only.
-        modes = ['CC Monitor', 'CV Monitor', 'Screensaver', 'Oscilloscope', 'Blank']
-        self.stack.append(_Level('DISPLAY MODE', [(m, None) for m in modes]))
+        self._needs_clear = True
 
     def update(self, delta, click, hold):
         lvl = self.cur
@@ -173,24 +314,42 @@ class Menu:
             lvl.idx = (lvl.idx + delta) % n
             self.dirty = True
         if hold:
+            # Back out one level. At the root there is nothing to pop -> the
+            # global menu is the top of the ladder.
             if len(self.stack) > 1:
                 self.stack.pop()
                 self.dirty = True
+                self._needs_clear = True
         elif click:
             _, cb = lvl.items[lvl.idx]
             if cb:
                 cb()
                 self.dirty = True
 
+    def _draw_row(self, d, y, kind, payload):
+        d.fill_rect(0, y, 128, LINE_H, 0)
+        if kind == 't':
+            d.text(payload, 0, y, 255)
+        else:
+            sel, label = payload
+            if sel:
+                d.text('>', 0, y, 255)
+                d.text(label[:LABEL_MAX], 12, y, 255)
+            else:
+                d.text(label[:LABEL_MAX], 12, y, 110)
+
     def render(self):
+        # If a progressive full-repaint flush is in flight, keep pushing bands
+        # and defer any new drawing until the panel is settled.
+        if _flush_active:
+            _service_flush()
+            return
         if not self.dirty:
             return
         self.dirty = False
         try:
             d = amyboard.display
-            d.fill(0)
             lvl = self.cur
-            d.text(lvl.title, 0, 0, 255)
             n = len(lvl.items)
             start = 0
             if n > VISIBLE:
@@ -199,18 +358,31 @@ class Menu:
                     start = 0
                 if start > n - VISIBLE:
                     start = n - VISIBLE
+            # Current frame = title row + visible item rows, as diffable tuples.
+            frame = [(0, 't', lvl.title)]
             y = TOP_Y
             i = start
             while i < n and i < start + VISIBLE:
-                label, _ = lvl.items[i]
-                if i == lvl.idx:
-                    d.text('>', 0, y, 255)
-                    d.text(label[:LABEL_MAX], 12, y, 255)
-                else:
-                    d.text(label[:LABEL_MAX], 12, y, 110)
+                frame.append((y, 'i', (i == lvl.idx, lvl.items[i][0])))
                 y += LINE_H
                 i += 1
-            amyboard.display_refresh()
+            # Full repaint on open / level change, pushed progressively in bands
+            # so audio under the overlay isn't stalled. Otherwise push ONLY the
+            # rows that changed (a cursor move touches two).
+            if self._needs_clear or self._prev is None or len(self._prev) != len(frame):
+                d.fill(0)
+                for (ry, kind, payload) in frame:
+                    self._draw_row(d, ry, kind, payload)
+                _begin_flush(0, 127)
+                self._needs_clear = False
+            else:
+                for idx in range(len(frame)):
+                    if frame[idx] != self._prev[idx]:
+                        ry, kind, payload = frame[idx]
+                        self._draw_row(d, ry, kind, payload)
+                        if not _push_rows(ry, ry + LINE_H - 1):
+                            amyboard.display_refresh()
+            self._prev = frame
         except Exception:
             # No display attached yet -> menu still works headlessly.
             pass
@@ -266,39 +438,58 @@ def _resolve_sketch_dir():
 
 
 def launch_sketch(name):
-    """Menu click callback: persist choice and cold-boot into the sketch."""
+    """Menu click callback: persist choice and cold-boot into the sketch. The
+    reset is required so the previous sketch's MIDI callback is torn down."""
     _write_state(name)
     machine.reset()
 
 
-def go_home():
-    """Global long-press: persist 'menu' and cold-boot back to the menu."""
-    _write_state(MENU_STATE)
-    machine.reset()
+def resume_sketch():
+    """Menu 'Resume' click: dismiss the overlay and hand control back to the
+    still-resident sketch. No reset -> held notes/audio never dropped. `resumed`
+    tells the sketch to close its own menu (Resume returns to playing) and
+    `repaint` tells it to redraw the screen the overlay clobbered."""
+    global _overlay
+    _overlay = False
+    _api.resumed = True
+    _api.repaint = True
 
 
-_mode = None          # 'menu' or 'sketch'
+_mode = None          # 'menu' | 'sketch'
+_overlay = False      # True while the global menu is drawn over a live sketch
 _menu = None
 _encoder = None
 _sketch_loop = None
 
 
+def _open_overlay():
+    """Raise the global menu over the running sketch (no reset)."""
+    global _overlay, _menu
+    _overlay = True
+    _menu = Menu(launch_sketch, on_resume=resume_sketch, has_sketch=True)
+    _menu.render()
+
+
 def _start_menu():
-    global _mode, _menu, _encoder
+    """Cold-boot menu: no sketch resident, so only 'Load Sketch'."""
+    global _mode, _menu, _encoder, _overlay
+    _overlay = False
     try:
         amyboard.init_display()
     except Exception:
         pass
-    _encoder = Encoder()
-    _menu = Menu(launch_sketch)
+    if _encoder is None:
+        _encoder = Encoder()
+    _menu = Menu(launch_sketch, on_resume=None, has_sketch=False)
     _menu.render()
     _mode = 'menu'
 
 
 def _start_sketch(name):
     global _mode, _encoder, _sketch_loop
-    _encoder = Encoder()                      # drives the global home gesture
-    ns = {'__name__': '__main__'}
+    _encoder = Encoder()                      # sole encoder reader
+    _api.reset()
+    ns = {'__name__': '__main__', 'launcher': _api}
     try:
         with open(_resolve_sketch_dir() + '/' + name) as f:
             src = f.read()
@@ -306,7 +497,9 @@ def _start_sketch(name):
         _sketch_loop = ns.get('loop')         # its module-level loop(), if any
         _mode = 'sketch'
     except Exception as e:
-        # Never brick the board on a bad/missing sketch: revert to the menu.
+        # Never brick the board on a bad/missing sketch: clear the state so the
+        # next cold boot shows the menu (avoids a boot-loop into a bad sketch)
+        # and fall back to the menu now.
         print('Sketch load failed:', name, e)
         _write_state(MENU_STATE)
         try:
@@ -332,18 +525,47 @@ else:
 
 def loop():
     # Firmware calls this repeatedly (~60 ms).
-    if _mode == 'sketch':
-        # Global "home": a long-press always returns to the wrapper menu,
-        # regardless of what the loaded sketch does.
-        try:
-            _, _, hold = _encoder.update()
-            if hold:
-                go_home()
-        except Exception:
-            pass
+    if _overlay:
+        # Global menu is up over a paused (but still-sounding) sketch.
+        delta, click, hold = _encoder.update()
+        if delta or click or hold:
+            _menu.update(delta, click, hold)
+        _menu.render()
+    elif _mode == 'sketch':
+        # The launcher is the sole encoder reader. Translate a hold into either
+        # "back out one of the sketch's own levels" or, once the sketch is at
+        # playing, "open the global overlay". delta/click/back are handed to the
+        # sketch through the injected `launcher` object.
+        delta, click, hold = _encoder.update()
+        back = False
+        if hold:
+            # Hold ladder (auto-repeats every HOLD_MS of continuous press):
+            #   depth >= 2 (submenu): pop one level back toward the root menu.
+            #   depth == 1 (root menu): open the GLOBAL menu (no "playing" stop,
+            #                           so it never flashes the display mode).
+            #   depth == 0 (playing): OPEN the sketch's own menu (delivered as a
+            #                         click). Keep holding and the next tick -- now
+            #                         at depth 1 -- escalates to global. So from
+            #                         idle, turn/click/hold all reach the sketch
+            #                         menu, and only a longer hold reaches global.
+            if _api.menu_depth >= 2:
+                back = True
+            elif _api.menu_depth >= 1:
+                _open_overlay()
+                return
+            else:
+                click = True                  # playing -> open the sketch menu
+        _api.delta = delta
+        _api.click = click
+        _api.back = back
         if _sketch_loop:
             _sketch_loop()
+        # Clear one-shot events so the sketch never re-consumes them next tick.
+        _api.delta = 0
+        _api.click = False
+        _api.back = False
     else:
+        # Cold-boot menu (no sketch resident).
         delta, click, hold = _encoder.update()
         if delta or click or hold:
             _menu.update(delta, click, hold)
