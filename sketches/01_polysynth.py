@@ -54,18 +54,27 @@ def _load_settings():
 _settings = _load_settings()
 
 
-def _set_setting(key, value):
-    # Update one key and persist. Guarded so a flash-write fault never disturbs
-    # audio/MIDI -- the setting just won't survive the next reboot.
-    _settings[key] = value
+def _write_settings():
+    # Persist the whole settings dict. Guarded so a flash-write fault never
+    # disturbs audio/MIDI -- the settings just won't survive the next reboot.
     try:
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(_settings, f)
     except Exception:
         pass
 
+
+def _set_setting(key, value):
+    _settings[key] = value
+    _write_settings()
+
 # AMY maps synth numbers 1-16 to MIDI channels 1-16, so synth 12 receives all
 # notes (auto-routed) and is the target for the CC callback below on channel 12.
+# Channel is FIXED at 12 for now: the on-device channel picker is deferred because
+# applying it required a machine.reset(), which trips a firmware bug that leaves
+# the audio engine dead until another reboot (see docs/MIDI_MAPPING.md). Re-enable
+# once that's fixed (or via a live, no-reset approach) by reading a saved value
+# here, e.g. SYNTH = _settings.get('midi_channel', 12).
 SYNTH = 12
 NUM_VOICES = 6
 OSCS_PER_VOICE = 4
@@ -425,9 +434,14 @@ def init_synth():
     # this synth; note-ons propagate down the chain (head -> A -> B).
     amy.send(synth=SYNTH, num_voices=0)
     amy.send(synth=SYNTH, num_voices=NUM_VOICES, oscs_per_voice=OSCS_PER_VOICE)
-    # Belt-and-suspenders: keep synth 12 from grabbing notes on channels that have
-    # no dedicated synth, so it only ever responds to its own channel 12.
-    amy.send(synth=SYNTH, grab_midi_notes=0)
+    # Enable MIDI note forwarding to this synth. On current AMY firmware
+    # grab_midi_notes=0 means "receive NO MIDI notes" -- it disables forwarding
+    # entirely and silences the instrument (CCs still arrive via our own
+    # midi.add_callback, which is why only notes went missing). Set 1 so AMY
+    # routes this synth's channel (= SYNTH) notes to it. (Older firmware read 0 as
+    # "own channel only", hence the previous value.) Other channels stay silent
+    # because every other synth's voice count is zeroed above.
+    amy.send(synth=SYNTH, grab_midi_notes=1)
 
     # Filter head: SILENT, so A+B sum into its buffer before one shared filter is
     # applied. The head is a unity pass-through (amp=HEAD_AMP, no VCA envelope);
@@ -511,6 +525,48 @@ def update_lfo_amp_a():
 
 def update_lfo_amp_b():
     amy.send(synth=SYNTH, osc=OSC_B, amp=osc_amp(b_level, lfo_amp_b_depth))
+
+
+# The full live patch: every parameter a CC can change. These capture/apply
+# helpers are the basis for the preset feature (Stage 4, save/load). The two
+# envelopes are dicts; the rest are scalars.
+_PATCH_KEYS = (
+    'a_cents', 'a_wave', 'a_duty', 'a_level',
+    'b_cents', 'b_wave', 'b_duty', 'b_level',
+    'flt_cutoff', 'flt_res', 'flt_type', 'flt_env_amt', 'key_scale',
+    'lfo_freq', 'lfo_wave', 'lfo_pitch_depth', 'lfo_pwm_depth', 'lfo_filt_depth',
+    'lfo_amp_a_depth', 'lfo_amp_b_depth',
+)
+
+
+def _capture_patch():
+    g = globals()
+    d = {k: g[k] for k in _PATCH_KEYS}
+    d['vcf_env'] = dict(vcf_env)
+    d['vca_env'] = dict(vca_env)
+    return d
+
+
+def _apply_patch(d):
+    # Load a captured patch back into the live globals. Missing/unknown keys are
+    # ignored (fall back to whatever the global already holds), so an older saved
+    # patch stays compatible if the parameter set changes.
+    if not isinstance(d, dict):
+        return
+    g = globals()
+    for k in _PATCH_KEYS:
+        if k in d:
+            g[k] = d[k]
+    if isinstance(d.get('vcf_env'), dict):
+        vcf_env.update(d['vcf_env'])
+    if isinstance(d.get('vca_env'), dict):
+        vca_env.update(d['vca_env'])
+
+
+# NOTE: the on-device MIDI-channel picker (and its set_midi_channel/reboot +
+# boot-time patch-restore) was removed for now -- applying a channel change
+# needed a machine.reset(), which trips a firmware audio-engine bug (see
+# docs/MIDI_MAPPING.md). The capture/apply helpers above are kept for presets.
 
 
 # ---------------------------------------------------------------------------
@@ -611,8 +667,9 @@ def handle_cc(cc, val):
         lfo_amp_b_depth = cc_to_lfo_amp(val)
         update_lfo_amp_b()
 # ---------------------------------------------------------------------------
-# MIDI (channel 12): AMY auto-routes notes to synth 12; this callback only needs
-# to handle Control Change messages. Registered via midi.add_callback so it
+# MIDI: AMY auto-routes notes to the synth matching their channel (= SYNTH, the
+# selected channel), so this callback only needs to handle Control Change
+# messages, filtered to that same channel. Registered via midi.add_callback so it
 # coexists with the firmware's default MIDI dispatch (which owns the low-level
 # tulip.midi_callback hook).
 # ---------------------------------------------------------------------------
@@ -621,7 +678,7 @@ def midi_cb(m):
         return
     if (m[0] & 0xF0) != 0xB0:        # Control Change only
         return
-    if (m[0] & 0x0F) != 11:          # MIDI channel 12
+    if (m[0] & 0x0F) != (SYNTH - 1):   # our selected channel (synth N = ch N)
         return
     active_display_mode.on_cc(m[1], m[2])   # cheap: record state for the display
     handle_cc(m[1], m[2])

@@ -1,4 +1,13 @@
-### Menu sketching
+# Menu sketching
+
+> **Historical design sketch.** This is the original hand-drawn menu plan. For the
+> **implemented** menu system and gesture model, see [MENU.md](MENU.md). Notable
+> differences from this sketch: the global menu is a slim overlay (Resume + Load
+> Sketch); display modes and settings live in each sketch's own menu; the gesture
+> model is "click in / hold out (auto-repeat) / turn scroll"; the MIDI-channel
+> picker is currently a placeholder (deferred — see [MIDI_MAPPING.md](MIDI_MAPPING.md)).
+
+## Original sketch
 
 - global "wrapper" menu
     - [active sketch name/menu]

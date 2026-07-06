@@ -514,6 +514,13 @@ def _start_sketch(name):
         _start_menu()
 
 
+# NOTE: do NOT call amyboard.start_amy() here at boot. It HARD-FAULTS at this
+# early stage (a chip-level panic that try/except cannot catch), which reset-loops
+# the board -- recover only via safe boot (hold BOOT during power-up) or reflash.
+# It is safe to call from the REPL post-boot, but not from the launcher's boot
+# path. The audio engine's auto-start is a firmware concern; the intermittent
+# "no audio after a machine.reset()" is a firmware bug (reported upstream).
+
 # Boot once: pick a mode from the state file.
 _mount_sd()
 _state = _read_state()
