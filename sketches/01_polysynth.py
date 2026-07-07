@@ -8,6 +8,10 @@
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
 import amy, amyboard, midi, math, time, json
+try:
+    import framebuf                # for 2x-scaled text in the parameter editor
+except Exception:
+    framebuf = None
 
 # --- Launcher integration ---------------------------------------------------
 # This sketch always talks to a "launcher-shaped" input object (the global
@@ -681,6 +685,11 @@ def handle_cc(cc, val):
     global lfo_freq, lfo_wave, lfo_pitch_depth, lfo_pwm_depth, lfo_filt_depth
     global lfo_amp_a_depth, lfo_amp_b_depth
 
+    # Remember the raw value for any CC the Param Control editor can edit, so it
+    # opens on the current value whether it was last set by a knob or the editor.
+    if cc in param_values:
+        param_values[cc] = clamp(int(val), 0, 127)
+
     if cc == CC_OSC_A_PITCH:
         a_cents = cc_to_detune_cents(val)
         amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
@@ -783,6 +792,7 @@ def midi_cb(m):
         return
     active_display_mode.on_cc(m[1], m[2])   # cheap: record state for the display
     handle_cc(m[1], m[2])
+    menu.note_external_cc(m[1], m[2])       # let an open param editor track it live
 
 
 def setup_midi():
@@ -1183,6 +1193,104 @@ def service_display():
 
 
 # ---------------------------------------------------------------------------
+# Editable parameters (Param Control menu). Each descriptor pairs a human label
+# with the CC that already drives that parameter, so the on-device editor reuses
+# the exact same handle_cc() path a hardware knob does -- all value->sound
+# mapping is shared, and exposing another parameter is a one-line addition to
+# PARAMS. `fmt` (optional) turns a raw 0-127 value into a friendly label for
+# parameters whose range is really discrete regions (pitch intervals, wave
+# shapes, filter types). param_values tracks the last raw 0-127 value per CC
+# (updated by BOTH incoming MIDI CCs and the editor) so the editor opens on the
+# current value.
+# ---------------------------------------------------------------------------
+def fmt_osc_pitch(v):
+    # Osc pitch CC maps to stepped intervals plus two fine-detune wings; name the
+    # fixed intervals and show cents for the fine/zero region -- reusing the very
+    # same cc_to_detune_cents() map the synth applies, so label and sound agree.
+    cents = cc_to_detune_cents(v)
+    named = {-2400: '-2 oct', -1200: '-1 oct', -700: '-5th',
+             700: '+5th', 1200: '+1 oct', 2400: '+2 oct'}
+    if cents in named:
+        return named[cents]
+    c = int(round(cents))
+    return ('%+dc' % c) if c else 'Unison'
+
+
+def fmt_wave(v):
+    # Name the six core waves, bucketed exactly like cc_to_wave() so the label
+    # always matches the wave the synth actually selects.
+    v = clamp(int(v), 0, 127)
+    if v <= 20:
+        return 'Sine'
+    if v <= 41:
+        return 'Pulse'
+    if v <= 63:
+        return 'Saw Dn'
+    if v <= 84:
+        return 'Saw Up'
+    if v <= 105:
+        return 'Triangle'
+    return 'Noise'
+
+
+def fmt_filter_type(v):
+    # Four filter types, bucketed like cc_to_filter_type() (FILTER_TYPES order).
+    names = ('LP 24', 'LP', 'BP', 'HP')
+    idx = (clamp(int(v), 0, 127) * len(names)) // 128
+    return names[min(idx, len(names) - 1)]
+
+
+class _Param:
+    __slots__ = ('label', 'cc', 'default', 'fmt')
+
+    def __init__(self, label, cc, default, fmt=None):
+        self.label = label
+        self.cc = cc
+        self.default = default   # raw 0-127 value used until a CC/editor sets one
+        self.fmt = fmt           # optional value(0-127) -> friendly label
+
+
+# The editable-parameter list, shown numbered in the menu. Adding a row here is
+# all it takes to expose another parameter in the editor. `default` is the raw
+# 0-127 value that reproduces the patch's initial default (the double-click reset
+# target); the fine ADSR-time defaults are the CCs closest to the initial ms.
+# Labels are kept <=14 chars incl. the "NN. " prefix so nothing clips at 128px;
+# a few are shortened from the requested names (see notes) -- Filt Type, Kbd
+# Track, the ADSR Atk/Dec/Sus/Rel forms, and the space-free Lfo>X routing.
+PARAMS = [
+    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch),
+    _Param('Osc A Shape', CC_OSC_A_WAVE,   52, fmt_wave),
+    _Param('Osc A Duty',  CC_OSC_A_DUTY,   64),
+    _Param('Osc A Level', CC_OSC_A_LEVEL, 127),
+    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, fmt_osc_pitch),
+    _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave),
+    _Param('Osc B Duty',  CC_OSC_B_DUTY,   64),
+    _Param('Osc B Level', CC_OSC_B_LEVEL,   0),
+    _Param('Cutoff',      CC_FLT_CUTOFF,  127),
+    _Param('Resonance',   CC_FLT_RES,       0),
+    _Param('Filter Env',  CC_FLT_ENV_AMT,   0),
+    _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type),
+    _Param('Kbd Track',   CC_KEY_SCALE,     0),
+    _Param('Vcf Atk',     CC_VCF_ATK,       0),
+    _Param('Vcf Dec',     CC_VCF_DEC,      34),
+    _Param('Vcf Sus',     CC_VCF_SUS,      25),
+    _Param('Vcf Rel',     CC_VCF_REL,      31),
+    _Param('Vca Atk',     CC_VCA_ATK,       0),
+    _Param('Vca Dec',     CC_VCA_DEC,      25),
+    _Param('Vca Sus',     CC_VCA_SUS,     127),
+    _Param('Vca Rel',     CC_VCA_REL,      34),
+    _Param('Lfo Freq',    CC_LFO_FREQ,      0),
+    _Param('Lfo Shape',   CC_LFO_WAVE,      0, fmt_wave),
+    _Param('Lfo>Pitch',   CC_LFO_PITCH,     0),
+    _Param('Lfo>Pwm',     CC_LFO_PWM,       0),
+    _Param('Lfo>Filter',  CC_LFO_FILT,      0),
+]
+
+# Last raw 0-127 value seen per editable CC, seeded with each param's default.
+param_values = {p.cc: p.default for p in PARAMS}
+
+
+# ---------------------------------------------------------------------------
 # On-device menu (encoder-driven). Reachable by a short CLICK while playing and
 # owns the OLED while open. It follows the launcher's universal rule -- turn =
 # scroll, click = select / drill in, hold = back out one level -- but the
@@ -1198,6 +1306,68 @@ MENU_VISIBLE = 8
 MENU_LABEL_MAX = 18
 MENU_IDLE_MS = 10000     # auto-close the menu to the display mode after this idle
 
+# Parameter-editor (Param Control) layout: a 0-127 track with a cursor, the raw
+# value floating over the cursor, and (for discrete params) a friendly label.
+# Rows are laid out so the per-turn moving parts (value number, cursor) sit in
+# non-overlapping bands that can be pushed on their own -- see _render_edit. The
+# value and friendly label are drawn 2x (see _text2x); the title + end labels
+# stay 1x.
+CHAR_W = 8               # framebuf font cell width (for centering text)
+CHAR_H = 8               # framebuf font cell height
+EDIT_TEXT_SCALE = 2      # value/label magnification
+EDIT_TEXT_W = CHAR_W * EDIT_TEXT_SCALE   # 2x glyph width
+EDIT_TEXT_H = CHAR_H * EDIT_TEXT_SCALE   # 2x glyph height (band height)
+EDIT_TITLE_Y = 2         # param name (1x, static after open)
+EDIT_LABEL_Y = 24        # friendly discrete label (2x; redrawn only on change)
+EDIT_VALUE_Y = 50        # raw 0-127 value (2x, over the cursor; per-turn band)
+EDIT_TRACK_Y = 88        # the 0-127 track line
+EDIT_LINE_X0 = 6
+EDIT_LINE_X1 = 121
+EDIT_TICK_H  = 6         # cursor half-height above/below the track
+EDIT_ENDS_Y  = 100       # "0" / "127" end labels (1x, static)
+# Cursor band = the track line +/- the tick, pushed as a unit each turn.
+EDIT_TRACK_BAND_Y0 = EDIT_TRACK_Y - EDIT_TICK_H - 1
+EDIT_TRACK_BAND_Y1 = EDIT_TRACK_Y + EDIT_TICK_H + 1
+EDIT_REFRESH_MS = 50     # min gap between editor redraws (caps MIDI-flood repaint)
+EDIT_DBLCLICK_MS = 400   # two clicks within this window = double-click (reset);
+                         # a single click's exit is deferred this long to detect it
+
+# Encoder acceleration. The launcher hands us the detent COUNT this tick, so a
+# fast spin already arrives as a bigger delta; we amplify that so rapid turns
+# cover ground while a single detent stays 1:1 for fine adjustment. Applied in
+# the sketch (not the launcher) so it works wrapped AND standalone.
+ENC_ACCEL_CAP = 10       # max per-detent multiplier on a fast spin
+
+
+def _accel(delta):
+    a = abs(delta)
+    if a <= 1:
+        return delta                     # one detent = one step (precise)
+    return delta * min(a, ENC_ACCEL_CAP)  # faster spins step quadratically further
+
+
+def _text2x(d, s, x, y, color):
+    # Draw text at 2x scale. framebuf's only font is 8x8 and it has no scaling
+    # API, so render the string into a 1-bit temp buffer, then blit each set
+    # pixel as a 2x2 block. Falls back to 1x if framebuf is unavailable.
+    if framebuf is None:
+        d.text(s, x, y, color)
+        return
+    try:
+        w = len(s) * CHAR_W
+        if w <= 0:
+            return
+        buf = bytearray(((w + 7) // 8) * CHAR_H)
+        tmp = framebuf.FrameBuffer(buf, w, CHAR_H, framebuf.MONO_HLSB)
+        tmp.text(s, 0, 0, 1)
+        for py in range(CHAR_H):
+            yy = y + py * 2
+            for px in range(w):
+                if tmp.pixel(px, py):
+                    d.fill_rect(x + px * 2, yy, 2, 2, color)
+    except Exception:
+        d.text(s, x, y, color)
+
 
 class _MenuLevel:
     __slots__ = ('title', 'items', 'idx')
@@ -1209,19 +1379,43 @@ class _MenuLevel:
         self.idx = 0
 
 
+class _EditLevel:
+    # A parameter-adjustment "level" pushed on the menu stack. Turning adjusts the
+    # value LIVE (applied via handle_cc, so you hear it as you dial); a CLICK keeps
+    # the current value and pops back to the parameter list; a HOLD (back) reverts
+    # to entry_value and pops. entry_value is the snapshot taken when the editor
+    # opened -- the only state hold-to-restore needs.
+    __slots__ = ('param', 'value', 'entry_value', 'dirty', 'full', 'prev_label')
+
+    def __init__(self, param, value):
+        self.param = param
+        self.value = value
+        self.entry_value = value
+        self.dirty = True         # something changed -> redraw needed
+        self.full = True          # next draw is a full clear+draw (open/resume)
+        self.prev_label = None    # last drawn friendly label (redraw on change)
+
+
 class SketchMenu:
     def __init__(self):
         self.stack = []          # empty => closed (playing)
         self.dirty = False
         self._needs_clear = True # force a full repaint (vs per-row diff) next draw
         self._prev = None        # last drawn frame, for row-level diffing
+        self.suspended = False   # editor idled out: state kept, display mode shown
+        self._click_pending_at = 0   # ticks of a deferred editor single-click (0=none)
+        self._edit_last_render = 0   # ticks of the last editor redraw (throttle gate)
 
     @property
     def is_open(self):
-        return len(self.stack) > 0
+        # "Open" = we own the screen and take edit input. A suspended editor is
+        # NOT open (the display mode shows) but the stack is kept for resume.
+        return len(self.stack) > 0 and not self.suspended
 
     @property
     def depth(self):
+        # Reported to the launcher for the hold-ladder. Stays non-zero while
+        # suspended so a hold is delivered to us (to resume) rather than escaping.
         return len(self.stack)
 
     @property
@@ -1235,15 +1429,75 @@ class SketchMenu:
 
     def close(self):
         self.stack = []
+        self.suspended = False
+        self._click_pending_at = 0
+
+    def suspend(self):
+        # Idle timeout at any level: keep the stack (level + cursor / editor
+        # value), hide the menu so the display mode shows, resume on next input.
+        self.suspended = True
+        self._click_pending_at = 0
+
+    def resume(self):
+        # Wake a suspended editor back to exactly where it was, re-syncing from
+        # the live value (which MIDI may have moved while we were idle).
+        self.suspended = False
+        self.dirty = True
+        self._needs_clear = True
+        self._edit_last_render = 0
+        if self.stack and isinstance(self.cur, _EditLevel):
+            cur = self.cur
+            cur.value = int(param_values.get(cur.param.cc, cur.value))
+            cur.full = True
+            cur.dirty = True
+
+    def note_external_cc(self, cc, val):
+        # Called from the MIDI callback: if the open editor is on this CC, reflect
+        # the incoming value live. Records state only (never draws) -- loop()'s
+        # render picks it up -- so it stays audio-safe.
+        if self.suspended or not self.stack:
+            return
+        cur = self.cur
+        if isinstance(cur, _EditLevel) and cur.param.cc == cc:
+            cur.value = clamp(int(val), 0, 127)
+            cur.dirty = True
+
+    def service_pending(self, now):
+        # Fire a deferred editor single-click (commit + exit to the list) once the
+        # double-click window passes with no second click.
+        if not self._click_pending_at:
+            return
+        if time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
+            return
+        self._click_pending_at = 0
+        if self.stack and isinstance(self.cur, _EditLevel):
+            self.stack.pop()          # keep the current value, back to the list
+            self.dirty = True
+            self._needs_clear = True
 
     def _root(self):
         return _MenuLevel('POLYSYNTH', [
-            ('MIDI Control', self._todo),
+            ('Param Control', self._open_params),
             ('Presets', self._open_presets),
             ('Display Mode', self._open_display),
             ('MIDI Channel', self._todo),
             ('Resume Playing', self.close),
         ])
+
+    def _open_params(self):
+        # Numbered list of editable parameters; clicking one opens its editor.
+        items = [('%d. %s' % (i + 1, p.label), (lambda p=p: self._edit_param(p)))
+                 for i, p in enumerate(PARAMS)]
+        self.stack.append(_MenuLevel('PARAM CONTROL', items))
+        self.dirty = True
+        self._needs_clear = True
+
+    def _edit_param(self, p):
+        # Open the 0-127 slider editor on this param's current value.
+        v = int(param_values.get(p.cc, p.default))
+        self.stack.append(_EditLevel(p, v))
+        self.dirty = True
+        self._needs_clear = True
 
     def _open_presets(self):
         # Stage 4 replaces these leaves with the real save/load flows.
@@ -1273,15 +1527,46 @@ class SketchMenu:
     def handle(self, delta, click, back):
         if not self.is_open:
             return
+        lvl = self.cur
+        if isinstance(lvl, _EditLevel):
+            # Parameter editor: turn adjusts LIVE, single click keeps + exits,
+            # double click resets to the patch default, hold reverts + exits.
+            if back:                 # hold: restore the entry value, then pop
+                self._click_pending_at = 0
+                handle_cc(lvl.param.cc, lvl.entry_value)
+                self.stack.pop()
+                self.dirty = True
+                self._needs_clear = True
+                return
+            if delta:                # turn: move the cursor + apply live
+                self._click_pending_at = 0     # a turn cancels a pending click
+                lvl.value = clamp(lvl.value + _accel(delta), 0, 127)
+                handle_cc(lvl.param.cc, lvl.value)
+                lvl.dirty = True
+            if click:
+                now = time.ticks_ms()
+                if self._click_pending_at and \
+                        time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
+                    # Double click: reset to the patch default, stay in the editor.
+                    self._click_pending_at = 0
+                    lvl.value = lvl.param.default
+                    handle_cc(lvl.param.cc, lvl.value)
+                    lvl.dirty = True
+                else:
+                    # First click: defer commit+exit so a 2nd click can arrive
+                    # (fired by service_pending once the window passes).
+                    self._click_pending_at = now
+            return
         if back:                 # hold: pop one level (may close the menu)
             self.stack.pop()
             self.dirty = True
             self._needs_clear = True
             return
-        lvl = self.cur
         if delta:
+            # List scroll is 1:1 with detents (no acceleration -- that's only for
+            # the value editor) and clamps at the ends instead of wrapping.
             n = len(lvl.items)
-            lvl.idx = (lvl.idx + delta) % n
+            lvl.idx = clamp(lvl.idx + delta, 0, n - 1)
             self.dirty = True
         if click:
             _, cb = lvl.items[lvl.idx]
@@ -1301,13 +1586,95 @@ class SketchMenu:
             else:
                 d.text(label[:MENU_LABEL_MAX], 12, y, 110)
 
+    def _edit_label(self, d, label):
+        # Friendly discrete label, centered, 2x. Cleared band + redraw so a
+        # shorter label never leaves stale characters behind.
+        d.fill_rect(0, EDIT_LABEL_Y, DISPLAY_WIDTH, EDIT_TEXT_H, 0)
+        if label:
+            w = len(label) * EDIT_TEXT_W
+            sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
+            _text2x(d, label, sx, EDIT_LABEL_Y, 255)
+
+    def _edit_value(self, d, v, cx):
+        # Raw 0-127 value, 2x, centered over the cursor (clamped on-screen).
+        d.fill_rect(0, EDIT_VALUE_Y, DISPLAY_WIDTH, EDIT_TEXT_H, 0)
+        vs = '%d' % v
+        w = len(vs) * EDIT_TEXT_W
+        vx = clamp(cx - w // 2, 0, max(0, DISPLAY_WIDTH - w))
+        _text2x(d, vs, vx, EDIT_VALUE_Y, 255)
+
+    def _edit_track(self, d, cx):
+        # The 0-127 track line plus the cursor tick, drawn together in the cursor
+        # band (cleared first so the old tick position is erased).
+        band_h = EDIT_TRACK_BAND_Y1 - EDIT_TRACK_BAND_Y0 + 1
+        d.fill_rect(0, EDIT_TRACK_BAND_Y0, DISPLAY_WIDTH, band_h, 0)
+        d.fill_rect(EDIT_LINE_X0, EDIT_TRACK_Y, EDIT_LINE_X1 - EDIT_LINE_X0, 1, 180)
+        d.fill_rect(clamp(cx - 1, 0, DISPLAY_WIDTH - 3),
+                    EDIT_TRACK_Y - EDIT_TICK_H, 3, EDIT_TICK_H * 2 + 1, 255)
+
+    def _render_edit(self, cur):
+        # 0-127 slider editor. On open/resume (cur.full) do one full clear+draw
+        # flushed in audio-safe bands. On a turn/MIDI update push ONLY the moving
+        # bands -- the value number and the cursor -- (and the friendly label only
+        # when it changes), so dialing feels as snappy as menu scrolling. The
+        # value is applied live in handle() regardless, so sound tracks every
+        # detent even when a redraw is throttled to the next frame.
+        if not (self.dirty or cur.dirty):
+            return
+        now = time.ticks_ms()
+        if not cur.full and time.ticks_diff(now, self._edit_last_render) < EDIT_REFRESH_MS:
+            return                    # throttle incremental redraws (keep dirty)
+        self.dirty = False
+        cur.dirty = False
+        self._edit_last_render = now
+        try:
+            d = amyboard.display
+            p = cur.param
+            v = cur.value
+            span = EDIT_LINE_X1 - EDIT_LINE_X0
+            cx = EDIT_LINE_X0 + int(round(v * span / 127.0))
+            label = p.fmt(v) if p.fmt else None
+            if cur.full:
+                d.fill(0)
+                d.text(p.label.upper()[:MENU_LABEL_MAX], 0, EDIT_TITLE_Y, 255)
+                self._edit_label(d, label)
+                self._edit_value(d, v, cx)
+                self._edit_track(d, cx)
+                d.text('0', 0, EDIT_ENDS_Y, 110)
+                d.text('127', DISPLAY_WIDTH - 3 * CHAR_W, EDIT_ENDS_Y, 110)
+                cur.prev_label = label
+                cur.full = False
+                _begin_flush(0, 127)
+                return
+            # Incremental: value + cursor bands every update; label only if it
+            # changed (a region boundary was crossed).
+            self._edit_value(d, v, cx)
+            if not _push_rows(EDIT_VALUE_Y, EDIT_VALUE_Y + EDIT_TEXT_H - 1):
+                amyboard.display_refresh()
+            self._edit_track(d, cx)
+            if not _push_rows(EDIT_TRACK_BAND_Y0, EDIT_TRACK_BAND_Y1):
+                amyboard.display_refresh()
+            if label != cur.prev_label:
+                self._edit_label(d, label)
+                if not _push_rows(EDIT_LABEL_Y, EDIT_LABEL_Y + EDIT_TEXT_H - 1):
+                    amyboard.display_refresh()
+                cur.prev_label = label
+        except Exception:
+            pass
+
     def render(self):
         # If a progressive full-repaint flush is in flight, keep pushing bands
         # and defer any new drawing until the panel is settled.
         if _flush_active:
             _service_flush()
             return
-        if not self.dirty or not self.is_open:
+        if not self.is_open:
+            return
+        cur = self.cur
+        if isinstance(cur, _EditLevel):
+            self._render_edit(cur)
+            return
+        if not self.dirty:
             return
         self.dirty = False
         try:
@@ -1371,18 +1738,40 @@ def _pump_menu():
         launcher.repaint = True
         _last_input_ms = now
         _prev_menu_open = False
-    if launcher.delta or launcher.click or launcher.back:
+    have_input = launcher.delta or launcher.click or launcher.back
+    if have_input:
         _last_input_ms = now
+
+    if menu.suspended:
+        # Idled out: the display mode is showing. ANY input -- turn, click, or
+        # hold -- wakes us back to exactly where we were (the waking input just
+        # resumes, it doesn't act). While suspended we report depth >= 2 so the
+        # launcher delivers a hold to us (as back) instead of escaping to the
+        # global menu; a hold only reaches global from an ACTIVE (non-idle) root.
+        if have_input:
+            menu.resume()
+        _prev_menu_open = menu.is_open
+        launcher.menu_depth = max(2, menu.depth) if menu.suspended else menu.depth
+        return
+
     if menu.is_open:
         menu.handle(launcher.delta, launcher.click, launcher.back)
+        menu.service_pending(now)             # fire a deferred editor single-click
         if menu.is_open and time.ticks_diff(now, _last_input_ms) >= MENU_IDLE_MS:
-            menu.close()         # idle timeout -> show the active display mode
+            # Idle timeout SUSPENDS at whatever level we're on: the display mode
+            # takes over the screen but the menu stack (level + cursor position,
+            # or the editor's value) is kept, so the next input resumes us exactly
+            # where we left off. Closing only happens on explicit user action.
+            menu.suspend()
+            launcher.repaint = True           # redraw the display mode over us
     elif launcher.click or launcher.delta:   # a click OR a turn opens our menu
         menu.open()              # the opening input just opens (no scroll yet)
     if _prev_menu_open and not menu.is_open:
         launcher.repaint = True
     _prev_menu_open = menu.is_open
-    launcher.menu_depth = menu.depth
+    # While suspended (incl. the tick idle fires) report depth >= 2 so a hold is
+    # delivered to us to resume, not routed to the global menu by the launcher.
+    launcher.menu_depth = max(2, menu.depth) if menu.suspended else menu.depth
 
 
 def _force_display_redraw():
