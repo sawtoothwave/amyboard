@@ -10,27 +10,128 @@
 import amy, amyboard, midi, math, time, json
 
 # --- Launcher integration ---------------------------------------------------
-# The global launcher (wrapper_sketch.py) exec's this sketch with a `launcher`
-# object injected into our namespace. It is the SOLE encoder reader and feeds us
-# abstract input events -- launcher.delta (detents), launcher.click (short
-# press), launcher.back (hold = pop one of our menu levels) -- while reading
-# launcher.menu_depth to know how deep our own menu is (0 = playing); once we
-# report depth 0 a further hold escapes out to the GLOBAL menu. launcher.repaint
-# is set True after a Resume so we redraw the screen the overlay clobbered.
-# If this sketch is ever run WITHOUT the launcher (e.g. straight from the REPL),
-# fall back to an inert stub so the synth still boots and plays; only the
-# encoder-driven menu goes dark.
+# This sketch always talks to a "launcher-shaped" input object (the global
+# `launcher`): it CONSUMES abstract encoder events -- launcher.delta (detents),
+# launcher.click (short press), launcher.back (hold = pop one of our menu levels)
+# -- and REPORTS launcher.menu_depth (how deep our own menu is; 0 = playing).
+# launcher.repaint is set True after a Resume so we redraw the screen an overlay
+# clobbered. Only WHO FILLS that object changes with how we're run:
+#
+#   Wrapped  -- the global launcher (wrapper_sketch.py) exec's us with a
+#               `launcher` injected into our namespace. It is the sole encoder
+#               reader and fills the events; once we report depth 0 a further
+#               hold escapes out to the GLOBAL menu. Nothing below runs.
+#   Standalone -- run as a plain boot sketch (no wrapper), `launcher` is unbound,
+#               so we build our OWN _StandaloneLauncher that reads the Seesaw
+#               encoder directly and fills the same events. This is what makes
+#               the sketch a self-contained, shareable single file: full on-
+#               device menu with or without the wrapper. It replicates the
+#               wrapper's hold-ladder MINUS the global-escape rung: a hold at our
+#               root menu simply does nothing (there is no wrapper to escape to);
+#               leave the root via "Resume Playing" or the idle timeout.
+#
+# Detection is free: `launcher` is defined iff the wrapper injected it.
+STANDALONE_SEESAW_ADDR   = 0x36     # Adafruit Seesaw rotary encoder + push button
+STANDALONE_BTN_PIN       = 24       # (front-panel I2C; mirrors wrapper_sketch.py)
+STANDALONE_HOLD_MS       = 600      # one back-out pop per this much continuous hold
+STANDALONE_INVERT_DELTA  = False    # True => turning right scrolls DOWN
+
+
+class _StandaloneLauncher:
+    # Self-contained encoder reader used ONLY when this sketch runs without the
+    # wrapper. Presents the same fields the wrapper's injected `launcher` does, so
+    # every bit of menu code below is identical in both modes. update() reads the
+    # Seesaw encoder + button and fills delta/click/back for _pump_menu() to
+    # consume, applying the standalone hold-ladder. All hardware access is guarded
+    # so a missing/unplugged encoder (or a screenless board) degrades to "no
+    # input" instead of crashing -- the synth still boots and plays.
+    __slots__ = ('delta', 'click', 'back', 'menu_depth', 'repaint', 'resumed',
+                 '_last', '_btn_down', '_down_at', '_hold_count')
+
+    def __init__(self):
+        self.delta = 0
+        self.click = False
+        self.back = False
+        self.menu_depth = 0
+        self.repaint = False
+        self.resumed = False
+        try:
+            amyboard.init_buttons(pins=(STANDALONE_BTN_PIN,),
+                                  seesaw_dev=STANDALONE_SEESAW_ADDR)
+        except Exception:
+            pass
+        self._last = self._count()
+        self._btn_down = False
+        self._down_at = 0
+        self._hold_count = 0     # number of HOLD_MS pops already fired this press
+
+    def _count(self):
+        try:
+            return amyboard.read_encoder(seesaw_dev=STANDALONE_SEESAW_ADDR)
+        except Exception:
+            return 0
+
+    def _pressed(self):
+        try:
+            return bool(amyboard.read_buttons(
+                pins=(STANDALONE_BTN_PIN,),
+                seesaw_dev=STANDALONE_SEESAW_ADDR)[0])
+        except Exception:
+            return False
+
+    def update(self):
+        # Read the raw encoder, derive (delta, click, hold) exactly like the
+        # wrapper's Encoder, then translate the hold into our abstract events via
+        # the standalone ladder. Called once per loop() from loop() itself.
+        self.delta = 0
+        self.click = False
+        self.back = False
+
+        c = self._count()
+        delta = c - self._last
+        self._last = c
+        if STANDALONE_INVERT_DELTA:
+            delta = -delta
+
+        click = False
+        hold = False
+        pressed = self._pressed()
+        now = time.ticks_ms()
+        if pressed and not self._btn_down:
+            self._btn_down = True
+            self._down_at = now
+            self._hold_count = 0
+        elif pressed and self._btn_down:
+            n = time.ticks_diff(now, self._down_at) // STANDALONE_HOLD_MS
+            if n > self._hold_count:
+                self._hold_count = n         # one pop per HOLD_MS boundary crossed
+                hold = True
+        elif (not pressed) and self._btn_down:
+            self._btn_down = False
+            if self._hold_count == 0:        # released before any hold -> a click
+                click = True
+
+        if hold:
+            # Standalone hold-ladder (mirrors the wrapper's, minus global escape):
+            #   depth >= 2 (submenu): pop one level back toward the root.
+            #   depth == 0 (playing): open our menu (delivered as a click).
+            #   depth == 1 (root menu): nothing -- there is no wrapper to escape
+            #                           to; leave via "Resume Playing" / timeout.
+            if self.menu_depth >= 2:
+                self.back = True
+            elif self.menu_depth == 0:
+                click = True
+
+        self.delta = delta
+        self.click = click
+
+
 try:
     launcher
+    _STANDALONE = False
 except NameError:
-    class _NoLauncher:
-        delta = 0
-        click = False
-        back = False
-        menu_depth = 0
-        repaint = False
-        resumed = False
-    launcher = _NoLauncher()
+    launcher = _StandaloneLauncher()
+    _STANDALONE = True
 
 # --- Persistent settings ----------------------------------------------------
 # A tiny JSON dict in internal flash (always writable at runtime, survives
@@ -1327,6 +1428,12 @@ def _service_cv():
 
 
 def loop():
+    # Standalone (no wrapper): we are the sole encoder reader, so pump our own
+    # reader first to fill launcher.delta/.click/.back. Wrapped: the wrapper has
+    # already filled those around this call, so skip (and it clears them itself).
+    if _STANDALONE:
+        launcher.update()
+
     # Drive the encoder-driven menu from the launcher's input events first.
     _pump_menu()
 
@@ -1336,13 +1443,18 @@ def loop():
 
     if menu.is_open:
         menu.render()                # the menu owns the OLED while open
-        return
+    else:
+        # Playing: after returning from our menu or a global Resume, repaint once
+        # so the display mode redraws over any leftover menu/overlay pixels.
+        if launcher.repaint:
+            launcher.repaint = False
+            _force_display_redraw()
+        # Display last so a CV read error never blocks the screen, and vice versa.
+        service_display()
 
-    # Playing: after returning from our menu or a global Resume, repaint once so
-    # the display mode redraws over any leftover menu/overlay pixels.
-    if launcher.repaint:
-        launcher.repaint = False
-        _force_display_redraw()
-
-    # Display last so a CV read error never blocks the screen, and vice versa.
-    service_display()
+    # Standalone: clear the one-shot events so the menu never re-consumes them
+    # next tick (the wrapper does this itself after driving a wrapped sketch).
+    if _STANDALONE:
+        launcher.delta = 0
+        launcher.click = False
+        launcher.back = False

@@ -70,7 +70,8 @@ A hold becomes `back` while the sketch is ≥2 levels deep; at the sketch's root
 at playing) it opens the global overlay instead. A sketch that ignores all of this
 still works — it just jumps straight to the global menu on a hold. Sketches should
 consume input via these fields, **not read the encoder directly** (one reader
-only).
+only) — *except* as a self-contained fallback when the wrapper is absent (see
+below); the two never read the encoder at the same time.
 
 ## Polysynth menu (`sketches/01_polysynth.py`)
 
@@ -93,3 +94,15 @@ POLYSYNTH
   repaints only two rows) and a progressive banded framebuffer flush on full
   repaints, so navigating never holds the I2C bus long enough to drop a note.
   See the audio-safety rules in [DISPLAY_MODES.md](DISPLAY_MODES.md).
+
+### Standalone mode (no wrapper)
+
+The polysynth is a **self-contained single file**: dropped on a board as its own
+boot sketch (no `wrapper_sketch.py`), it drives its own menu. When the wrapper
+doesn't inject a `launcher`, the sketch builds an internal `_StandaloneLauncher`
+that reads the Seesaw encoder directly and fills the *same* `launcher.*` fields,
+so all the menu code is identical in both modes. It replicates the hold-ladder
+**minus the global-escape rung**: a hold at the polysynth root menu does nothing
+(there's no wrapper to escape to) — leave the root via **Resume Playing** or the
+idle timeout. The reader is only instantiated when the wrapper is absent, so the
+two never contend for the encoder, and wrapped behavior is unchanged.
