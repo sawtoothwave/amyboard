@@ -57,6 +57,8 @@ control surface.
   without changing the frozen CC assignments.
 - Onboard OLED + encoder navigation is implemented (see [MENU.md](MENU.md) and
   [DISPLAY_MODES.md](DISPLAY_MODES.md)).
+- On-device **Param Control** edits all 26 CC-mapped parameters directly from the
+  encoder — no control surface needed (polysynth menu → Param Control; see
+  [MENU.md](MENU.md)).
 - Not yet implemented: effects (reverb / echo / chorus), mod wheel / pitch bend
-  routing, presets (Stage 4), and an on-encoder CC editor (next up — edit CCs
-  directly from the encoder without the control surface).
+  routing, and presets (Stage 4).

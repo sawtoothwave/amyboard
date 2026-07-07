@@ -37,11 +37,13 @@ Controllers → MIDI → AMYboard → Audio Output
 - To stay channel-12-only, `init_synth()` zeroes the voice count of every synth except 12, removing the default instrument the firmware allocates on synth 1 (channel 1); a voiceless synth cannot sound. It also sets `grab_midi_notes=1` on synth 12 — required for note forwarding on current firmware (see [FIRMWARE_NOTES.md](FIRMWARE_NOTES.md)). Channel is fixed at 12 for now (the on-device picker is deferred — see [MIDI_MAPPING.md](MIDI_MAPPING.md)).
 - Each CC updates only its parameter live, so turning a knob never resets voices or cuts off held notes.
 - Display is driven by a pluggable, sketch-owned display mode selectable from the on-device menu (see [DISPLAY_MODES.md](DISPLAY_MODES.md)); the selection persists to `/user/polysynth_settings.json`.
+- **Param Control**: an on-device editor (polysynth menu → Param Control) exposes all 26 synth parameters as numbered 0-127 sliders that drive the same CC path as the E16 knobs — turning adjusts live with encoder acceleration, double-click resets to the patch default, and an open editor reflects incoming MIDI for that CC. See [MENU.md](MENU.md).
+- **Self-contained**: the sketch reads its own encoder when run without the wrapper, so it works as a single shareable file (full menu + parameter editor) with or without the launcher.
 
 **wrapper_sketch.py (Global launcher)**
 - The permanent boot program (deployed to `/user/current/sketch.py`); it shows a global menu or runs a chosen sketch and drives that sketch's `loop()`.
 - The global menu is an **in-memory overlay** over the running sketch: `Resume` returns instantly with no audio dropout; only `Load Sketch` resets the board (required to tear down the previous sketch's MIDI callback).
-- The launcher is the **sole encoder reader** and feeds each sketch abstract input (`launcher.delta/.click/.back`) while reading `launcher.menu_depth`. This is what lets one universal gesture — click in / hold out / turn scroll — span both the launcher and each sketch's own menu. Full details in [MENU.md](MENU.md).
+- The launcher is the encoder reader **when it is present** and feeds each sketch abstract input (`launcher.delta/.click/.back`) while reading `launcher.menu_depth`. This is what lets one universal gesture — click in / hold out / turn scroll — span both the launcher and each sketch's own menu. A sketch run **without** the launcher (copied on as its own boot file) can read the encoder itself instead — the polysynth does, so it stays fully usable as a single file. The two never read the encoder at once. Full details in [MENU.md](MENU.md).
 
 **OXI E16 Configuration**
 - `e16-config/amyboard.json`: Source definition (pages 4, 8, 12)
@@ -60,7 +62,6 @@ The intended page groupings and frozen CC assignments are documented in `docs/CC
 
 ### Future Enhancements
 
-- On-encoder CC editor (edit CCs directly from the encoder without the control surface) — next up
 - Presets: save/load full patch state (Stage 4; `_capture_patch()`/`_apply_patch()` helpers already in place)
 - Re-enable the on-device MIDI-channel picker once the firmware `machine.reset()` audio bug is fixed, or via a live no-reset approach
 - CV I/O integration for Eurorack modulation sources

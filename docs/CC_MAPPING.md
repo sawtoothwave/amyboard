@@ -52,13 +52,13 @@ These describe how `sketch.py` currently maps each CC (0-127) to an AMY paramete
 | 22 / 26 | Osc A / B Duty | Pulse duty cycle, 0.05-0.95. |
 | 23 / 27 | Osc A / B Level | Oscillator amplitude, 0.0-1.0 (scales that osc's amp envelope). |
 | 74 | Filter Cutoff | Logarithmic, ~30 Hz to ~16 kHz. |
-| 71 | Filter Resonance | 0.7-8.0 (AMY Q range). |
+| 71 | Filter Resonance | ~0.0-6.0 (musical span of AMY's wider Q range). |
 | 30 | Filter Env Amount | EG1 depth coefficient (octave-style), 0.0-2.0. |
 | 31 | Filter Type | Four buckets across 0-127: LPF24, LPF, BPF, HPF. |
 | 32 | Key Scale | Filter `note` tracking coefficient, 0.0-1.0 (0 = none, 1 = full keyboard tracking). |
 | 40-43 | VCF A/D/S/R | Filter EG1 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
 | 44-47 | VCA A/D/S/R | Amp EG0 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
-| 76 | LFO Freq | LFO rate, logarithmic ~0.05-20 Hz. |
+| 76 | LFO Freq | LFO rate, logarithmic ~0.2-20 Hz. |
 | 77 | LFO → Osc (Pitch) | Vibrato depth on Osc A + B, quadratic, 0 to ±6 semitones (0.5 octave). |
 | 78 | LFO Waveshape | Six-wave buckets (same map as CC 21/25): Sine, Pulse, Saw Down, Saw Up, Triangle, Noise. |
 | 79 | LFO → PWM | Pulse-width modulation depth on Osc A + B duty, 0.0-0.45. |
@@ -122,8 +122,11 @@ These page groupings are retained only as controller-layout intent. They do not 
 The following areas are not part of the frozen baseline and are not implemented in the current build:
 
 - Effects controls (reverb / echo / chorus)
-- OLED display and onboard encoder/button navigation
 - Preset save/recall
+
+(OLED display and onboard encoder/button navigation — including on-device editing
+of these CCs via the **Param Control** editor — are now implemented; see
+[MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).)
 
 ## Tuning and Wave Maps (Implemented)
 

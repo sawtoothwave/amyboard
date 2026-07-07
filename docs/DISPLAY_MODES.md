@@ -39,9 +39,9 @@ infrastructure enforces:
    rows-per-refresh.
 4. **Full-screen clears/repaints are flushed progressively.** Zeroing then
    blitting the whole panel at once (e.g. entering a mode, or a menu's full
-   repaint) is split into ~24-row bands across successive `loop()` calls
-   (`_begin_clear()` / `_begin_flush()` / `_service_flush()`), so the longest
-   single blit stays a few tens of ms instead of ~150 ms.
+   repaint) is split into `FLUSH_BAND_ROWS` (~12) row bands across successive
+   `loop()` calls (`_begin_clear()` / `_begin_flush()` / `_service_flush()`), so
+   the longest single blit stays a few tens of ms instead of ~150 ms.
 
 ## Modes
 
@@ -76,7 +76,9 @@ yet" notice.
   `BOOT_CLEAR_MS` (3 s), then the panel is wiped once before the active mode takes
   over.
 - **Idle timeout.** While the polysynth menu is open, `MENU_IDLE_MS` (10 s) with
-  no encoder input auto-closes the menu back to the active display mode.
+  no encoder input **suspends** it: the active display mode takes back the screen
+  while the menu keeps its place, and the next encoder input resumes the menu
+  where you left it (see [MENU.md](MENU.md)).
 - **Persistence.** Picking a mode writes its name to
   `/user/polysynth_settings.json`; `_restore_display_mode()` re-selects it at boot
   (matched by name, so reordering the list is safe; unknown/missing → default).

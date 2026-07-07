@@ -6,6 +6,8 @@
 > Sketch); display modes and settings live in each sketch's own menu; the gesture
 > model is "click in / hold out (auto-repeat) / turn scroll"; the MIDI-channel
 > picker is currently a placeholder (deferred — see [MIDI_MAPPING.md](MIDI_MAPPING.md)).
+> The **param control** flow sketched below (list → per-parameter editor) is now
+> implemented, covering all 26 CC-mapped parameters — see [MENU.md](MENU.md).
 
 ## Original sketch
 

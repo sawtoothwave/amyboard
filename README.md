@@ -27,6 +27,11 @@ This project provides instrument/control code for an [AMYboard](https://github.c
   launcher menu and each sketch's own menu, sharing one gesture model
   (click in / hold out / turn scroll). See [docs/MENU.md](docs/MENU.md). The OLED
   shows a selectable, persisted display mode (see [docs/DISPLAY_MODES.md](docs/DISPLAY_MODES.md)).
+  The polysynth's menu includes **Param Control**, an on-device editor for all 26
+  synth parameters (0-127 sliders driving the same CCs as the E16, with a live
+  2× readout and encoder acceleration). The polysynth also reads its own encoder
+  when run without the launcher, so it works as a **self-contained single file**
+  with or without the wrapper.
 - The frozen baseline for MIDI CC assignments lives in `docs/CC_MAPPING.md`.
 - Additional synth graph references live in `amy_patch_examples/`, notably
   `sketch_5osc_analog.py` and its explicit Python-defined synth graph.

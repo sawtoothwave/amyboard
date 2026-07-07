@@ -79,7 +79,7 @@ Opened by turn/click/short-hold while playing. Structure:
 
 ```
 POLYSYNTH
-├─ MIDI Control      placeholder ("coming soon" — see next session: CC editor)
+├─ Param Control     → numbered list of all 26 synth params → per-param editor
 ├─ Presets
 │  ├─ Save State as Preset   placeholder (Stage 4)
 │  └─ Load Preset            placeholder (Stage 4)
@@ -88,12 +88,50 @@ POLYSYNTH
 └─ Resume Playing
 ```
 
-- **Idle timeout:** after `MENU_IDLE_MS` (10 s) with no encoder input, the menu
-  auto-closes back to the active display mode.
+- **List scrolling** is 1:1 with encoder detents and **clamps at the ends** (no
+  wrap-around).
+- **Idle timeout:** after `MENU_IDLE_MS` (10 s) with no encoder input the menu
+  **suspends** — the active display mode takes back the screen but the menu stack
+  is kept (which level you're on and the cursor position, or an editor's value),
+  and the next input (turn, click, or hold) resumes you exactly where you were.
+  A hold only escapes to the global menu from an *active* (non-suspended) root.
+  Closing to playing happens only on explicit action (Resume Playing, or backing
+  out past the root).
 - **Audio-safe rendering:** menu draws use row-level diffing (a cursor move
   repaints only two rows) and a progressive banded framebuffer flush on full
   repaints, so navigating never holds the I2C bus long enough to drop a note.
   See the audio-safety rules in [DISPLAY_MODES.md](DISPLAY_MODES.md).
+
+### Param Control (parameter editor)
+
+**Param Control** lists all 26 editable synth parameters, numbered (`1. Osc A
+Pitch` … `26. Lfo>Filter`). Selecting one opens a **0-127 slider editor** for that
+parameter, which drives the parameter's real MIDI CC through the same
+`handle_cc()` path a hardware knob uses — so on-device edits and the E16 knobs
+stay in sync and share all value→sound mapping. Exposing another parameter is a
+one-line addition to the `PARAMS` list.
+
+Editor gestures:
+
+| Gesture | Action |
+|---|---|
+| **Turn** | Adjust the value **live** (you hear it). Encoder **acceleration**: a fast spin covers ground, a single detent stays 1:1 for fine control. |
+| **Single click** | Keep the current value and exit to the list. (Deferred `EDIT_DBLCLICK_MS` ≈ 400 ms to detect a double-click.) |
+| **Double click** | Reset the parameter to its patch default, staying in the editor. |
+| **Hold** | Revert to the value on entry and exit to the list. |
+
+- **Display:** the raw 0-127 value and (for discrete params) a friendly label
+  render at **2× scale** over a cursor track; the title and end labels stay 1×.
+  (framebuf has only an 8×8 font and no scaling API, so `_text2x()` renders glyphs
+  into a temp buffer and blits each pixel as a 2×2 block.)
+- **Discrete labels:** wave shapes show `Sine / Pulse / Saw Dn / Saw Up /
+  Triangle / Noise`; filter type shows `LP 24 / LP / BP / HP`; osc pitch shows the
+  interval / cents (`-1 oct`, `+5th`, `Unison`, `+12c`, …).
+- **Live MIDI:** while the editor is open, an incoming CC for that parameter moves
+  the cursor/value in real time, and the encoder continues from wherever MIDI left
+  it — the E16 and the encoder cooperate on one value.
+- **Rendering** pushes only the changed bands per turn (snappy and audio-safe),
+  throttled by `EDIT_REFRESH_MS` so a stream of incoming CCs can't hog the I2C bus.
 
 ### Standalone mode (no wrapper)
 
