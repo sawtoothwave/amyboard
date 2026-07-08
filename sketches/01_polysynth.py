@@ -1390,13 +1390,14 @@ def _text2x(d, s, x, y, color):
 
 
 class _MenuLevel:
-    __slots__ = ('title', 'items', 'idx')
+    __slots__ = ('title', 'items', 'idx', 'start')
 
     def __init__(self, title, items):
         self.title = title
         # items: list of (label, callback_or_None). None = non-selectable line.
         self.items = items if items else [('(empty)', None)]
         self.idx = 0
+        self.start = 0    # top visible item; edge-scrolls (see render), not centered
 
 
 class _EditLevel:
@@ -1615,13 +1616,20 @@ class SketchMenu:
             sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
             _text2x(d, label, sx, EDIT_LABEL_Y, 255)
 
-    def _edit_value(self, d, v, cx):
-        # Raw 0-127 value, 2x, centered over the cursor (clamped on-screen).
-        d.fill_rect(0, EDIT_VALUE_Y, DISPLAY_WIDTH, EDIT_TEXT_H, 0)
+    def _edit_value(self, d, v):
+        # Readout row below the track: "0   <value>   127", all 1x (the value the
+        # same size as the end labels). The raw value is 1x -- not 2x -- so its
+        # refresh band is a single 8px row (~half the I2C of the old 2x number),
+        # which keeps a fast sweep from holding the bus long enough to starve the
+        # audio render. The 2x treatment is reserved for the friendly bucket name
+        # (see _edit_label), which only redraws when it actually changes.
+        d.fill_rect(0, EDIT_ENDS_Y, DISPLAY_WIDTH, CHAR_H, 0)
+        d.text('0', 0, EDIT_ENDS_Y, 110)
+        d.text('127', DISPLAY_WIDTH - 3 * CHAR_W, EDIT_ENDS_Y, 110)
         vs = '%d' % v
-        w = len(vs) * EDIT_TEXT_W
-        vx = clamp(cx - w // 2, 0, max(0, DISPLAY_WIDTH - w))
-        _text2x(d, vs, vx, EDIT_VALUE_Y, 255)
+        w = len(vs) * CHAR_W
+        vx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
+        d.text(vs, vx, EDIT_ENDS_Y, 255)
 
     def _edit_track(self, d, cx):
         # The 0-127 track line plus the cursor tick, drawn together in the cursor
@@ -1635,10 +1643,11 @@ class SketchMenu:
     def _render_edit(self, cur):
         # 0-127 slider editor. On open/resume (cur.full) do one full clear+draw
         # flushed in audio-safe bands. On a turn/MIDI update push ONLY the moving
-        # bands -- the value number and the cursor -- (and the friendly label only
-        # when it changes), so dialing feels as snappy as menu scrolling. The
-        # value is applied live in handle() regardless, so sound tracks every
-        # detent even when a redraw is throttled to the next frame.
+        # bands -- the cursor and the 1x value readout row -- (and the 2x friendly
+        # bucket name only when it changes), so dialing stays snappy AND the small
+        # per-detent I2C doesn't starve the audio render. The value is applied live
+        # in handle() regardless, so sound tracks every detent even when a redraw
+        # is throttled to the next frame.
         if not (self.dirty or cur.dirty):
             return
         now = time.ticks_ms()
@@ -1658,21 +1667,24 @@ class SketchMenu:
                 d.fill(0)
                 d.text(p.label.upper()[:MENU_LABEL_MAX], 0, EDIT_TITLE_Y, 255)
                 self._edit_label(d, label)
-                self._edit_value(d, v, cx)
                 self._edit_track(d, cx)
-                d.text('0', 0, EDIT_ENDS_Y, 110)
-                d.text('127', DISPLAY_WIDTH - 3 * CHAR_W, EDIT_ENDS_Y, 110)
+                self._edit_value(d, v)      # draws the 0 / value / 127 readout row
                 cur.prev_label = label
                 cur.full = False
                 _begin_flush(0, 127)
                 return
-            # Incremental: value + cursor bands every update; label only if it
-            # changed (a region boundary was crossed).
-            self._edit_value(d, v, cx)
-            if not _push_rows(EDIT_VALUE_Y, EDIT_VALUE_Y + EDIT_TEXT_H - 1):
-                amyboard.display_refresh()
+            # Incremental: push the moving parts synchronously -- the cursor band
+            # and the 1x value readout row (each a short band) -- plus the friendly
+            # label only when it changed (a bucket boundary crossed). With the value
+            # now 1x, a detent's I2C is about a single menu cursor-move: responsive,
+            # and short enough not to starve the audio render. The value is applied
+            # live in handle() regardless, so sound tracks every detent even when a
+            # redraw is throttled to the next frame.
             self._edit_track(d, cx)
             if not _push_rows(EDIT_TRACK_BAND_Y0, EDIT_TRACK_BAND_Y1):
+                amyboard.display_refresh()
+            self._edit_value(d, v)
+            if not _push_rows(EDIT_ENDS_Y, EDIT_ENDS_Y + CHAR_H - 1):
                 amyboard.display_refresh()
             if label != cur.prev_label:
                 self._edit_label(d, label)
@@ -1701,13 +1713,20 @@ class SketchMenu:
             d = amyboard.display
             lvl = self.cur
             n = len(lvl.items)
-            start = 0
-            if n > MENU_VISIBLE:
-                start = lvl.idx - MENU_VISIBLE // 2
-                if start < 0:
-                    start = 0
-                if start > n - MENU_VISIBLE:
-                    start = n - MENU_VISIBLE
+            # Edge-scroll: keep the visible window fixed while the cursor moves
+            # inside it (so a step touches only the two selection rows), and scroll
+            # by the minimum only when the cursor reaches an edge. Centering instead
+            # would shift the whole window every step -> a full ~9-row repaint per
+            # detent (~150ms of I2C) that starves the audio render.
+            start = lvl.start
+            if n <= MENU_VISIBLE:
+                start = 0
+            elif lvl.idx < start:
+                start = lvl.idx
+            elif lvl.idx >= start + MENU_VISIBLE:
+                start = lvl.idx - MENU_VISIBLE + 1
+            start = clamp(start, 0, max(0, n - MENU_VISIBLE))
+            lvl.start = start
             # Current frame = title row + visible item rows, as diffable tuples.
             frame = [(0, 't', lvl.title)]
             y = MENU_TOP_Y
@@ -1727,12 +1746,29 @@ class SketchMenu:
                 _begin_flush(0, 127)
                 self._needs_clear = False
             else:
-                for idx in range(len(frame)):
-                    if frame[idx] != self._prev[idx]:
-                        ry, kind, payload = frame[idx]
+                changed = [j for j in range(len(frame))
+                           if frame[j] != self._prev[j]]
+                if len(changed) <= 2:
+                    # Cursor move within a static window: only the two selection
+                    # rows changed -- push them now (responsive, ~2 short bands).
+                    for j in changed:
+                        ry, kind, payload = frame[j]
                         self._draw_row(d, ry, kind, payload)
                         if not _push_rows(ry, ry + MENU_LINE_H - 1):
                             amyboard.display_refresh()
+                else:
+                    # Window scrolled (only at an edge now, thanks to edge-scroll):
+                    # every visible row shifted, so ~9 rows changed. Pushing them
+                    # all synchronously is ~150ms of I2C in one loop, which starves
+                    # AMY's audio render and makes the LFO/vibrato stutter. Draw
+                    # them, then blit PROGRESSIVELY over just the changed span (one
+                    # band per loop) so no single loop holds the bus for long.
+                    ys = []
+                    for j in changed:
+                        ry, kind, payload = frame[j]
+                        self._draw_row(d, ry, kind, payload)
+                        ys.append(ry)
+                    _begin_flush(min(ys), max(ys) + MENU_LINE_H - 1)
             self._prev = frame
         except Exception:
             pass
