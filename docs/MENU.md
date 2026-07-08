@@ -80,11 +80,8 @@ Opened by turn/click/short-hold while playing. Structure:
 ```
 POLYSYNTH
 ├─ Param Control     → numbered list of all 28 synth params → per-param editor
-├─ Presets
-│  ├─ Save State as Preset   placeholder (Stage 4)
-│  └─ Load Preset            placeholder (Stage 4)
+├─ Presets           → Save State as Preset · Load Preset · Delete Preset
 ├─ Display Mode      → CC Monitor · Screensaver · Oscilloscope   (see DISPLAY_MODES.md)
-├─ MIDI Channel      placeholder (deferred — see MIDI_MAPPING.md / FIRMWARE_NOTES.md)
 └─ Resume Playing
 ```
 

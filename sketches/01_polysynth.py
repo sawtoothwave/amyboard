@@ -217,26 +217,28 @@ CC_VCF_ATK     = 40
 CC_VCF_DEC     = 41
 CC_VCF_SUS     = 42
 CC_VCF_REL     = 43
-CC_VCA_ATK     = 44
-CC_VCA_DEC     = 45
-CC_VCA_SUS     = 46
-CC_VCA_REL     = 47
-CC_FLT_RES     = 71
-CC_FLT_CUTOFF  = 74
-# LFO controls, grouped source-then-destination. Freq (76) keeps the standard
-# MIDI LFO-rate CC; the rest are the sketch's own convention (handle_cc processes
-# every CC itself and the LFO is a bespoke mod_source, so AMY never auto-maps
-# these -- the numbers are ours to arrange). Layout: engine = freq (76) +
-# waveshape (77); then destinations = pitch/vibrato (78), PWM (79), filter (80),
-# and tremolo depth per osc = A (81) / B (82). Vibrato is GLOBAL (both oscs share
-# one depth) -- the standard mod-wheel form; see the mod-wheel alias below.
-CC_LFO_FREQ    = 76
-CC_LFO_WAVE    = 77
-CC_LFO_PITCH   = 78
-CC_LFO_PWM     = 79
+# The amp (VCA) envelope uses AMYboard/standard-MIDI default ADSR CCs for
+# backwards-compat: attack 73, decay 75, sustain 79, release 72. The filter (VCF)
+# envelope keeps its own CCs (40-43) -- AMYboard's default synth has no 2nd env.
+CC_VCA_ATK     = 73
+CC_VCA_DEC     = 75
+CC_VCA_SUS     = 79
+CC_VCA_REL     = 72
+CC_FLT_RES     = 71    # standard MIDI "Harmonic/Timbre"
+CC_FLT_CUTOFF  = 74    # standard MIDI "Brightness"
+# LFO controls. Aligned to the standard MIDI vibrato CCs where they exist -- rate
+# (76) and vibrato depth (77) -- for backwards-compat; the rest use spare CCs.
+# handle_cc processes every CC itself (the LFO is a bespoke mod_source, so AMY
+# never auto-maps these). Vibrato is GLOBAL (both oscs share one depth) -- the
+# standard mod-wheel form; see the mod-wheel alias below. PWM sits at 83 because
+# the amp-envelope sustain (79) took its former slot.
+CC_LFO_FREQ    = 76    # standard MIDI vibrato rate
+CC_LFO_PITCH   = 77    # standard MIDI vibrato depth
+CC_LFO_WAVE    = 78
 CC_LFO_FILT    = 80
 CC_LFO_AMP_A   = 81
 CC_LFO_AMP_B   = 82
+CC_LFO_PWM     = 83
 
 # The MIDI mod wheel is the standard vibrato-depth controller, so we treat CC 1 as
 # an alias for CC_LFO_PITCH (handle_cc remaps it): a performer's wheel adds/removes
@@ -1613,7 +1615,6 @@ class SketchMenu:
             ('Param Control', self._open_params),
             ('Presets', self._open_presets),
             ('Display Mode', self._open_display),
-            ('MIDI Channel', self._todo),
             ('Resume Playing', self.close),
         ])
 
@@ -1763,11 +1764,6 @@ class SketchMenu:
         set_display_mode(mode)
         _set_setting('display_mode', mode.name)   # remember across reboot/reload
         self.close()             # close so the chosen mode is immediately visible
-
-    def _todo(self):
-        self.stack.append(_MenuLevel('COMING SOON', [('(not built yet)', None)]))
-        self.dirty = True
-        self._needs_clear = True
 
     def handle(self, delta, click, back):
         if self._toast_msg:
