@@ -1,12 +1,19 @@
-# AMYboard
+# Overview
 
-Synthesizer control code for an AMYboard in a Eurorack environment.
+This project provides a few different sets of  instrument/control code for an [AMYboard](https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/README.md) synthesizer board.
 
-## Overview
+## Components
 
-This project provides instrument/control code for an [AMYboard](https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/README.md) synthesizer board, enabling it to function as a polyphonic synthesizer engine within a Eurorack system.
+The code in this repository adds some cool features to your AMYboard workflow.
 
-## Current Status
+### Global components
+
+- **A deploy/verify function** that sends sketches directly to your AMYboard without using the web-based editor and verifies that the board is running what's expected. Helpful when coding new sketches.
+- **An onboard sketch loader** that runs directly on the AMYboard, letting you select and load different sketches without powering down, unracking, or re-connecting to your computer.
+
+### Individual sketches
+
+-**A 2-oscillator, analog-style, 6-voice polysynth with MIDI CC control over all critical functions.** By default, the sketch is preconfigured to "just work" with [a screen](https://www.adafruit.com/product/5297?gad_source=1&gad_campaignid=23986111167&gbraid=0AAAAADx9JvS2lB1lX_Ft_-n0t6ivycl2x&gclid=CjwKCAjw6rfSBhAqEiwA_yocptUVmj3G4L9UGqaPX8xZzAYFERMJMN3gjPKZAO3HPVFmfF6dC9cI-RoCM88QAvD_BwE) and [click encoder](https://www.adafruit.com/product/5880) (connected via I2C) for navigation, parameter control, and saving/loading presets. If you don't have those parts, though, you can still use the synthesizer and control its parameters via an external MIDI controller (more details **HERE**).
 
 - **`sketches/01_polysynth.py`** is the canonical instrument: a 2-oscillator (A/B)
   analog-style synth with 6-voice polyphony, a shared resonant filter (VCF
@@ -54,13 +61,6 @@ This project provides instrument/control code for an [AMYboard](https://github.c
   python deploy_auto.py --sketch sketches/01_polysynth.py            # deploy + verify
   python deploy_auto.py --sketch sketches/01_polysynth.py --activate # deploy + boot into it
   ```
-
-## Control Setup
-
-- **Keyboard**: Arturia Keystep Pro
-- **Sequencer**: Squarp Hermod+
-- **Parameter Controller**: Oxi e16
-- **Interface**: MIDI (channel 12)
 
 ## Planned Hardware Enhancements
 
