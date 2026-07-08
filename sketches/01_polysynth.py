@@ -686,6 +686,92 @@ def _apply_patch(d):
 # docs/MIDI_MAPPING.md). The capture/apply helpers above are kept for presets.
 
 
+# --- Presets ----------------------------------------------------------------
+# Named patch snapshots saved to internal flash. A preset stores the RAW 0-127
+# value of every editable CC (a copy of param_values below) -- i.e. the exact
+# knob positions -- NOT the derived globals. Loading replays those values through
+# handle_cc, the same path a physical knob turn takes: each parameter's correct
+# live-update runs (including the pitch/PWM LFO 'mod' coefs that init_synth does
+# not re-send), the Param Control editor stays accurate (it reads param_values),
+# and held notes are never cut (no voice reallocation). One JSON file holds an
+# ordered list of {'name', 'cc'} entries; the whole file is rewritten on save
+# (tiny, so flash wear is a non-issue -- writes happen only on an explicit save).
+PRESETS_FILE = '/user/polysynth_presets.json'
+PRESET_NAME_MAX = 12      # longest preset name the name-entry screen accepts
+MAX_PRESETS = 32          # generous backstop so a runaway can't fill flash
+
+
+def _load_presets():
+    try:
+        with open(PRESETS_FILE) as f:
+            d = json.load(f)
+        if isinstance(d, list):
+            # Keep only well-formed entries so one bad record can't break the list.
+            return [p for p in d
+                    if isinstance(p, dict) and isinstance(p.get('name'), str)
+                    and isinstance(p.get('cc'), dict)]
+    except Exception:
+        pass
+    return []
+
+
+_presets = _load_presets()
+
+
+def _write_presets():
+    # Persist the whole list. Guarded so a flash-write fault never disturbs
+    # audio/MIDI; returns success so the UI can report it.
+    try:
+        with open(PRESETS_FILE, 'w') as f:
+            json.dump(_presets, f)
+        return True
+    except Exception:
+        return False
+
+
+def _capture_preset():
+    # Raw 0-127 snapshot of every editable CC -- the exact knob positions. JSON
+    # object keys must be strings, so stringify the CC numbers (parsed back on
+    # load). This is the save/load payload (see _apply_preset for the replay).
+    return {str(cc): int(v) for cc, v in param_values.items()}
+
+
+def _apply_preset(cc_map):
+    # Replay a saved snapshot through handle_cc -- the canonical live-apply path.
+    # Unknown/uneditable CCs are skipped, so an older preset stays compatible if
+    # the parameter set changes (its stale CCs are ignored; untouched params keep
+    # their current value rather than resetting).
+    if not isinstance(cc_map, dict):
+        return
+    for k, v in cc_map.items():
+        try:
+            cc = int(k)
+            val = clamp(int(v), 0, 127)
+        except Exception:
+            continue
+        if cc in param_values:
+            handle_cc(cc, val)
+
+
+def _find_preset(name):
+    for i, p in enumerate(_presets):
+        if p.get('name') == name:
+            return i
+    return -1
+
+
+def _save_preset(name):
+    # Overwrite an existing same-name preset in place, else append a new one.
+    # The MAX_PRESETS cap is enforced by the UI before it reaches a NEW name.
+    entry = {'name': name, 'cc': _capture_preset()}
+    i = _find_preset(name)
+    if i >= 0:
+        _presets[i] = entry
+    else:
+        _presets.append(entry)
+    return _write_presets()
+
+
 # ---------------------------------------------------------------------------
 # CC dispatch -- each CC updates only its parameter live (no voice reset, so
 # held notes are never cut off).
@@ -1325,6 +1411,7 @@ MENU_TOP_Y = 18
 MENU_VISIBLE = 8
 MENU_LABEL_MAX = 18
 MENU_IDLE_MS = 10000     # auto-close the menu to the display mode after this idle
+TOAST_MS = 1200          # how long a confirmation toast (e.g. "PRESET SAVED!") shows
 
 # Parameter-editor (Param Control) layout: a 0-127 track with a cursor, the raw
 # value floating over the cursor, and (for discrete params) a friendly label.
@@ -1417,6 +1504,28 @@ class _EditLevel:
         self.prev_label = None    # last drawn friendly label (redraw on change)
 
 
+# Name-entry ring: turning scrolls the active slot through these; a click acts on
+# the current one. Plain chars append (the candidate stays put for the next slot);
+# the two special tokens act instead of appending (DEL backspaces, OK confirms/
+# saves). Space is a real entry (drawn as a placeholder). Scrolling CLAMPS at the
+# ends (no wrap), so a fast spin lands on OK (end) or 'a' (start).
+_NAME_RING = [c for c in 'abcdefghijklmnopqrstuvwxyz0123456789 '] + ['DEL', 'OK']
+
+
+class _NameLevel:
+    # Preset-name entry pushed on the menu stack. `name` is the committed string so
+    # far; `sel` indexes _NAME_RING for the in-progress slot. Turn scrolls the
+    # candidate, click commits it, hold (back) cancels the whole name. Like
+    # _EditLevel it owns a full/dirty pair driving its own render path.
+    __slots__ = ('name', 'sel', 'dirty', 'full')
+
+    def __init__(self):
+        self.name = ''
+        self.sel = 0
+        self.dirty = True
+        self.full = True
+
+
 class SketchMenu:
     def __init__(self):
         self.stack = []          # empty => closed (playing)
@@ -1426,6 +1535,9 @@ class SketchMenu:
         self.suspended = False   # editor idled out: state kept, display mode shown
         self._click_pending_at = 0   # ticks of a deferred editor single-click (0=none)
         self._edit_last_render = 0   # ticks of the last editor redraw (throttle gate)
+        self._toast_msg = ''         # transient confirmation (e.g. "PRESET SAVED!")
+        self._toast_until = 0        # ticks_ms when the toast auto-dismisses
+        self._toast_drawn = False    # toast painted once already (don't re-flush)
 
     @property
     def is_open(self):
@@ -1520,12 +1632,81 @@ class SketchMenu:
         self.dirty = True
         self._needs_clear = True
 
+    def _presets_menu(self):
+        return _MenuLevel('PRESETS', [
+            ('Save State as Preset', self._start_save),
+            ('Load Preset', self._open_load),
+        ])
+
     def _open_presets(self):
-        # Stage 4 replaces these leaves with the real save/load flows.
-        self.stack.append(_MenuLevel('PRESETS', [
-            ('Save State as Preset', self._todo),
-            ('Load Preset', self._todo),
-        ]))
+        self.stack.append(self._presets_menu())
+        self.dirty = True
+        self._needs_clear = True
+
+    def _start_save(self):
+        # Open the name-entry screen; committing it saves the live patch.
+        self.stack.append(_NameLevel())
+        self.dirty = True
+        self._needs_clear = True
+
+    def _commit_name(self, lvl):
+        # Called when the user clicks OK. Empty names are ignored (stay editing).
+        # Otherwise confirm: "SAVE?" (or "OVERWRITE?" if the name already exists)
+        # with Yes/No. Yes saves + returns to the polysynth menu; No -- or a hold --
+        # pops back to the name-entry screen. A new name at the cap is blocked.
+        name = lvl.name.strip()
+        if not name:
+            return
+        exists = _find_preset(name) >= 0
+        if not exists and len(_presets) >= MAX_PRESETS:
+            self.stack.append(_MenuLevel('PRESETS FULL', [
+                ('Max %d reached' % MAX_PRESETS, None),
+                ('Back', self._pop),
+            ]))
+        else:
+            self.stack.append(_MenuLevel('OVERWRITE?' if exists else 'SAVE?', [
+                ('Yes', (lambda n=name: self._do_save(n))),
+                ('No', self._pop),
+            ]))
+        self.dirty = True
+        self._needs_clear = True
+
+    def _do_save(self, name):
+        # Persist, flash a "PRESET SAVED!" toast, and drop to the main polysynth
+        # menu (the toast auto-dismisses to it -- see render()).
+        ok = _save_preset(name)
+        self.stack = [self._root()]
+        self._show_toast('PRESET SAVED!' if ok else 'SAVE FAILED')
+        self.dirty = True
+        self._needs_clear = True
+
+    def _show_toast(self, msg):
+        self._toast_msg = msg
+        self._toast_until = time.ticks_add(time.ticks_ms(), TOAST_MS)
+        self._toast_drawn = False
+
+    def _open_load(self):
+        # List saved presets; clicking one applies it live and returns to playing.
+        if not _presets:
+            self.stack.append(_MenuLevel('LOAD PRESET', [('(none saved)', None)]))
+        else:
+            items = [(_presets[i].get('name', '?')[:MENU_LABEL_MAX],
+                      (lambda i=i: self._load_preset(i)))
+                     for i in range(len(_presets))]
+            self.stack.append(_MenuLevel('LOAD PRESET', items))
+        self.dirty = True
+        self._needs_clear = True
+
+    def _load_preset(self, i):
+        try:
+            _apply_preset(_presets[i].get('cc'))
+        except Exception:
+            pass
+        self.close()             # apply + return to playing so it's heard at once
+
+    def _pop(self):
+        if self.stack:
+            self.stack.pop()
         self.dirty = True
         self._needs_clear = True
 
@@ -1546,6 +1727,14 @@ class SketchMenu:
         self._needs_clear = True
 
     def handle(self, delta, click, back):
+        if self._toast_msg:
+            # A "saved" toast is showing: any input just dismisses it (it does not
+            # also act on the menu underneath), then the menu repaints.
+            if delta or click or back:
+                self._toast_msg = ''
+                self.dirty = True
+                self._needs_clear = True
+            return
         if not self.is_open:
             return
         lvl = self.cur
@@ -1577,6 +1766,33 @@ class SketchMenu:
                     # First click: defer commit+exit so a 2nd click can arrive
                     # (fired by service_pending once the window passes).
                     self._click_pending_at = now
+            return
+        if isinstance(lvl, _NameLevel):
+            # Name entry: turn scrolls the ring candidate, click commits it (append
+            # char / backspace / confirm), hold cancels the whole name.
+            if back:
+                self.stack.pop()
+                self.dirty = True
+                self._needs_clear = True
+                return
+            if delta:
+                # Clamp (no wrap) so a fast spin zips straight to OK at the end
+                # (or 'a' at the start); acceleration lets a quick flick get there.
+                lvl.sel = clamp(lvl.sel + _accel(delta), 0, len(_NAME_RING) - 1)
+                lvl.dirty = True
+            if click:
+                item = _NAME_RING[lvl.sel]
+                if item == 'OK':
+                    self._commit_name(lvl)
+                elif item == 'DEL':
+                    if lvl.name:
+                        lvl.name = lvl.name[:-1]
+                    lvl.dirty = True
+                elif len(lvl.name) < PRESET_NAME_MAX:
+                    lvl.name += item
+                    # Keep the candidate on the same letter for the next slot
+                    # (handy for double letters / similar chars).
+                    lvl.dirty = True
             return
         if back:                 # hold: pop one level (may close the menu)
             self.stack.pop()
@@ -1694,17 +1910,89 @@ class SketchMenu:
         except Exception:
             pass
 
+    def _name_row(self, d, y, s):
+        # Clear one 8px row and draw 1x text centered in it.
+        d.fill_rect(0, y, DISPLAY_WIDTH, CHAR_H, 0)
+        w = len(s) * CHAR_W
+        sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
+        d.text(s, sx, y, 255)
+
+    def _draw_toast(self, msg):
+        # Full-screen centered confirmation (1x), pushed progressively.
+        try:
+            d = amyboard.display
+            d.fill(0)
+            w = len(msg) * CHAR_W
+            sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
+            d.text(msg, sx, 60, 255)
+            _begin_flush(0, 127)
+        except Exception:
+            pass
+
+    def _render_name(self, cur):
+        # Preset-name entry, drawn 1x (2x was too slow). On open/resume do a full
+        # clear; on a turn/click push only the two rows that move -- the name and
+        # the candidate -- so scrolling the ring stays snappy.
+        if not (self.dirty or cur.dirty):
+            return
+        self.dirty = False
+        cur.dirty = False
+        full = cur.full or self._needs_clear
+        try:
+            d = amyboard.display
+            # Name so far + a cursor block. Tail-truncated to fit (you append at the
+            # end, so the tail is the part worth showing).
+            disp = cur.name + '_'
+            maxc = DISPLAY_WIDTH // CHAR_W
+            if len(disp) > maxc:
+                disp = disp[-maxc:]
+            # Current ring candidate -- the thing a click acts on.
+            item = _NAME_RING[cur.sel]
+            cand = item if item in ('DEL', 'OK') else \
+                ('[space]' if item == ' ' else item)
+            if full:
+                d.fill(0)
+                d.text('NAME PRESET', 0, EDIT_TITLE_Y, 255)
+                self._name_row(d, EDIT_LABEL_Y, disp)
+                self._name_row(d, EDIT_VALUE_Y, cand)
+                cur.full = False
+                self._needs_clear = False
+                _begin_flush(0, 127)
+                return
+            self._name_row(d, EDIT_LABEL_Y, disp)
+            if not _push_rows(EDIT_LABEL_Y, EDIT_LABEL_Y + CHAR_H - 1):
+                amyboard.display_refresh()
+            self._name_row(d, EDIT_VALUE_Y, cand)
+            if not _push_rows(EDIT_VALUE_Y, EDIT_VALUE_Y + CHAR_H - 1):
+                amyboard.display_refresh()
+        except Exception:
+            pass
+
     def render(self):
         # If a progressive full-repaint flush is in flight, keep pushing bands
         # and defer any new drawing until the panel is settled.
         if _flush_active:
             _service_flush()
             return
+        if self._toast_msg:
+            # A confirmation toast owns the screen until it times out, then the
+            # menu underneath repaints.
+            if time.ticks_diff(time.ticks_ms(), self._toast_until) < 0:
+                if not self._toast_drawn:
+                    self._draw_toast(self._toast_msg)
+                    self._toast_drawn = True
+                return
+            self._toast_msg = ''
+            self.dirty = True
+            self._needs_clear = True
         if not self.is_open:
             return
         cur = self.cur
         if isinstance(cur, _EditLevel):
             self._render_edit(cur)
+            return
+        if isinstance(cur, _NameLevel):
+            self._render_name(cur)
             return
         if not self.dirty:
             return
