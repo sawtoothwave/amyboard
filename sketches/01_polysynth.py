@@ -1636,6 +1636,7 @@ class SketchMenu:
         return _MenuLevel('PRESETS', [
             ('Save State as Preset', self._start_save),
             ('Load Preset', self._open_load),
+            ('Delete Preset', self._open_delete),
         ])
 
     def _open_presets(self):
@@ -1703,6 +1704,48 @@ class SketchMenu:
         except Exception:
             pass
         self.close()             # apply + return to playing so it's heard at once
+
+    def _delete_menu(self):
+        # The delete list, rebuilt each time so it always reflects the current set
+        # (indices shift as presets are removed). Items delete by NAME, not index,
+        # so a stale closure can never remove the wrong preset.
+        if not _presets:
+            return _MenuLevel('DELETE PRESET', [('(none saved)', None)])
+        items = [(_presets[i].get('name', '?')[:MENU_LABEL_MAX],
+                  (lambda nm=_presets[i].get('name', '?'): self._confirm_delete(nm)))
+                 for i in range(len(_presets))]
+        return _MenuLevel('DELETE PRESET', items)
+
+    def _open_delete(self):
+        self.stack.append(self._delete_menu())
+        self.dirty = True
+        self._needs_clear = True
+
+    def _confirm_delete(self, name):
+        # Destructive: the name is in the two-line header ("Delete preset\n<name>?")
+        # and only Yes/No are selectable. No or hold pops back to the delete list.
+        # A 12-char-max name + '?' always fits the 16-char header line. The trailing
+        # newline leaves a blank line between the name and the Yes/No options.
+        self.stack.append(_MenuLevel('Delete preset\n%s?\n' % name, [
+            ('Yes', (lambda n=name: self._do_delete(n))),
+            ('No', self._pop),
+        ]))
+        self.dirty = True
+        self._needs_clear = True
+
+    def _do_delete(self, name):
+        i = _find_preset(name)
+        if i >= 0:
+            del _presets[i]
+            _write_presets()
+        # Flash "DELETED!" then land back on the refreshed delete list (or the
+        # Presets menu if that was the last one).
+        self.stack = [self._root(), self._presets_menu()]
+        if _presets:
+            self.stack.append(self._delete_menu())
+        self._show_toast('DELETED!')
+        self.dirty = True
+        self._needs_clear = True
 
     def _pop(self):
         if self.stack:
@@ -2015,9 +2058,16 @@ class SketchMenu:
                 start = lvl.idx - MENU_VISIBLE + 1
             start = clamp(start, 0, max(0, n - MENU_VISIBLE))
             lvl.start = start
-            # Current frame = title row + visible item rows, as diffable tuples.
-            frame = [(0, 't', lvl.title)]
-            y = MENU_TOP_Y
+            # Current frame = title row(s) + visible item rows, as diffable tuples.
+            # A title may hold newlines (used by confirm prompts) -> up to three 1x
+            # header lines; items begin below them (a trailing '' line leaves a blank
+            # gap). A plain single-line title behaves exactly as before.
+            frame = []
+            ty = 0
+            for tline in lvl.title.split('\n')[:3]:
+                frame.append((ty, 't', tline))
+                ty += 9
+            y = max(MENU_TOP_Y, ty)
             i = start
             while i < n and i < start + MENU_VISIBLE:
                 frame.append((y, 'i', (i == lvl.idx, lvl.items[i][0])))
