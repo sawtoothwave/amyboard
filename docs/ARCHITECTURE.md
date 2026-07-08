@@ -28,7 +28,7 @@ Controllers → MIDI → AMYboard → Audio Output
 
 **sketches/01_polysynth.py (Main Control Loop)**
 - The canonical "last good" instrument implementation; future enhancements build on it. (Root `sketch.py` is a scratch staging copy used while deploying/experimenting.)
-- A 2-oscillator (A/B) analog-style synth with 6-voice polyphony, matching the frozen CC map in `docs/CC_MAPPING.md`.
+- A 2-oscillator (A/B) analog-style synth with 6-voice polyphony, matching the CC map in [docs/CC_MAPPING.md](CC_MAPPING.md).
 - Per-voice oscillator graph: a `SILENT` filter-head (osc 0) chained to Osc A (osc 1) chained to Osc B (osc 2), plus a silent per-voice LFO (osc 3) used as the `mod_source` for the head, Osc A and Osc B. AMY sums A and B into the silent head, then applies one shared filter and the VCA envelope to that sum, so the filter affects both oscillators equally.
 - Osc A/B have independent stepped tuning (CC 20/24), six-wave buckets excluding wavetable/PCM/ALGO (CC 21/25), duty (CC 22/26) and mix level (CC 23/27). Both oscillators reference 440 Hz (unison at center).
 - Shared resonant filter with selectable type (CC 31: LPF24/LPF/BPF/HPF), cutoff (CC 74), resonance (CC 71), envelope amount (CC 30), key tracking (CC 32), plus VCF (CC 40-43) and VCA (CC 73/75/79/72, the AMYboard/std-MIDI ADSR defaults) envelopes.
@@ -58,7 +58,7 @@ Controllers → MIDI → AMYboard → Audio Output
 
 ### Control Sections (E16 Pages)
 
-The intended page groupings and frozen CC assignments are documented in `docs/CC_MAPPING.md`.
+The CC map is in [docs/CC_MAPPING.md](CC_MAPPING.md); the e16 page/knob layout is in [docs/E16_SETUP.md](E16_SETUP.md).
 
 ### Future Enhancements
 

@@ -8,33 +8,29 @@ This project provides instrument/control code for an [AMYboard](https://github.c
 
 ## Current Status
 
-- `sketches/01_polysynth.py` is the canonical instrument implementation: a
-  2-oscillator (A/B) analog-style synth with 6-voice polyphony, a shared
-  resonant filter with VCF envelope and key tracking, a VCA envelope, and a
-  per-voice LFO routed to pitch, PWM and filter cutoff. It implements the frozen
-  CC map and updates each parameter live (no voice reset, so held notes are never
-  cut off).
-- All MIDI is received on **channel 12 only**: AMY maps synth number N to MIDI
-  channel N, so the instrument lives on synth 12 and auto-routes channel-12
-  notes. Because the firmware allocates a default instrument on synth 1 (channel
-  1) at boot, `init_synth()` zeroes the voice count of every synth except 12 — a
-  synth with no voices cannot sound, so channels other than 12 stay silent.
-  `init_synth()` also sets `grab_midi_notes=1` on synth 12, which the current
-  firmware requires for note forwarding (see [docs/FIRMWARE_NOTES.md](docs/FIRMWARE_NOTES.md)).
-  Control Changes are handled via `midi.add_callback(midi_cb)`. CV1 provides
-  1V/oct monophonic pitch and CV2 a gate.
-- The board is navigated on-device with a rotary encoder + button: a slim global
-  launcher menu and each sketch's own menu, sharing one gesture model
-  (click in / hold out / turn scroll). See [docs/MENU.md](docs/MENU.md). The OLED
-  shows a selectable, persisted display mode (see [docs/DISPLAY_MODES.md](docs/DISPLAY_MODES.md)).
-  The polysynth's menu includes **Param Control**, an on-device editor for all 26
-  synth parameters (0-127 sliders driving the same CCs as the E16, with a live
-  2× readout and encoder acceleration). The polysynth also reads its own encoder
-  when run without the launcher, so it works as a **self-contained single file**
-  with or without the wrapper.
-- The frozen baseline for MIDI CC assignments lives in `docs/CC_MAPPING.md`.
-- Additional synth graph references live in `amy_patch_examples/`, notably
-  `sketch_5osc_analog.py` and its explicit Python-defined synth graph.
+- **`sketches/01_polysynth.py`** is the canonical instrument: a 2-oscillator (A/B)
+  analog-style synth with 6-voice polyphony, a shared resonant filter (VCF
+  envelope + key tracking), a VCA envelope, and a per-voice LFO routed to vibrato
+  (global), PWM, filter cutoff and per-oscillator tremolo. Parameters update live
+  — no voice reset, so held notes are never cut. CC assignments follow
+  AMYboard/standard-MIDI defaults where they exist; the full map is in
+  [docs/CC_MAPPING.md](docs/CC_MAPPING.md).
+- MIDI is received on **channel 12 only** — AMY maps synth number N to MIDI
+  channel N, so the instrument lives on synth 12. CV1 provides 1V/oct monophonic
+  pitch and CV2 a gate. (Firmware specifics — the boot-time channel-1 default
+  synth, `grab_midi_notes` — are covered in
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+  [docs/FIRMWARE_NOTES.md](docs/FIRMWARE_NOTES.md).)
+- **On-device control** via a rotary encoder + button (click in / hold out / turn
+  to scroll): a slim global launcher plus each sketch's own menu — see
+  [docs/MENU.md](docs/MENU.md). The polysynth menu offers **Param Control** (edit
+  all 28 synth parameters as 0-127 sliders), **Presets** (save / name / load /
+  delete patches to flash), and a selectable, persisted OLED **display mode**
+  ([docs/DISPLAY_MODES.md](docs/DISPLAY_MODES.md)); the mod wheel drives vibrato.
+  Run without the launcher, the polysynth reads its own encoder too, so it works
+  as a **self-contained single file**.
+- Additional synth-graph references live in `amy_patch_examples/` (notably
+  `sketch_5osc_analog.py`).
 
 ## Sketches & Deployment
 
@@ -78,7 +74,7 @@ This project provides instrument/control code for an [AMYboard](https://github.c
 - [Architecture](docs/ARCHITECTURE.md) - High-level system design
 - [Menu & Navigation](docs/MENU.md) - On-device menus, gesture model, launcher↔sketch contract
 - [Display Modes](docs/DISPLAY_MODES.md) - Pluggable OLED display modes (CC Monitor, Screensaver, Oscilloscope)
-- [CC Mapping](docs/CC_MAPPING.md) - Frozen CC baseline and live parameter behavior
+- [CC Mapping](docs/CC_MAPPING.md) - CC → parameter map and live behavior
 - [MIDI Mapping](docs/MIDI_MAPPING.md) - Control surface roles and channel assignment
 - [Firmware Notes](docs/FIRMWARE_NOTES.md) - Firmware gotchas: audio test, grab_midi_notes, boot-loop recovery
 - [E16 Setup](docs/E16_SETUP.md) - Oxi e16 configuration and deployment notes

@@ -18,6 +18,14 @@ The AMYboard control uses three dedicated pages on the e16:
 
 Pages 1-3 are reserved for your existing MFT configuration and will be preserved.
 
+## Page Layout
+
+Which parameters sit on each page (CCs match [CC_MAPPING.md](CC_MAPPING.md) for what each does; exact knob positions are defined in `e16-config/amyboard.json`):
+
+- **Page 4 — Oscillators + Filter:** Osc A/B Pitch (20/24), Wave (21/25), Duty (22/26), Level (23/27); Filter Env Amount (30), Filter Type (31), Key Scale (32), Resonance (71), Cutoff (74).
+- **Page 8 — Envelopes:** VCF A/D/S/R (40/41/42/43); VCA A/D/S/R (73/75/79/72).
+- **Page 12 — LFO:** Freq (76), Waveshape (78), → Pitch/Vibrato (77, also mod wheel CC 1), → PWM (83), → Filter (80), → Osc A/B Amp/Tremolo (81/82).
+
 ## Configuration Files
 
 ### `amyboard.json`
