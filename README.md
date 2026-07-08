@@ -1,19 +1,21 @@
 # Overview
 
-This project provides a few different sets of  instrument/control code for an [AMYboard](https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/README.md) synthesizer board.
+This project provides a few different pieces of code designed to add some cool features to an [AMYboard](https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/README.md) synthesizer.
 
-## Components
+## Utilities
 
-The code in this repository adds some cool features to your AMYboard workflow.
-
-### Global components
-
-- **A deploy/verify function** that sends sketches directly to your AMYboard without using the web-based editor and verifies that the board is running what's expected. Helpful when coding new sketches.
+- **A deploy/verify utility** that sends sketches directly to your AMYboard from the command line or a code editor like VS Code and verifies that the board is running what's expected. Helpful when coding new sketches.
 - **An onboard sketch loader** that runs directly on the AMYboard, letting you select and load different sketches without powering down, unracking, or re-connecting to your computer.
 
-### Individual sketches
+## Individual AMY instrument sketches
 
--**A 2-oscillator, analog-style, 6-voice polysynth with MIDI CC control over all critical functions.** By default, the sketch is preconfigured to "just work" with [a screen](https://www.adafruit.com/product/5297?gad_source=1&gad_campaignid=23986111167&gbraid=0AAAAADx9JvS2lB1lX_Ft_-n0t6ivycl2x&gclid=CjwKCAjw6rfSBhAqEiwA_yocptUVmj3G4L9UGqaPX8xZzAYFERMJMN3gjPKZAO3HPVFmfF6dC9cI-RoCM88QAvD_BwE) and [click encoder](https://www.adafruit.com/product/5880) (connected via I2C) for navigation, parameter control, and saving/loading presets. If you don't have those parts, though, you can still use the synthesizer and control its parameters via an external MIDI controller (more details **HERE**).
+- **Polysynth:** A 2-oscillator, analog-style, 6-voice polysynth with MIDI CC control over all critical functions. By default, Polysynth is preconfigured to "just work" with a [screen](https://www.adafruit.com/product/5297?gad_source=1&gad_campaignid=23986111167&gbraid=0AAAAADx9JvS2lB1lX_Ft_-n0t6ivycl2x&gclid=CjwKCAjw6rfSBhAqEiwA_yocptUVmj3G4L9UGqaPX8xZzAYFERMJMN3gjPKZAO3HPVFmfF6dC9cI-RoCM88QAvD_BwE) and [click encoder](https://www.adafruit.com/product/5880) (connected via I2C) for navigation, parameter control, and saving/loading presets. If all you have is an AMYboard with none of those I2C peripheral parts, you can still use the synthesizer and control its parameters using an external MIDI controller (more details **HERE**).
+- **More to come (maybe).**
+
+
+
+
+### Scrap content below
 
 - **`sketches/01_polysynth.py`** is the canonical instrument: a 2-oscillator (A/B)
   analog-style synth with 6-voice polyphony, a shared resonant filter (VCF
@@ -62,11 +64,6 @@ The code in this repository adds some cool features to your AMYboard workflow.
   python deploy_auto.py --sketch sketches/01_polysynth.py --activate # deploy + boot into it
   ```
 
-## Planned Hardware Enhancements
-
-- Adafruit 128x128 OLED display — **integrated** (SSD1327; drives the display
-  modes and menus)
-- M5Stack I2C joystick
 
 ## Documentation
 
