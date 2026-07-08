@@ -33,7 +33,8 @@ control surface.
 - **Keys**: Polyphonic note input (channel 12) → 6-voice AMY synth
 - **Velocity**: Drives note-on strength (velocity sensitivity is applied by the
   filter-head oscillator in each voice)
-- **Mod Wheel / Pitch Bend**: Not yet mapped
+- **Mod Wheel** (CC 1): Global vibrato depth (aliased to the LFO→Pitch CC; see
+  [CC_MAPPING.md](CC_MAPPING.md)). **Pitch Bend**: Not yet mapped
 
 ### Squarp Hermod+
 
@@ -57,7 +58,7 @@ control surface.
   without changing the frozen CC assignments.
 - Onboard OLED + encoder navigation is implemented (see [MENU.md](MENU.md) and
   [DISPLAY_MODES.md](DISPLAY_MODES.md)).
-- On-device **Param Control** edits all 26 CC-mapped parameters directly from the
+- On-device **Param Control** edits all 28 CC-mapped parameters directly from the
   encoder — no control surface needed (polysynth menu → Param Control; see
   [MENU.md](MENU.md)).
 - Not yet implemented: effects (reverb / echo / chorus), mod wheel / pitch bend

@@ -223,16 +223,26 @@ CC_VCA_SUS     = 46
 CC_VCA_REL     = 47
 CC_FLT_RES     = 71
 CC_FLT_CUTOFF  = 74
-# LFO controls. Freq (76) and pitch/osc depth (77) use the default AMYboard LFO
-# CCs; waveshape (78), PWM depth (79), filter depth (80) and the per-oscillator
-# amp/tremolo depths (81 osc A, 82 osc B) use spare CCs.
+# LFO controls, grouped source-then-destination. Freq (76) keeps the standard
+# MIDI LFO-rate CC; the rest are the sketch's own convention (handle_cc processes
+# every CC itself and the LFO is a bespoke mod_source, so AMY never auto-maps
+# these -- the numbers are ours to arrange). Layout: engine = freq (76) +
+# waveshape (77); then destinations = pitch/vibrato (78), PWM (79), filter (80),
+# and tremolo depth per osc = A (81) / B (82). Vibrato is GLOBAL (both oscs share
+# one depth) -- the standard mod-wheel form; see the mod-wheel alias below.
 CC_LFO_FREQ    = 76
-CC_LFO_PITCH   = 77
-CC_LFO_WAVE    = 78
+CC_LFO_WAVE    = 77
+CC_LFO_PITCH   = 78
 CC_LFO_PWM     = 79
 CC_LFO_FILT    = 80
 CC_LFO_AMP_A   = 81
 CC_LFO_AMP_B   = 82
+
+# The MIDI mod wheel is the standard vibrato-depth controller, so we treat CC 1 as
+# an alias for CC_LFO_PITCH (handle_cc remaps it): a performer's wheel adds/removes
+# vibrato out of the box, and it shares the one global LFO->pitch depth (so it also
+# reflects in Param Control and is captured by presets).
+CC_MODWHEEL    = 1
 
 # Filter type buckets for CC 31 (4 even bands across 0-127).
 FILTER_TYPES = [amy.FILTER_LPF24, amy.FILTER_LPF, amy.FILTER_BPF, amy.FILTER_HPF]
@@ -267,7 +277,7 @@ ENV_TIME_MAX_MS = 5000
 # 0) and ramped inside the AMY audio engine (no loop()-rate zippering).
 LFO_FREQ_MIN_HZ = 0.2
 LFO_FREQ_MAX_HZ = 20.0
-LFO_PITCH_DEPTH_MAX = 0.5    # octaves (quadratic curve; full = +/- 6 semitones)
+LFO_PITCH_DEPTH_MAX = 1.0    # octaves (quadratic curve; full = +/- 12 semitones)
 LFO_PWM_DEPTH_MAX   = 0.45   # duty modulation depth around the set duty
 LFO_FILT_DEPTH_MAX  = 2.0    # octaves (matches FLT_ENV_AMT_MAX)
 LFO_AMP_DEPTH_MAX   = 0.5    # tremolo depth (per osc); full ~ -60 dB dip to silence
@@ -322,7 +332,7 @@ CC_LABELS = {
     CC_VCA_ATK: 'VCA A',  CC_VCA_DEC: 'VCA D',
     CC_VCA_SUS: 'VCA S',  CC_VCA_REL: 'VCA R',
     CC_FLT_RES: 'RES',    CC_FLT_CUTOFF: 'CUTOFF',
-    CC_LFO_FREQ: 'LFO HZ',  CC_LFO_PITCH: 'LFO PT',
+    CC_LFO_FREQ: 'LFO HZ',  CC_LFO_PITCH: 'VIB',   CC_MODWHEEL: 'MOD WH',
     CC_LFO_WAVE: 'LFO WV',  CC_LFO_PWM: 'LFO PW',  CC_LFO_FILT: 'LFO FL',
     CC_LFO_AMP_A: 'A TREM', CC_LFO_AMP_B: 'B TREM',
 }
@@ -481,7 +491,8 @@ HEAD_AMP = {'const': 1.0, 'vel': 0, 'eg0': 0}
 
 def osc_freq(cents):
     # const in Hz at note 69, note coef 1.0 -> tracks keyboard with cents offset.
-    # 'mod' adds LFO pitch modulation (vibrato) in unit-per-octave depth.
+    # 'mod' adds the shared LFO vibrato at the global depth (unit-per-octave), so
+    # A and B track the same vibrato -- the standard mod-wheel form.
     return {'const': REF_HZ * math.pow(2.0, cents / 1200.0), 'note': 1,
             'mod': lfo_pitch_depth}
 
@@ -613,6 +624,7 @@ def update_lfo():
 
 
 def update_lfo_pitch():
+    # Global vibrato: both sounding oscs share one depth.
     amy.send(synth=SYNTH, osc=OSC_A, freq={'mod': lfo_pitch_depth})
     amy.send(synth=SYNTH, osc=OSC_B, freq={'mod': lfo_pitch_depth})
 
@@ -684,6 +696,12 @@ def handle_cc(cc, val):
     global flt_cutoff, flt_res, flt_type, flt_env_amt, key_scale
     global lfo_freq, lfo_wave, lfo_pitch_depth, lfo_pwm_depth, lfo_filt_depth
     global lfo_amp_a_depth, lfo_amp_b_depth
+
+    # The mod wheel is the standard vibrato controller: treat it as the LFO->pitch
+    # depth so a performer's wheel works out of the box and shares that one param
+    # (editor + presets stay in sync). Done before the param_values record below.
+    if cc == CC_MODWHEEL:
+        cc = CC_LFO_PITCH
 
     # Remember the raw value for any CC the Param Control editor can edit, so it
     # opens on the current value whether it was last set by a knob or the editor.
@@ -1284,6 +1302,8 @@ PARAMS = [
     _Param('Lfo>Pitch',   CC_LFO_PITCH,     0),
     _Param('Lfo>Pwm',     CC_LFO_PWM,       0),
     _Param('Lfo>Filter',  CC_LFO_FILT,      0),
+    _Param('Lfo>Amp A',   CC_LFO_AMP_A,     0),
+    _Param('Lfo>Amp B',   CC_LFO_AMP_B,     0),
 ]
 
 # Last raw 0-127 value seen per editable CC, seeded with each param's default.

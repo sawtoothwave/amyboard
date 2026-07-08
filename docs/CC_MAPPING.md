@@ -5,8 +5,8 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 ## Frozen Baseline
 
 - **MIDI Channel**: 12
-- **Frozen CC Range**: 20-32, 40-47, 71, 74, 76-82
-- **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony, plus a per-voice LFO. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs; the LFO (CC 76-82) modulates pitch, PWM, filter cutoff and per-oscillator amplitude (tremolo). The implementation column below records the live behavior.
+- **Frozen CC Range**: 1 (mod wheel), 20-32, 40-47, 71, 74, 76-82
+- **Status**: `sketch.py` now implements this full map as a live 2-oscillator (A/B) + filter instrument with 6-voice polyphony, plus a per-voice LFO. CC 20/24 use the stepped musical tuning map; CC 21/25 use the six-wave buckets; the filter, filter type, key scale, and both ADSR envelopes are wired to their CCs; the LFO (CC 76-82) modulates global pitch (vibrato, CC 78 — also driven by the mod wheel, CC 1), PWM and filter cutoff (all shared across both oscillators), plus per-oscillator amplitude (tremolo, CC 81 osc A / 82 osc B). The implementation column below records the live behavior.
 
 ## Frozen CC Assignments
 
@@ -33,13 +33,14 @@ This document is the frozen baseline MIDI CC map for the AMYboard rebuild, and i
 | 19 | VCA Decay | 45 | 0-127 | Baseline amp envelope decay |
 | 20 | VCA Sustain | 46 | 0-127 | Baseline amp envelope sustain |
 | 21 | VCA Release | 47 | 0-127 | Baseline amp envelope release |
-| 22 | LFO Freq | 76 | 0-127 | Default AMYboard LFO rate control |
-| 23 | LFO → Osc (Pitch) | 77 | 0-127 | Default AMYboard LFO-to-oscillator (vibrato) depth |
-| 24 | LFO Waveshape | 78 | 0-127 | LFO waveform select (spare CC) |
-| 25 | LFO → PWM | 79 | 0-127 | LFO-to-pulse-width depth (spare CC) |
-| 26 | LFO → Filter | 80 | 0-127 | LFO-to-filter-cutoff depth (spare CC) |
-| 27 | LFO → Osc A Amp (Tremolo) | 81 | 0-127 | LFO-to-Osc-A amplitude (tremolo) depth (spare CC) |
-| 28 | LFO → Osc B Amp (Tremolo) | 82 | 0-127 | LFO-to-Osc-B amplitude (tremolo) depth (spare CC) |
+| 22 | LFO Freq | 76 | 0-127 | Default AMYboard LFO rate CC (kept); LFO source |
+| 23 | LFO Waveshape | 77 | 0-127 | LFO waveform select; LFO source |
+| 24 | LFO → Pitch (Vibrato) | 78 | 0-127 | Global vibrato depth (both oscillators); also driven by the mod wheel (CC 1) |
+| 25 | LFO → PWM | 79 | 0-127 | LFO-to-pulse-width depth (both oscillators) |
+| 26 | LFO → Filter | 80 | 0-127 | LFO-to-filter-cutoff depth (both oscillators) |
+| 27 | LFO → Osc A Amp (Tremolo) | 81 | 0-127 | Osc A amplitude (tremolo) depth (per-oscillator) |
+| 28 | LFO → Osc B Amp (Tremolo) | 82 | 0-127 | Osc B amplitude (tremolo) depth (per-oscillator) |
+| — | Mod Wheel → Vibrato | 1 | 0-127 | Standard mod-wheel vibrato; alias of CC 78 (sets the same global LFO→pitch depth) |
 
 ## Live Implementation Notes
 
@@ -59,16 +60,24 @@ These describe how `sketch.py` currently maps each CC (0-127) to an AMY paramete
 | 40-43 | VCF A/D/S/R | Filter EG1 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
 | 44-47 | VCA A/D/S/R | Amp EG0 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
 | 76 | LFO Freq | LFO rate, logarithmic ~0.2-20 Hz. |
-| 77 | LFO → Osc (Pitch) | Vibrato depth on Osc A + B, quadratic, 0 to ±6 semitones (0.5 octave). |
-| 78 | LFO Waveshape | Six-wave buckets (same map as CC 21/25): Sine, Pulse, Saw Down, Saw Up, Triangle, Noise. |
+| 77 | LFO Waveshape | Six-wave buckets (same map as CC 21/25): Sine, Pulse, Saw Down, Saw Up, Triangle, Noise. |
+| 78 | LFO → Pitch (Vibrato) | Global vibrato depth on both oscillators, quadratic, 0 to ±12 semitones (1 octave), via each osc's `freq` `mod` coef. Also driven by the mod wheel (CC 1). Held vibrato is smooth; sweeping the depth on a held note has a minor zipper (AMY applies `freq` coefficients immediately — no ramp — so a depth change steps the pitch; see the LFO notes below). |
 | 79 | LFO → PWM | Pulse-width modulation depth on Osc A + B duty, 0.0-0.45. |
 | 80 | LFO → Filter | Filter-cutoff modulation depth, 0.0-2.0 octaves (matches CC 30 env amount). |
 | 81 | LFO → Osc A Amp (Tremolo) | Downward tremolo depth on Osc A, 0.0-0.5. The LFO modulates Osc A's amplitude (via its amp `mod` coef) so the peak never exceeds Osc A's set level and the trough ducks toward silence at full depth (never above level, never below 0). |
 | 82 | LFO → Osc B Amp (Tremolo) | Downward tremolo depth on Osc B, 0.0-0.5 (independent of Osc A; same bounded `mod`-coef routing). |
+| 1 | Mod Wheel → Vibrato | Standard mod-wheel vibrato. Remapped to CC 78, so it sets the same global LFO→pitch depth (reflected in Param Control and captured by presets). |
 
 A single shared filter processes both oscillators per voice. Each voice has three oscillators: a `SILENT` filter-head (osc 0) chained to Osc A (osc 1) chained to Osc B (osc 2). AMY sums A and B into the silent head's buffer, then applies one filter to that combined signal, so the filter affects Osc A and Osc B equally. Velocity sensitivity and the VCA (amp) envelope live on Osc A/B themselves, so each sounding oscillator fades and self-terminates on note-off rather than relying on the head to silence it (this prevents occasional stuck/over-sustained notes). The head is a unity pass-through that carries only the filter and its EG1 filter envelope. Parameter changes are applied live per-CC, so turning a knob never resets voices or cuts off held notes.
 
-A fourth per-voice oscillator (osc 3) is the LFO. It is named as the `mod_source` of the head, Osc A and Osc B, so AMY keeps it silent and free-running and routes its bipolar output into their `mod` control coefficients: Osc A/B `freq` (vibrato, CC 77), Osc A/B `duty` (PWM, CC 79), the filter head's `filter_freq` (CC 80) and Osc A/B `amp` (tremolo, CC 81 for A and CC 82 for B, independent depths). One shared LFO drives all targets; rate (CC 76) and waveshape (CC 78) are common. Because the tremolo is applied inside AMY's audio engine (the LFO feeds the amp `mod` coef, ramped at the audio block rate), it is perfectly smooth — unlike trying to automate the level CC from a ~15 Hz sketch loop, which stair-steps ("zippers"). AMY's amp `mod` is logarithmic (`amp = level × vel × eg0 × 10**(3 × depth × lfo)`), so the sketch pre-scales each osc's base amp by `10**(-3 × depth)`: this makes the tremolo strictly *downward*, with the LFO peak landing exactly on the oscillator's set level and the trough ducking toward 0 — it never boosts above the level. LFO depths default to 0, so the LFO is inaudible until a depth knob is moved.
+A fourth per-voice oscillator (osc 3) is the LFO. It is named as the `mod_source` of the head, Osc A and Osc B, so AMY keeps it silent and free-running and routes its bipolar output into their `mod` control coefficients: Osc A/B `freq` (vibrato, CC 78 — one global depth shared by both oscillators, also driven by the mod wheel CC 1), Osc A/B `duty` (PWM, CC 79), the filter head's `filter_freq` (CC 80) and Osc A/B `amp` (tremolo, CC 81 for A and CC 82 for B, independent per-oscillator depths). One shared LFO drives all targets, so A and B share its rate (CC 76), waveshape (CC 77) and phase. Vibrato, PWM and filter depths are common to both oscillators; only tremolo depth is per-oscillator.
+
+Two notes on smoothness, both rooted in AMY applying **amplitude** changes with a per-audio-block ramp but **frequency** changes immediately (no ramp, except portamento — which only smooths note changes):
+
+- **Tremolo** (an amp mod) stays smooth *even while you sweep its depth*, because AMY ramps the amp — unlike automating the level CC from the ~15 Hz sketch loop, which stair-steps ("zippers"). AMY's amp `mod` is logarithmic (`amp = level × vel × eg0 × 10**(3 × depth × lfo)`), so the sketch pre-scales each osc's base amp by `10**(-3 × depth)`: the tremolo is strictly *downward*, with the LFO peak landing exactly on the oscillator's set level and the trough ducking toward 0 — never above level.
+- **Vibrato** (a freq mod) is smooth *while held*, but sweeping its depth on a sounding note has a minor zipper: AMY applies `freq` coefficients immediately, so each depth step shifts the pitch by (Δdepth × the LFO's current value). This is inherent to AMY (no coefficient slew) and is why vibrato is a single **global** depth rather than per-oscillator: a smooth *per-oscillator* vibrato would need a dedicated vibrato LFO per osc, which AMY's one-`mod_source`-per-oscillator rule can't provide alongside PWM/tremolo. Global vibrato is also the standard mod-wheel form.
+
+LFO depths default to 0, so the LFO is inaudible until a depth knob (or the mod wheel) is moved.
 
 Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison at the center of the tuning map. To reintroduce a per-oscillator reference (for example an octave-down sub on Osc B), change `REF_HZ` handling in `sketch.py`.
 
@@ -110,8 +119,8 @@ These page groupings are retained only as controller-layout intent. They do not 
 ### Page 12: LFO
 
 - LFO Freq: CC 76
-- LFO → Osc (Pitch): CC 77
-- LFO Waveshape: CC 78
+- LFO Waveshape: CC 77
+- LFO → Pitch (Vibrato): CC 78 (also mod wheel, CC 1)
 - LFO → PWM: CC 79
 - LFO → Filter: CC 80
 - LFO → Osc A Amp (Tremolo): CC 81

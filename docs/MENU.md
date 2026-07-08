@@ -79,7 +79,7 @@ Opened by turn/click/short-hold while playing. Structure:
 
 ```
 POLYSYNTH
-├─ Param Control     → numbered list of all 26 synth params → per-param editor
+├─ Param Control     → numbered list of all 28 synth params → per-param editor
 ├─ Presets
 │  ├─ Save State as Preset   placeholder (Stage 4)
 │  └─ Load Preset            placeholder (Stage 4)
@@ -104,8 +104,8 @@ POLYSYNTH
 
 ### Param Control (parameter editor)
 
-**Param Control** lists all 26 editable synth parameters, numbered (`1. Osc A
-Pitch` … `26. Lfo>Filter`). Selecting one opens a **0-127 slider editor** for that
+**Param Control** lists all 28 editable synth parameters, numbered (`1. Osc A
+Pitch` … `28. Lfo>Amp B`). Selecting one opens a **0-127 slider editor** for that
 parameter, which drives the parameter's real MIDI CC through the same
 `handle_cc()` path a hardware knob uses — so on-device edits and the E16 knobs
 stay in sync and share all value→sound mapping. Exposing another parameter is a
