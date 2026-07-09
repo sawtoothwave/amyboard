@@ -86,7 +86,14 @@ POLYSYNTH
 ```
 
 - **List scrolling** is 1:1 with encoder detents and **clamps at the ends** (no
-  wrap-around).
+  wrap-around). Lists longer than one screen are **paginated** (`MENU_VISIBLE`
+  items per page) rather than continuously scrolled: the cursor moves within a
+  fixed page, and the window advances a whole page only when the cursor crosses a
+  page boundary. A row of small squares at the bottom-right — one per page, the
+  current page filled and the rest hollow — shows where you are. This
+  keeps navigation snappy — moving within a page repaints only two rows, and the
+  costlier full-page repaint fires once per page instead of on every step past a
+  sliding edge.
 - **Idle timeout:** after `MENU_IDLE_MS` (10 s) with no encoder input the menu
   **suspends** — the active display mode takes back the screen but the menu stack
   is kept (which level you're on and the cursor position, or an editor's value),
@@ -127,8 +134,12 @@ Editor gestures:
 - **Live MIDI:** while the editor is open, an incoming CC for that parameter moves
   the cursor/value in real time, and the encoder continues from wherever MIDI left
   it — the E16 and the encoder cooperate on one value.
-- **Rendering** pushes only the changed bands per turn (snappy and audio-safe),
-  throttled by `EDIT_REFRESH_MS` so a stream of incoming CCs can't hog the I2C bus.
+- **Rendering** pushes only a narrow *column window* around the moving cursor
+  (and a small central window for the value readout) per turn — a few hundred
+  bytes / a few ms of I2C via `_push_window()`, rather than the full-width band —
+  so dialing stays snappy and well within the audio-render budget.
+  `EDIT_REFRESH_MS` (~1 loop) still caps a stream of incoming CCs at one redraw
+  per loop.
 
 ### Standalone mode (no wrapper)
 

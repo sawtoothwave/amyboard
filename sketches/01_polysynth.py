@@ -956,6 +956,56 @@ def _push_rows(y0, y1):
         return False
 
 
+def _push_window(x0, x1, y0, y1):
+    # Windowed sub-RECTANGLE refresh: push only the columns [x0, x1] of rows
+    # [y0, y1] instead of full-width rows. The parameter editor uses this so a
+    # detent blits just the narrow strip around the moving cursor (and the
+    # centered value) -- a few hundred bytes / a few ms of I2C -- rather than the
+    # whole 128px band. The SSD1327 is 4bpp (2 pixels/byte) and auto-increments
+    # column-then-row inside the addressed window, but the source bytes for a
+    # sub-column window are strided by row in the framebuffer, so we gather the
+    # rectangle into one contiguous buffer and send it in a single write. Same
+    # SSD1327-only guard + full-refresh fallback as _push_rows.
+    try:
+        hw = amyboard.display._hw
+    except Exception:
+        hw = None
+    if hw is None or not hasattr(hw, 'col_addr') or not hasattr(hw, 'row_addr'):
+        return False
+    try:
+        w_px = hw.width
+        x0 = max(0, min(w_px - 1, int(x0)))
+        x1 = max(0, min(w_px - 1, int(x1)))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        y0 = max(0, min(127, int(y0)))
+        y1 = max(0, min(127, int(y1)))
+        if y1 < y0:
+            return False
+        row_bytes = w_px // 2              # 64 bytes/row at 128px wide, 4bpp
+        c0 = x0 // 2                       # byte column = 2 pixels
+        c1 = x1 // 2
+        base = hw.col_addr[0]              # panel's first byte-column (any offset)
+        cw = c1 - c0 + 1
+        buf = hw.buffer
+        out = bytearray(cw * (y1 - y0 + 1))
+        o = 0
+        for y in range(y0, y1 + 1):
+            s = y * row_bytes + c0
+            out[o:o + cw] = buf[s:s + cw]
+            o += cw
+        hw.write_cmd(0x15)                 # SSD1327 SET_COL_ADDR
+        hw.write_cmd(base + c0)
+        hw.write_cmd(base + c1)
+        hw.write_cmd(0x75)                 # SSD1327 SET_ROW_ADDR
+        hw.write_cmd(y0)
+        hw.write_cmd(y1)
+        hw.write_data(out)
+        return True
+    except Exception:
+        return False
+
+
 def _boot_wipe(now):
     # One-time boot wipe: leave the firmware banner up for BOOT_CLEAR_MS, then
     # clear the whole panel once so mode output doesn't overprint leftover
@@ -1410,7 +1460,18 @@ param_values = {p.cc: p.default for p in PARAMS}
 # ---------------------------------------------------------------------------
 MENU_LINE_H = 12
 MENU_TOP_Y = 18
+# Visible list rows = one PAGE (see the paginated windowing in render). Long
+# lists (Param Control's 28 params) advance a page at a time, so this also sets
+# the page size shown by the "pg/total" marker. 8 fills the screen well (last row
+# ends at y=114). Short menus (<=8 items) are a single page with no marker.
 MENU_VISIBLE = 8
+MENU_PAGE_Y = 116        # bottom row (128 - MENU_LINE_H) for the page marker; the
+                         # last item row ends at y=114, leaving this row free
+# Page marker = one small square per page, right-justified on MENU_PAGE_Y; the
+# current page is a filled block, the others hollow outlines.
+PAGE_SQ = 7              # square side (px)
+PAGE_SQ_GAP = 3          # gap between squares
+PAGE_SQ_MARGIN = 2       # right margin from the panel edge
 MENU_LABEL_MAX = 18
 MENU_IDLE_MS = 10000     # auto-close the menu to the display mode after this idle
 TOAST_MS = 1200          # how long a confirmation toast (e.g. "PRESET SAVED!") shows
@@ -1437,7 +1498,10 @@ EDIT_ENDS_Y  = 100       # "0" / "127" end labels (1x, static)
 # Cursor band = the track line +/- the tick, pushed as a unit each turn.
 EDIT_TRACK_BAND_Y0 = EDIT_TRACK_Y - EDIT_TICK_H - 1
 EDIT_TRACK_BAND_Y1 = EDIT_TRACK_Y + EDIT_TICK_H + 1
-EDIT_REFRESH_MS = 50     # min gap between editor redraws (caps MIDI-flood repaint)
+EDIT_REFRESH_MS = 16     # min gap between editor redraws. Low (~1 loop) because each
+                         # incremental redraw is now a couple of narrow windowed
+                         # pushes (a few ms), so a detent isn't deferred an extra
+                         # loop; still non-zero to cap a MIDI-CC flood at 1/loop.
 EDIT_DBLCLICK_MS = 400   # two clicks within this window = double-click (reset);
                          # a single click's exit is deferred this long to detect it
 
@@ -1486,7 +1550,8 @@ class _MenuLevel:
         # items: list of (label, callback_or_None). None = non-selectable line.
         self.items = items if items else [('(empty)', None)]
         self.idx = 0
-        self.start = 0    # top visible item; edge-scrolls (see render), not centered
+        self.start = 0    # index of the top visible item = current page origin
+                          # (page-aligned; recomputed from idx in render)
 
 
 class _EditLevel:
@@ -1495,7 +1560,8 @@ class _EditLevel:
     # the current value and pops back to the parameter list; a HOLD (back) reverts
     # to entry_value and pops. entry_value is the snapshot taken when the editor
     # opened -- the only state hold-to-restore needs.
-    __slots__ = ('param', 'value', 'entry_value', 'dirty', 'full', 'prev_label')
+    __slots__ = ('param', 'value', 'entry_value', 'dirty', 'full', 'prev_label',
+                 'prev_cx')
 
     def __init__(self, param, value):
         self.param = param
@@ -1504,6 +1570,7 @@ class _EditLevel:
         self.dirty = True         # something changed -> redraw needed
         self.full = True          # next draw is a full clear+draw (open/resume)
         self.prev_label = None    # last drawn friendly label (redraw on change)
+        self.prev_cx = None       # last cursor pixel-x (windowed-push union span)
 
 
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
@@ -1540,6 +1607,11 @@ class SketchMenu:
         self._toast_msg = ''         # transient confirmation (e.g. "PRESET SAVED!")
         self._toast_until = 0        # ticks_ms when the toast auto-dismisses
         self._toast_drawn = False    # toast painted once already (don't re-flush)
+        self._panel_dirty_to = 128   # rows currently holding content on the panel;
+                                     # a full-repaint clears down to at least here so
+                                     # a taller predecessor screen (or a full-screen
+                                     # display mode / editor / toast) never leaves
+                                     # stale pixels below a shorter menu. 128 = full.
 
     @property
     def is_open(self):
@@ -1561,6 +1633,7 @@ class SketchMenu:
         self.stack = [self._root()]
         self.dirty = True
         self._needs_clear = True
+        self._panel_dirty_to = 128    # the display mode was full-screen behind us
 
     def close(self):
         self.stack = []
@@ -1580,6 +1653,7 @@ class SketchMenu:
         self.dirty = True
         self._needs_clear = True
         self._edit_last_render = 0
+        self._panel_dirty_to = 128    # the display mode was full-screen while idle
         if self.stack and isinstance(self.cur, _EditLevel):
             cur = self.cur
             cur.value = int(param_values.get(cur.param.cc, cur.value))
@@ -1853,7 +1927,23 @@ class SketchMenu:
     def _draw_row(self, d, y, kind, payload):
         d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
         if kind == 't':
-            d.text(payload, 0, y, 255)
+            # Title row: left-aligned header text, plus an optional right-aligned
+            # marker.
+            left, right = payload
+            d.text(left, 0, y, 255)
+            if right:
+                d.text(right, DISPLAY_WIDTH - len(right) * CHAR_W, y, 255)
+        elif kind == 'q':
+            # Page squares: one per page, right-justified; current page filled.
+            total, cur = payload
+            pitch = PAGE_SQ + PAGE_SQ_GAP
+            x = DISPLAY_WIDTH - PAGE_SQ_MARGIN - (total * pitch - PAGE_SQ_GAP)
+            sy = y + (MENU_LINE_H - PAGE_SQ) // 2
+            for i in range(total):
+                d.fill_rect(x, sy, PAGE_SQ, PAGE_SQ, 255)
+                if i != cur:                 # hollow outline for non-current pages
+                    d.fill_rect(x + 1, sy + 1, PAGE_SQ - 2, PAGE_SQ - 2, 0)
+                x += pitch
         else:
             sel, label = payload
             if sel:
@@ -1925,21 +2015,33 @@ class SketchMenu:
                 self._edit_track(d, cx)
                 self._edit_value(d, v)      # draws the 0 / value / 127 readout row
                 cur.prev_label = label
+                cur.prev_cx = cx
                 cur.full = False
+                self._panel_dirty_to = 128   # editor owned the full screen
+                # Full clear on open/resume: the prior screen (a display mode's
+                # screensaver dot can sit anywhere) must be wiped before the editor
+                # draws. The per-turn snappiness comes from the windowed incremental
+                # pushes below, not from trimming this one-time open flush.
                 _begin_flush(0, 127)
                 return
-            # Incremental: push the moving parts synchronously -- the cursor band
-            # and the 1x value readout row (each a short band) -- plus the friendly
-            # label only when it changed (a bucket boundary crossed). With the value
-            # now 1x, a detent's I2C is about a single menu cursor-move: responsive,
-            # and short enough not to starve the audio render. The value is applied
-            # live in handle() regardless, so sound tracks every detent even when a
-            # redraw is throttled to the next frame.
+            # Incremental: push the moving parts as NARROW COLUMN WINDOWS instead
+            # of full-width bands, so a detent is only a few ms of I2C -- snappier
+            # AND less bus time than before (strictly safer for the audio render).
+            #   * cursor band: window spans just old->new cursor x (+/-2 for the
+            #     tick width); a single detent moves ~1px, so the strip is tiny
+            #     (an accelerated jump widens it but is a one-off).
+            #   * value readout: a fixed central window covers every 1-3 digit
+            #     value while leaving the static "0"/"127" end labels untouched.
+            # The value is applied live in handle() regardless, so sound tracks
+            # every detent even when a redraw is throttled to the next frame.
             self._edit_track(d, cx)
-            if not _push_rows(EDIT_TRACK_BAND_Y0, EDIT_TRACK_BAND_Y1):
+            px = cur.prev_cx if cur.prev_cx is not None else cx
+            if not _push_window(min(px, cx) - 2, max(px, cx) + 2,
+                                EDIT_TRACK_BAND_Y0, EDIT_TRACK_BAND_Y1):
                 amyboard.display_refresh()
+            cur.prev_cx = cx
             self._edit_value(d, v)
-            if not _push_rows(EDIT_ENDS_Y, EDIT_ENDS_Y + CHAR_H - 1):
+            if not _push_window(40, 88, EDIT_ENDS_Y, EDIT_ENDS_Y + CHAR_H - 1):
                 amyboard.display_refresh()
             if label != cur.prev_label:
                 self._edit_label(d, label)
@@ -1964,6 +2066,7 @@ class SketchMenu:
             w = len(msg) * CHAR_W
             sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
             d.text(msg, sx, 60, 255)
+            self._panel_dirty_to = 128   # toast owned the full screen
             _begin_flush(0, 127)
         except Exception:
             pass
@@ -1996,6 +2099,7 @@ class SketchMenu:
                 self._name_row(d, EDIT_VALUE_Y, cand)
                 cur.full = False
                 self._needs_clear = False
+                self._panel_dirty_to = 128   # name entry owned the full screen
                 _begin_flush(0, 127)
                 return
             self._name_row(d, EDIT_LABEL_Y, disp)
@@ -2040,19 +2144,22 @@ class SketchMenu:
             d = amyboard.display
             lvl = self.cur
             n = len(lvl.items)
-            # Edge-scroll: keep the visible window fixed while the cursor moves
-            # inside it (so a step touches only the two selection rows), and scroll
-            # by the minimum only when the cursor reaches an edge. Centering instead
-            # would shift the whole window every step -> a full ~9-row repaint per
-            # detent (~150ms of I2C) that starves the audio render.
-            start = lvl.start
+            # Pagination: the visible window is a fixed PAGE of MENU_VISIBLE items
+            # aligned to page boundaries (page = idx // MENU_VISIBLE). Moving the
+            # cursor WITHIN a page leaves the window fixed, so a step repaints only
+            # the two selection rows (fast, no freeze); the whole-page repaint fires
+            # only when the cursor crosses into a new page -- once every MENU_VISIBLE
+            # items, not on every step past a sliding edge (the old edge-scroll,
+            # which re-flushed the full window each step and made long lists feel
+            # laggy). A row of page squares at the bottom-right (its own row below
+            # the list) keeps you oriented across pages without crowding the header.
             if n <= MENU_VISIBLE:
                 start = 0
-            elif lvl.idx < start:
-                start = lvl.idx
-            elif lvl.idx >= start + MENU_VISIBLE:
-                start = lvl.idx - MENU_VISIBLE + 1
-            start = clamp(start, 0, max(0, n - MENU_VISIBLE))
+                total_pages = 1
+            else:
+                start = (lvl.idx // MENU_VISIBLE) * MENU_VISIBLE
+                total_pages = (n + MENU_VISIBLE - 1) // MENU_VISIBLE
+            cur_page = start // MENU_VISIBLE     # 0-based index of the shown page
             lvl.start = start
             # Current frame = title row(s) + visible item rows, as diffable tuples.
             # A title may hold newlines (used by confirm prompts) -> up to three 1x
@@ -2061,7 +2168,7 @@ class SketchMenu:
             frame = []
             ty = 0
             for tline in lvl.title.split('\n')[:3]:
-                frame.append((ty, 't', tline))
+                frame.append((ty, 't', (tline, '')))
                 ty += 9
             y = max(MENU_TOP_Y, ty)
             i = start
@@ -2069,15 +2176,34 @@ class SketchMenu:
                 frame.append((y, 'i', (i == lvl.idx, lvl.items[i][0])))
                 y += MENU_LINE_H
                 i += 1
+            # Page marker on its own row at the bottom-right (multi-page lists only),
+            # so the header stays uncrowded. It sits below the last item row and is
+            # diffed like any other row: unchanged while paging within a page (so a
+            # cursor move is still a 2-row push), redrawn on a page cross.
+            if total_pages > 1:
+                frame.append((MENU_PAGE_Y, 'q', (total_pages, cur_page)))
             # Full repaint on open / level change (clears whatever was on screen
             # before), pushed progressively in bands so audio isn't stalled.
             # Otherwise push ONLY the rows that changed -- a cursor move touches
             # just two rows -- so navigating never holds the I2C bus for long.
             if self._needs_clear or self._prev is None or len(self._prev) != len(frame):
                 d.fill(0)
+                extent = 0
                 for (ry, kind, payload) in frame:
                     self._draw_row(d, ry, kind, payload)
-                _begin_flush(0, 127)
+                    h = MENU_LINE_H if kind == 'i' else 9
+                    if ry + h > extent:
+                        extent = ry + h
+                if total_pages > 1:          # the bottom page row clears a full band
+                    extent = max(extent, MENU_PAGE_Y + MENU_LINE_H)
+                # Flush only the occupied rows -- but at least as far as the panel
+                # was last painted, so a taller predecessor screen's leftover rows
+                # (a longer list, or a full-screen editor/toast/display mode) are
+                # still cleared. Short menus (root, Presets, confirm) thus repaint
+                # in far fewer bands than a blind 0..127 flush.
+                flush_to = min(127, max(extent, self._panel_dirty_to) - 1)
+                _begin_flush(0, flush_to)
+                self._panel_dirty_to = extent
                 self._needs_clear = False
             else:
                 changed = [j for j in range(len(frame))
