@@ -80,7 +80,9 @@ Opened by turn/click/short-hold while playing. Structure:
 ```
 POLYSYNTH
 ├─ Param Control     → numbered list of all 28 synth params → per-param editor
-├─ Presets           → Save State as Preset · Load Preset · Delete Preset
+├─ Save As Preset    → Overwrite current · Save as New · Cancel  (see Presets)
+├─ Load Preset       → INIT (built-in) + saved presets
+├─ Delete Preset     → saved presets (INIT is not deletable)
 ├─ Display Mode      → CC Monitor · Screensaver · Oscilloscope   (see DISPLAY_MODES.md)
 └─ Resume Playing
 ```
@@ -94,7 +96,7 @@ POLYSYNTH
   keeps navigation snappy — moving within a page repaints only two rows, and the
   costlier full-page repaint fires once per page instead of on every step past a
   sliding edge.
-- **Idle timeout:** after `MENU_IDLE_MS` (10 s) with no encoder input the menu
+- **Idle timeout:** after `MENU_IDLE_MS` (15 s) with no encoder input the menu
   **suspends** — the active display mode takes back the screen but the menu stack
   is kept (which level you're on and the cursor position, or an editor's value),
   and the next input (turn, click, or hold) resumes you exactly where you were.
@@ -140,6 +142,37 @@ Editor gestures:
   so dialing stays snappy and well within the audio-render budget.
   `EDIT_REFRESH_MS` (~1 loop) still caps a stream of incoming CCs at one redraw
   per loop.
+
+### Presets
+
+Presets are named patch snapshots in internal flash (`/user/polysynth_presets.json`).
+The three actions live directly on the root menu (**Save As Preset / Load Preset /
+Delete Preset**).
+
+- **What a preset stores:** the raw 0-127 value of every editable CC — a snapshot
+  of `param_values`. Because both the E16 knobs (external MIDI CC) and the on-device
+  editor funnel through the same `handle_cc()`, which records each value into
+  `param_values`, a preset captures the current patch **regardless of which set it**
+  (last-write-wins per parameter). Loading replays those values through `handle_cc`,
+  the same path a knob turn takes, so held notes are never cut.
+- **Save flow:** if a preset is "current" (last loaded or saved this session, and
+  still present), Save As Preset opens a chooser — **Overwrite** (→ `OVERWRITE
+  "name"?` confirm), **Save as New** (→ name entry), **Cancel**. With nothing
+  current, or the current being INIT, it goes straight to name entry. Name entry is
+  a lowercase char ring; committing shows `SAVE?`/`OVERWRITE?` confirm. Success
+  flashes **PRESET SAVED!**.
+- **Load flow:** applies the preset live, flashes **PRESET LOADED!**, then returns
+  to playing. The loaded preset becomes the session's "current" one.
+- **Built-in `INIT` preset:** a *virtual*, write-protected preset synthesized from
+  the parameter defaults (not stored in flash, so it can never go stale or be
+  corrupted). It is always first in the Load list — a one-click return to a clean
+  init state — and cannot be deleted (absent from the Delete list) or overwritten
+  (the name `INIT`/`init` is reserved).
+- **Resume across reset:** the name of the last loaded/saved preset is persisted to
+  settings (`current_preset`) and re-applied at boot by `_restore_current_preset()`
+  (after `init_synth()`), so a reset resumes that patch rather than the bare
+  defaults. Deleting the current preset clears the pointer. The chosen display mode
+  persists the same way.
 
 ### Standalone mode (no wrapper)
 
