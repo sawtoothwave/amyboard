@@ -719,6 +719,14 @@ def _load_presets():
 
 _presets = _load_presets()
 
+# The preset the user most recently loaded OR saved this session. It is the target
+# of the Save menu's "Overwrite" shortcut, so an existing preset can be updated
+# without retyping its whole name. Just the name string -- no reload is needed to
+# know it. Empty until something is loaded or saved; a Save/Load path keeps it in
+# sync. If the named preset is later deleted, the Save menu falls back to name
+# entry (it re-checks existence), so a stale name can't overwrite the wrong thing.
+_current_preset_name = ''
+
 
 def _write_presets():
     # Persist the whole list. Guarded so a flash-write fault never disturbs
@@ -772,6 +780,49 @@ def _save_preset(name):
     else:
         _presets.append(entry)
     return _write_presets()
+
+
+# --- Built-in INIT preset ---------------------------------------------------
+# A VIRTUAL, write-protected preset representing the synth's init state (every
+# param's PARAMS default). It is not stored in flash -- it is synthesized on
+# demand, so it is always exactly the current defaults, can never go stale, and
+# can't be overwritten or deleted (it isn't in _presets). It always appears first
+# in the Load list, giving a one-click return to a known clean starting point.
+INIT_PRESET_NAME = 'INIT'
+
+
+def _init_preset_entry():
+    # Raw 0-127 snapshot of the init defaults, shaped like a saved preset's 'cc'.
+    return {'name': INIT_PRESET_NAME,
+            'cc': {str(p.cc): int(p.default) for p in PARAMS}}
+
+
+def _load_list():
+    # Presets offered by the Load menu: the virtual INIT first, then saved ones.
+    return [_init_preset_entry()] + _presets
+
+
+def _restore_current_preset():
+    # Boot: re-apply the preset the user last loaded/saved (its name is persisted
+    # in settings), so a reset resumes that patch instead of the bare defaults.
+    # Runs after init_synth() so the amy.send()s in _apply_preset land on the built
+    # graph. INIT (or an unknown/deleted name) needs no work -- the defaults are
+    # already loaded -- so it just records the current name (or stays on init).
+    global _current_preset_name
+    name = _settings.get('current_preset')
+    if not name:
+        return
+    if name == INIT_PRESET_NAME:
+        _current_preset_name = INIT_PRESET_NAME
+        return
+    i = _find_preset(name)
+    if i < 0:
+        return
+    try:
+        _apply_preset(_presets[i].get('cc'))
+        _current_preset_name = name
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1473,7 +1524,7 @@ PAGE_SQ = 7              # square side (px)
 PAGE_SQ_GAP = 3          # gap between squares
 PAGE_SQ_MARGIN = 2       # right margin from the panel edge
 MENU_LABEL_MAX = 18
-MENU_IDLE_MS = 10000     # auto-close the menu to the display mode after this idle
+MENU_IDLE_MS = 15000     # auto-close the menu to the display mode after this idle
 TOAST_MS = 1200          # how long a confirmation toast (e.g. "PRESET SAVED!") shows
 
 # Parameter-editor (Param Control) layout: a 0-127 track with a cursor, the raw
@@ -1607,6 +1658,9 @@ class SketchMenu:
         self._toast_msg = ''         # transient confirmation (e.g. "PRESET SAVED!")
         self._toast_until = 0        # ticks_ms when the toast auto-dismisses
         self._toast_drawn = False    # toast painted once already (don't re-flush)
+        self._close_after_toast = False  # when the toast dismisses, close to playing
+                                         # (the display mode) instead of repainting
+                                         # the menu -- used by the load confirmation
         self._panel_dirty_to = 128   # rows currently holding content on the panel;
                                      # a full-repaint clears down to at least here so
                                      # a taller predecessor screen (or a full-screen
@@ -1685,9 +1739,12 @@ class SketchMenu:
             self._needs_clear = True
 
     def _root(self):
+        # Preset actions live directly on the root now (no "Presets" submenu).
         return _MenuLevel('POLYSYNTH', [
             ('Param Control', self._open_params),
-            ('Presets', self._open_presets),
+            ('Save As Preset', self._start_save),
+            ('Load Preset', self._open_load),
+            ('Delete Preset', self._open_delete),
             ('Display Mode', self._open_display),
             ('Resume Playing', self.close),
         ])
@@ -1707,21 +1764,41 @@ class SketchMenu:
         self.dirty = True
         self._needs_clear = True
 
-    def _presets_menu(self):
-        return _MenuLevel('PRESETS', [
-            ('Save State as Preset', self._start_save),
-            ('Load Preset', self._open_load),
-            ('Delete Preset', self._open_delete),
-        ])
+    def _start_save(self):
+        # If a preset is "current" (last loaded or saved this session and still
+        # present), offer a chooser so it can be updated without retyping: Overwrite
+        # <name> / Save as New / Cancel. Otherwise -- nothing to overwrite -- go
+        # straight to name entry, exactly as before (first save of the session).
+        name = _current_preset_name
+        if name and name != INIT_PRESET_NAME and _find_preset(name) >= 0:
+            # Header: "Current preset:" / <name> / blank line, then the actions --
+            # the blank row separates the header from Overwrite for readability.
+            # (INIT is write-protected, so it never reaches the Overwrite chooser.)
+            self.stack.append(_MenuLevel('Current preset:\n%s\n' % name[:MENU_LABEL_MAX], [
+                ('Overwrite', (lambda n=name: self._confirm_overwrite(n))),
+                ('Save as New', self._start_name_entry),
+                ('Cancel', self._pop),
+            ]))
+            self.dirty = True
+            self._needs_clear = True
+        else:
+            self._start_name_entry()
 
-    def _open_presets(self):
-        self.stack.append(self._presets_menu())
+    def _start_name_entry(self):
+        # Open the name-entry screen; committing it saves the live patch under a
+        # new (or typed-over) name.
+        self.stack.append(_NameLevel())
         self.dirty = True
         self._needs_clear = True
 
-    def _start_save(self):
-        # Open the name-entry screen; committing it saves the live patch.
-        self.stack.append(_NameLevel())
+    def _confirm_overwrite(self, name):
+        # Y/N confirm before replacing an existing preset in place. The full name is
+        # shown in the header (fits: <=12 chars + quotes + '?'), then a blank line
+        # before Yes/No for readability. No or hold pops back to the Save chooser.
+        self.stack.append(_MenuLevel('OVERWRITE\n"%s"?\n' % name[:MENU_LABEL_MAX], [
+            ('Yes', (lambda n=name: self._do_save(n))),
+            ('No', self._pop),
+        ]))
         self.dirty = True
         self._needs_clear = True
 
@@ -1732,6 +1809,15 @@ class SketchMenu:
         # pops back to the name-entry screen. A new name at the cap is blocked.
         name = lvl.name.strip()
         if not name:
+            return
+        if name.upper() == INIT_PRESET_NAME:
+            # "INIT" is reserved for the built-in write-protected preset.
+            self.stack.append(_MenuLevel('NAME RESERVED', [
+                ('"%s" is built-in' % INIT_PRESET_NAME, None),
+                ('Back', self._pop),
+            ]))
+            self.dirty = True
+            self._needs_clear = True
             return
         exists = _find_preset(name) >= 0
         if not exists and len(_presets) >= MAX_PRESETS:
@@ -1749,8 +1835,13 @@ class SketchMenu:
 
     def _do_save(self, name):
         # Persist, flash a "PRESET SAVED!" toast, and drop to the main polysynth
-        # menu (the toast auto-dismisses to it -- see render()).
+        # menu (the toast auto-dismisses to it -- see render()). On success this
+        # name becomes the session's "current" preset (the Overwrite target).
+        global _current_preset_name
         ok = _save_preset(name)
+        if ok:
+            _current_preset_name = name
+            _set_setting('current_preset', name)   # resume it after a reset
         self.stack = [self._root()]
         self._show_toast('PRESET SAVED!' if ok else 'SAVE FAILED')
         self.dirty = True
@@ -1762,23 +1853,43 @@ class SketchMenu:
         self._toast_drawn = False
 
     def _open_load(self):
-        # List saved presets; clicking one applies it live and returns to playing.
-        if not _presets:
-            self.stack.append(_MenuLevel('LOAD PRESET', [('(none saved)', None)]))
-        else:
-            items = [(_presets[i].get('name', '?')[:MENU_LABEL_MAX],
-                      (lambda i=i: self._load_preset(i)))
-                     for i in range(len(_presets))]
-            self.stack.append(_MenuLevel('LOAD PRESET', items))
+        # List presets -- the built-in INIT first, then saved ones -- clicking one
+        # applies it live and returns to playing. The list is never empty (INIT is
+        # always present), so there's no "(none saved)" case here.
+        lst = _load_list()
+        items = [(lst[i].get('name', '?')[:MENU_LABEL_MAX],
+                  (lambda i=i: self._load_preset(i)))
+                 for i in range(len(lst))]
+        self.stack.append(_MenuLevel('LOAD PRESET', items))
         self.dirty = True
         self._needs_clear = True
 
     def _load_preset(self, i):
+        # `i` indexes _load_list() (INIT at 0, saved after). Apply it live and
+        # remember it as the session's "current" one (persisted so a reset resumes
+        # it), so a later Save can overwrite it without retyping the name. Then flash
+        # a "PRESET LOADED!" toast (mirrors the save toast) and return to playing
+        # when it dismisses -- so keep a level on the stack (menu stays "open") so
+        # render() is still called to draw the toast; _close_after_toast closes us
+        # to the display mode once it times out (or on any input).
+        global _current_preset_name
+        lst = _load_list()
+        if not (0 <= i < len(lst)):
+            return
+        entry = lst[i]
         try:
-            _apply_preset(_presets[i].get('cc'))
+            _apply_preset(entry.get('cc'))
         except Exception:
             pass
-        self.close()             # apply + return to playing so it's heard at once
+        name = entry.get('name', '')
+        if name:
+            _current_preset_name = name
+            _set_setting('current_preset', name)
+        self.stack = [self._root()]
+        self._show_toast('PRESET LOADED!')
+        self._close_after_toast = True
+        self.dirty = True
+        self._needs_clear = True
 
     def _delete_menu(self):
         # The delete list, rebuilt each time so it always reflects the current set
@@ -1809,13 +1920,19 @@ class SketchMenu:
         self._needs_clear = True
 
     def _do_delete(self, name):
+        global _current_preset_name
         i = _find_preset(name)
         if i >= 0:
             del _presets[i]
             _write_presets()
-        # Flash "DELETED!" then land back on the refreshed delete list (or the
-        # Presets menu if that was the last one).
-        self.stack = [self._root(), self._presets_menu()]
+        if name == _current_preset_name:
+            # Don't leave the Overwrite target / boot-restore pointing at a gone
+            # preset; fall back to init.
+            _current_preset_name = ''
+            _set_setting('current_preset', '')
+        # Flash "DELETED!" then land back on the refreshed delete list (or the root
+        # menu if that was the last one).
+        self.stack = [self._root()]
         if _presets:
             self.stack.append(self._delete_menu())
         self._show_toast('DELETED!')
@@ -1841,12 +1958,18 @@ class SketchMenu:
 
     def handle(self, delta, click, back):
         if self._toast_msg:
-            # A "saved" toast is showing: any input just dismisses it (it does not
-            # also act on the menu underneath), then the menu repaints.
+            # A confirmation toast is showing: any input just dismisses it (it does
+            # not also act on the menu underneath). A load toast then closes us to
+            # playing; others repaint the menu.
             if delta or click or back:
                 self._toast_msg = ''
-                self.dirty = True
-                self._needs_clear = True
+                if self._close_after_toast:
+                    self._close_after_toast = False
+                    self.close()
+                    launcher.repaint = True
+                else:
+                    self.dirty = True
+                    self._needs_clear = True
             return
         if not self.is_open:
             return
@@ -2118,14 +2241,20 @@ class SketchMenu:
             _service_flush()
             return
         if self._toast_msg:
-            # A confirmation toast owns the screen until it times out, then the
-            # menu underneath repaints.
+            # A confirmation toast owns the screen until it times out. When it
+            # dismisses, a load toast closes us to playing (the display mode);
+            # others repaint the menu underneath.
             if time.ticks_diff(time.ticks_ms(), self._toast_until) < 0:
                 if not self._toast_drawn:
                     self._draw_toast(self._toast_msg)
                     self._toast_drawn = True
                 return
             self._toast_msg = ''
+            if self._close_after_toast:
+                self._close_after_toast = False
+                self.close()
+                launcher.repaint = True   # let the display mode redraw over us
+                return
             self.dirty = True
             self._needs_clear = True
         if not self.is_open:
@@ -2303,6 +2432,8 @@ def _force_display_redraw():
 # ---------------------------------------------------------------------------
 init_synth()
 setup_midi()
+_restore_current_preset()   # resume the last-loaded/saved preset (after init_synth
+                            # so its amy.send()s land on the built graph)
 init_display()
 _restore_display_mode()
 
