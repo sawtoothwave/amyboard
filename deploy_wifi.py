@@ -154,7 +154,7 @@ def main():
 
     print(f"Connecting to ws://{args.host}:{args.port}/ ...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(30)
+    sock.settimeout(60)
     sock.connect((args.host, args.port))
     _handshake(sock)
     ws = Websocket(sock)
@@ -176,10 +176,20 @@ def main():
     # over WiFi directly. Instead, drop the sentinel file the launcher polls for.
     if args.reboot:
         print(f"Requesting remote reboot (dropping {args.sentinel}) ...")
-        _put_file(ws, b"1", args.sentinel)
-        sock.close()
+        try:
+            _put_file(ws, b"1", args.sentinel)
+        except (OSError, AssertionError, struct.error) as e:
+            # The launcher polls the sentinel (~every 2s) and resets the moment it
+            # sees it -- which tears down THIS connection mid-request. So a drop
+            # here is the expected success signal, not a failure: the file already
+            # exists (its PUT header opened it), so the board will reboot.
+            print(f"  connection dropped ({type(e).__name__}) -- reboot triggered.")
+        try:
+            sock.close()
+        except Exception:
+            pass
         print("\nDeployed + verified + reboot requested. A launcher with the reboot")
-        print("hook will reset within ~2s and (WiFi remembers last setting) rejoin a")
+        print("hook resets within ~2s and (WiFi remembers last setting) rejoins a")
         print("few seconds later. If nothing happens, the running launcher predates")
         print("the hook -- power-cycle once, after which --reboot works wirelessly.")
     else:

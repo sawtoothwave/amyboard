@@ -258,8 +258,10 @@ REF_HZ = 440.0
 CUTOFF_MIN_HZ = 30.0
 CUTOFF_MAX_HZ = 16000.0
 
-# Filter envelope depth is an EG1 coefficient in octave-ish (logfreq) units,
-# where ~1.0 is a few octaves of sweep. Max keeps it musical, not extreme.
+# Filter envelope depth is an EG1 coefficient in octave-ish (logfreq) units.
+# BIPOLAR (cc 30 centered at 64): the amount ranges -FLT_ENV_AMT_MAX..+MAX, where
+# +ve opens the filter as the envelope rises and -ve inverts it (closes). ~1.0 is
+# a few octaves of sweep; max keeps it musical, not extreme.
 FLT_ENV_AMT_MAX = 2.0
 
 # Resonance (AMY range 0.5-16); keep the usable musical span.
@@ -442,8 +444,19 @@ def cc_to_res(cc):
     return RES_MIN + cc_unit(cc) * (RES_MAX - RES_MIN)
 
 
+def cc_bipolar(cc):
+    # -1.0..+1.0 with 64 as center, the standard MIDI bipolar convention
+    # (cc 0 -> -1.0, cc 64 -> 0.0, cc 127 -> +1.0).
+    cc = clamp(int(cc), 0, 127)
+    if cc <= 64:
+        return (cc - 64) / 64.0
+    return (cc - 64) / 63.0
+
+
 def cc_to_flt_env_amt(cc):
-    return cc_unit(cc) * FLT_ENV_AMT_MAX
+    # Bipolar EG1 depth: +ve opens the filter as the envelope rises; -ve inverts
+    # it so the envelope CLOSES the filter. Center (cc 64) = 0.0 = no effect.
+    return cc_bipolar(cc) * FLT_ENV_AMT_MAX
 
 
 def cc_to_filter_type(cc):
@@ -1447,6 +1460,13 @@ def fmt_filter_type(v):
     return names[min(idx, len(names) - 1)]
 
 
+def fmt_flt_env(v):
+    # Bipolar amount, signed octaves; exact center reads 'Center'. Mirrors
+    # cc_to_flt_env_amt() so the label matches the sound.
+    amt = round(cc_to_flt_env_amt(v), 1)
+    return 'Center' if amt == 0 else '%+.1f oct' % amt
+
+
 class _Param:
     __slots__ = ('label', 'cc', 'default', 'fmt')
 
@@ -1475,7 +1495,7 @@ PARAMS = [
     _Param('Osc B Level', CC_OSC_B_LEVEL,   0),
     _Param('Cutoff',      CC_FLT_CUTOFF,  127),
     _Param('Resonance',   CC_FLT_RES,       0),
-    _Param('Filter Env',  CC_FLT_ENV_AMT,   0),
+    _Param('Filter Env',  CC_FLT_ENV_AMT,  64, fmt_flt_env),
     _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type),
     _Param('Kbd Track',   CC_KEY_SCALE,     0),
     _Param('Vcf Atk',     CC_VCF_ATK,       0),

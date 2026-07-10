@@ -14,7 +14,7 @@ The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), receive
 | 23 / 27 | Osc A / B Level | Oscillator amplitude, 0.0-1.0 (scales that osc's amp envelope). |
 | 74 | Filter Cutoff | Logarithmic, ~30 Hz to ~16 kHz. |
 | 71 | Filter Resonance | ~0.0-6.0 (musical span of AMY's wider Q range). |
-| 30 | Filter Env Amount | EG1 depth coefficient (octave-style), 0.0-2.0. |
+| 30 | Filter Env Amount | **Bipolar** EG1 depth coefficient (octave-style), -2.0..+2.0, centered at CC 64 (=0, no effect). Positive opens the filter as the envelope rises; negative inverts it so the envelope closes the filter. |
 | 31 | Filter Type | Four buckets across 0-127: LPF24, LPF, BPF, HPF. |
 | 32 | Key Scale | Filter `note` tracking coefficient, 0.0-1.0 (0 = none, 1 = full keyboard tracking). |
 | 40-43 | VCF A/D/S/R | Filter EG1 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
