@@ -1468,13 +1468,14 @@ def fmt_flt_env(v):
 
 
 class _Param:
-    __slots__ = ('label', 'cc', 'default', 'fmt')
+    __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar')
 
-    def __init__(self, label, cc, default, fmt=None):
+    def __init__(self, label, cc, default, fmt=None, bipolar=False):
         self.label = label
         self.cc = cc
         self.default = default   # raw 0-127 value used until a CC/editor sets one
         self.fmt = fmt           # optional value(0-127) -> friendly label
+        self.bipolar = bipolar   # editor readout shows a signed scale (0 = center)
 
 
 # The editable-parameter list, shown numbered in the menu. Adding a row here is
@@ -1485,17 +1486,17 @@ class _Param:
 # a few are shortened from the requested names (see notes) -- Filt Type, Kbd
 # Track, the ADSR Atk/Dec/Sus/Rel forms, and the space-free Lfo>X routing.
 PARAMS = [
-    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch),
+    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch, bipolar=True),
     _Param('Osc A Shape', CC_OSC_A_WAVE,   52, fmt_wave),
     _Param('Osc A Duty',  CC_OSC_A_DUTY,   64),
     _Param('Osc A Level', CC_OSC_A_LEVEL, 127),
-    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, fmt_osc_pitch),
+    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, fmt_osc_pitch, bipolar=True),
     _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave),
     _Param('Osc B Duty',  CC_OSC_B_DUTY,   64),
     _Param('Osc B Level', CC_OSC_B_LEVEL,   0),
     _Param('Cutoff',      CC_FLT_CUTOFF,  127),
     _Param('Resonance',   CC_FLT_RES,       0),
-    _Param('Filter Env',  CC_FLT_ENV_AMT,  64, fmt_flt_env),
+    _Param('Filter Env',  CC_FLT_ENV_AMT,  64, fmt_flt_env, bipolar=True),
     _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type),
     _Param('Kbd Track',   CC_KEY_SCALE,     0),
     _Param('Vcf Atk',     CC_VCF_ATK,       0),
@@ -2104,17 +2105,26 @@ class SketchMenu:
             sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
             _text2x(d, label, sx, EDIT_LABEL_Y, 255)
 
-    def _edit_value(self, d, v):
-        # Readout row below the track: "0   <value>   127", all 1x (the value the
-        # same size as the end labels). The raw value is 1x -- not 2x -- so its
-        # refresh band is a single 8px row (~half the I2C of the old 2x number),
-        # which keeps a fast sweep from holding the bus long enough to starve the
-        # audio render. The 2x treatment is reserved for the friendly bucket name
-        # (see _edit_label), which only redraws when it actually changes.
+    def _edit_value(self, d, v, bipolar=False):
+        # Readout row below the track: end labels + centered current value, all 1x
+        # (the value the same size as the end labels). The raw value is 1x -- not
+        # 2x -- so its refresh band is a single 8px row (~half the I2C of the old 2x
+        # number), which keeps a fast sweep from holding the bus long enough to
+        # starve the audio render. The 2x treatment is reserved for the friendly
+        # bucket name (see _edit_label), which only redraws when it changes.
+        #   unipolar: "0 <v> 127"
+        #   bipolar : "-64 <+/-n> +63" with 0 = center (unity); the value the knob
+        #             sits at 64 reads 0, so the sign shows which way it is offset.
         d.fill_rect(0, EDIT_ENDS_Y, DISPLAY_WIDTH, CHAR_H, 0)
-        d.text('0', 0, EDIT_ENDS_Y, 110)
-        d.text('127', DISPLAY_WIDTH - 3 * CHAR_W, EDIT_ENDS_Y, 110)
-        vs = '%d' % v
+        if bipolar:
+            lo, hi = '-64', '+63'
+            n = int(v) - 64
+            vs = '0' if n == 0 else ('%+d' % n)
+        else:
+            lo, hi = '0', '127'
+            vs = '%d' % v
+        d.text(lo, 0, EDIT_ENDS_Y, 110)
+        d.text(hi, DISPLAY_WIDTH - len(hi) * CHAR_W, EDIT_ENDS_Y, 110)
         w = len(vs) * CHAR_W
         vx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
         d.text(vs, vx, EDIT_ENDS_Y, 255)
@@ -2156,7 +2166,7 @@ class SketchMenu:
                 d.text(p.label.upper()[:MENU_LABEL_MAX], 0, EDIT_TITLE_Y, 255)
                 self._edit_label(d, label)
                 self._edit_track(d, cx)
-                self._edit_value(d, v)      # draws the 0 / value / 127 readout row
+                self._edit_value(d, v, p.bipolar)   # draws the ends + value readout row
                 cur.prev_label = label
                 cur.prev_cx = cx
                 cur.full = False
@@ -2183,7 +2193,7 @@ class SketchMenu:
                                 EDIT_TRACK_BAND_Y0, EDIT_TRACK_BAND_Y1):
                 amyboard.display_refresh()
             cur.prev_cx = cx
-            self._edit_value(d, v)
+            self._edit_value(d, v, p.bipolar)
             if not _push_window(40, 88, EDIT_ENDS_Y, EDIT_ENDS_Y + CHAR_H - 1):
                 amyboard.display_refresh()
             if label != cur.prev_label:
