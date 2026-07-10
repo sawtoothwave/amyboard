@@ -1595,6 +1595,7 @@ EDIT_LINE_X0 = 6
 EDIT_LINE_X1 = 121
 EDIT_TICK_H  = 6         # cursor half-height above/below the track
 EDIT_ENDS_Y  = 100       # "0" / "127" end labels (1x, static)
+NAME_ROW_Y   = 44        # name-entry: the word + inline active slot, one 1x row
 # Cursor band = the track line +/- the tick, pushed as a unit each turn.
 EDIT_TRACK_BAND_Y0 = EDIT_TRACK_Y - EDIT_TICK_H - 1
 EDIT_TRACK_BAND_Y1 = EDIT_TRACK_Y + EDIT_TICK_H + 1
@@ -1676,9 +1677,28 @@ class _EditLevel:
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
 # the current one. Plain chars append (the candidate stays put for the next slot);
 # the two special tokens act instead of appending (DEL backspaces, OK confirms/
-# saves). Space is a real entry (drawn as a placeholder). Scrolling CLAMPS at the
-# ends (no wrap), so a fast spin lands on OK (end) or 'a' (start).
+# saves) and render as a back-arrow / check glyph in the active slot. Space is a
+# real entry (a blank knocked-out slot). Scrolling CLAMPS at the ends (no wrap),
+# so a fast spin lands on OK (end) or 'a' (start).
 _NAME_RING = [c for c in 'abcdefghijklmnopqrstuvwxyz0123456789 '] + ['DEL', 'OK']
+
+
+def _glyph_del(d, x, y, col):
+    # Left-pointing arrow (backspace / delete) in an 8x8 cell at (x, y): a small
+    # triangular head at the left widening rightward, then a short shaft. Spans
+    # cols 1-6, leaving 1px padding on each side of the knocked-out slot.
+    d.fill_rect(x + 1, y + 3, 1, 2, col)      # tip (1px left padding)
+    d.fill_rect(x + 2, y + 2, 1, 4, col)
+    d.fill_rect(x + 3, y + 1, 1, 6, col)      # widest part of the head
+    d.fill_rect(x + 4, y + 3, 3, 2, col)      # shaft (1px shorter), ends at col 6
+
+
+def _glyph_ok(d, x, y, col):
+    # Check mark in an 8x8 cell at (x, y): a short down-right arm to a bottom
+    # vertex, then an up-right arm. Drawn as overlapping 2px squares, spanning
+    # cols 1-6 so it clears both sides of the knocked-out slot.
+    for dx, dy in ((1, 3), (2, 4), (3, 5), (4, 3), (5, 1)):
+        d.fill_rect(x + dx, y + dy, 2, 2, col)
 
 
 class _NameLevel:
@@ -2236,12 +2256,31 @@ class SketchMenu:
         except Exception:
             pass
 
-    def _name_row(self, d, y, s):
-        # Clear one 8px row and draw 1x text centered in it.
+    def _draw_name_line(self, d, cur):
+        # One row: the committed name, then the active append slot rendered IN
+        # PLACE at the end, knocked out (black on a white block). The candidate
+        # scrolls in that slot; DEL/OK show as a back-arrow / check glyph so they
+        # occupy a single cell just like a letter. A space is a blank white block
+        # -- itself the "a space goes here" cue.
+        y = NAME_ROW_Y
         d.fill_rect(0, y, DISPLAY_WIDTH, CHAR_H, 0)
-        w = len(s) * CHAR_W
-        sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
-        d.text(s, sx, y, 255)
+        name = cur.name
+        maxc = DISPLAY_WIDTH // CHAR_W
+        if len(name) + 1 > maxc:               # keep the active slot on-screen
+            name = name[-(maxc - 1):]
+        item = _NAME_RING[cur.sel]
+        total = (len(name) + 1) * CHAR_W        # committed chars + active slot
+        sx = clamp((DISPLAY_WIDTH - total) // 2, 0, max(0, DISPLAY_WIDTH - total))
+        if name:
+            d.text(name, sx, y, 255)            # committed chars, normal
+        ax = sx + len(name) * CHAR_W            # active slot origin
+        d.fill_rect(ax, y, CHAR_W, CHAR_H, 255)  # knockout background (white)
+        if item == 'DEL':
+            _glyph_del(d, ax, y, 0)
+        elif item == 'OK':
+            _glyph_ok(d, ax, y, 0)
+        elif item != ' ':
+            d.text(item, ax, y, 0)              # candidate letter/digit, black
 
     def _draw_toast(self, msg):
         # Full-screen centered confirmation (1x), pushed progressively.
@@ -2257,9 +2296,9 @@ class SketchMenu:
             pass
 
     def _render_name(self, cur):
-        # Preset-name entry, drawn 1x (2x was too slow). On open/resume do a full
-        # clear; on a turn/click push only the two rows that move -- the name and
-        # the candidate -- so scrolling the ring stays snappy.
+        # Preset-name entry, drawn 1x. On open/resume do a full clear; on a
+        # turn/click just repaint the single word row (word + inline active slot),
+        # so scrolling the ring stays snappy.
         if not (self.dirty or cur.dirty):
             return
         self.dirty = False
@@ -2267,31 +2306,17 @@ class SketchMenu:
         full = cur.full or self._needs_clear
         try:
             d = amyboard.display
-            # Name so far + a cursor block. Tail-truncated to fit (you append at the
-            # end, so the tail is the part worth showing).
-            disp = cur.name + '_'
-            maxc = DISPLAY_WIDTH // CHAR_W
-            if len(disp) > maxc:
-                disp = disp[-maxc:]
-            # Current ring candidate -- the thing a click acts on.
-            item = _NAME_RING[cur.sel]
-            cand = item if item in ('DEL', 'OK') else \
-                ('[space]' if item == ' ' else item)
             if full:
                 d.fill(0)
                 d.text('NAME PRESET', 0, EDIT_TITLE_Y, 255)
-                self._name_row(d, EDIT_LABEL_Y, disp)
-                self._name_row(d, EDIT_VALUE_Y, cand)
+                self._draw_name_line(d, cur)
                 cur.full = False
                 self._needs_clear = False
                 self._panel_dirty_to = 128   # name entry owned the full screen
                 _begin_flush(0, 127)
                 return
-            self._name_row(d, EDIT_LABEL_Y, disp)
-            if not _push_rows(EDIT_LABEL_Y, EDIT_LABEL_Y + CHAR_H - 1):
-                amyboard.display_refresh()
-            self._name_row(d, EDIT_VALUE_Y, cand)
-            if not _push_rows(EDIT_VALUE_Y, EDIT_VALUE_Y + CHAR_H - 1):
+            self._draw_name_line(d, cur)
+            if not _push_rows(NAME_ROW_Y, NAME_ROW_Y + CHAR_H - 1):
                 amyboard.display_refresh()
         except Exception:
             pass
