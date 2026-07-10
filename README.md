@@ -70,6 +70,7 @@ This project provides a few different pieces of code designed to add some cool f
 - [Development Guidelines](docs/AGENTS.md) - Agent collaboration rules and architectural guidance
 - [Architecture](docs/ARCHITECTURE.md) - High-level system design
 - [Menu & Navigation](docs/MENU.md) - On-device menus, gesture model, launcher↔sketch contract
+- [WiFi & WebREPL](docs/WIFI.md) - Menu-toggled, auto-on-boot WiFi + WebREPL for wireless access
 - [Display Modes](docs/DISPLAY_MODES.md) - Pluggable OLED display modes (CC Monitor, Screensaver, Oscilloscope)
 - [CC Mapping](docs/CC_MAPPING.md) - CC → parameter map and live behavior
 - [MIDI Mapping](docs/MIDI_MAPPING.md) - Control surface roles and channel assignment

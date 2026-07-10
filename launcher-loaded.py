@@ -282,6 +282,7 @@ class Menu:
         if self.has_sketch and self.on_resume:
             items.append(('Resume', self.on_resume))
         items.append(('Load Sketch', self._open_sketches))
+        items.append(('WiFi', self._open_wifi))
         return _Level('AMYBOARD', items)
 
     @property
@@ -307,11 +308,37 @@ class Menu:
         self.stack.append(_Level('LOAD SKETCH', items))
         self._needs_clear = True
 
+    def _wifi_menu_items(self):
+        # Status line (non-selectable) + a single toggle whose label tracks the
+        # current state. Rebuilt on open and after each toggle so both refresh.
+        on = wifi_is_enabled()
+        return [
+            (_wifi_status_line(), None),
+            ('Turn WiFi Off' if on else 'Turn WiFi On', self._toggle_wifi),
+        ]
+
+    def _open_wifi(self):
+        self.stack.append(_Level('WIFI', self._wifi_menu_items()))
+        self._needs_clear = True
+
+    def _toggle_wifi(self):
+        # Flip the persisted enable flag, then connect/disconnect right now. The
+        # join is blocking (a few seconds) -- acceptable for a deliberate menu
+        # action; under the overlay AMY keeps sounding held notes meanwhile.
+        _wifi_set_enabled(not wifi_is_enabled())
+        if wifi_is_enabled():
+            _wifi_connect()
+        else:
+            _wifi_disconnect()
+        self.stack[-1] = _Level('WIFI', self._wifi_menu_items())
+        self._needs_clear = True
+
     def update(self, delta, click, hold):
         lvl = self.cur
         if delta:
             n = len(lvl.items)
-            lvl.idx = (lvl.idx + delta) % n
+            # Clamp at the ends -- the cursor stops at the top/bottom, no wrap.
+            lvl.idx = max(0, min(n - 1, lvl.idx + delta))
             self.dirty = True
         if hold:
             # Back out one level. At the root there is nothing to pop -> the
@@ -410,6 +437,99 @@ def _mount_sd():
         amyboard.mount_sd()
     except Exception:
         pass
+
+
+# --- WiFi (optional, user-toggled) ------------------------------------------
+# WiFi REMEMBERS its last on/off setting across reboots: the menu toggle writes
+# the choice to flash (WIFI_STATE_FILE), and each cold boot reads it back and
+# reconnects if it was left on. So the board comes up however you last left it --
+# leave it on to keep it reachable across resets (incl. deploys), turn it off and
+# it stays off. Credentials live in a JSON file on flash (WIFI_CONF), NOT in this
+# committed launcher, so the repo stays secret-free. Create it once from the REPL:
+#   import json
+#   json.dump({'ssid': 'my-net', 'password': 'pw', 'webrepl_password': 'amyboard'},
+#             open('/user/wifi.json', 'w'))
+# Every call here is fully defensive: a missing/bad config or a failed join can
+# never raise out of the boot path and brick the board (cf. the start_amy note).
+WIFI_CONF = '/user/wifi.json'
+WIFI_STATE_FILE = '/user/wifi_enabled'   # remembers last on/off across reboots
+_wifi_ip = None                          # last known IP, for the status line
+
+
+def wifi_is_enabled():
+    try:
+        with open(WIFI_STATE_FILE) as f:
+            return f.read().strip() == '1'
+    except Exception:
+        return False
+
+
+def _wifi_set_enabled(on):
+    try:
+        with open(WIFI_STATE_FILE, 'w') as f:
+            f.write('1' if on else '0')
+    except Exception:
+        pass
+
+
+def _wifi_load_conf():
+    try:
+        import json
+        with open(WIFI_CONF) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _wifi_connect():
+    """Join WiFi + start WebREPL from the on-flash config. Returns the IP (str)
+    or None. Never raises: a bad/missing config just leaves the board offline."""
+    global _wifi_ip
+    conf = _wifi_load_conf()
+    if not conf or not conf.get('ssid'):
+        print('WiFi: no /user/wifi.json (ssid) -- staying offline')
+        _wifi_ip = None
+        return None
+    try:
+        _wifi_ip = amyboard.wifi(conf['ssid'], conf.get('password', ''))
+    except Exception as e:
+        print('WiFi connect failed:', e)
+        _wifi_ip = None
+        return None
+    # WebREPL is best-effort -- a failure here must not undo a good connection.
+    try:
+        import webrepl
+        webrepl.start(password=conf.get('webrepl_password', 'amyboard'))
+    except Exception as e:
+        print('WebREPL start failed:', e)
+    print('WiFi up:', _wifi_ip)
+    return _wifi_ip
+
+
+def _wifi_disconnect():
+    """Best-effort teardown. Even if the radio can't be fully brought down on
+    this firmware, the persisted flag is now off, so the next boot stays
+    offline."""
+    global _wifi_ip
+    _wifi_ip = None
+    try:
+        import webrepl
+        webrepl.stop()
+    except Exception:
+        pass
+    try:
+        import network
+        network.WLAN(network.STA_IF).active(False)
+    except Exception:
+        pass
+
+
+def _wifi_status_line():
+    if not wifi_is_enabled():
+        return 'Status: off'
+    if _wifi_ip:
+        return _wifi_ip[:LABEL_MAX]
+    return 'Status: on (no IP)'
 
 
 _resolved_dir = None
@@ -529,12 +649,113 @@ if _state and _state != MENU_STATE:
 else:
     _start_menu()
 
+# Rejoin WiFi if it was left on (persisted flag) -- the board comes up however
+# you last left it. Runs AFTER the synth/menu is up so audio comes alive first;
+# the blocking join then adds a few seconds before the first loop(). Fully
+# guarded -- never bricks boot.
+if wifi_is_enabled():
+    _wifi_connect()
+
+
+# --- Reboot: on-device gesture + remote request -----------------------------
+# Two ways to reboot the board, both just calling machine.reset():
+#   * On-device: at the GLOBAL menu root, keep holding the encoder. After
+#     REBOOT_HOLD_MS of continuous hold a countdown shows, then it resets. A turn
+#     or release cancels. (A normal hold-to-open-global is well under this.)
+#   * Remote: deploy_wifi.py drops REBOOT_SENTINEL on flash; loop() polls for it
+#     (every REBOOT_POLL_EVERY ticks, ~2s), and if present deletes it and resets.
+#     This is how a WiFi deploy self-activates -- WebREPL can push files here but
+#     can't run REPL commands while the launcher owns the thread, so it cannot
+#     machine.reset() directly.
+REBOOT_HOLD_MS = 5000
+REBOOT_SENTINEL = '/user/reboot_request'
+REBOOT_POLL_EVERY = 32          # loop() ticks between sentinel stats (~2s)
+_reboot_poll = 0
+_reboot_arm_ms = None           # ticks_ms when the hold-to-reboot arm began
+_reboot_last_remaining = -1
+
+
+def _reboot():
+    try:
+        machine.reset()
+    except Exception:
+        pass
+
+
+def _check_reboot_request():
+    # Remote reboot: a WiFi deploy drops REBOOT_SENTINEL. Delete it FIRST so a
+    # wedged reset can't turn into a boot loop, then reset.
+    try:
+        os.stat(REBOOT_SENTINEL)
+    except Exception:
+        return False
+    try:
+        os.remove(REBOOT_SENTINEL)
+    except Exception:
+        pass
+    _reboot()
+    return True
+
+
+def _draw_reboot_countdown(remaining):
+    # Redraw only when the whole-second changes (a handful of blits, not per-tick).
+    global _reboot_last_remaining
+    if remaining == _reboot_last_remaining:
+        return
+    _reboot_last_remaining = remaining
+    try:
+        d = amyboard.display
+        d.fill(0)
+        d.text('HOLD TO REBOOT', 4, 36, 255)
+        d.text('release=cancel', 4, 54, 128)
+        d.text('reboot in ' + str(remaining), 4, 78, 255)
+        amyboard.display_refresh()
+    except Exception:
+        pass
+
+
+def _service_reboot_hold(delta, click):
+    # On-device hold-to-reboot, active ONLY at the global menu root. Returns True
+    # when it owns the display this tick (caller then skips the menu render).
+    global _reboot_arm_ms, _reboot_last_remaining
+    at_root = _menu is not None and len(_menu.stack) == 1
+    held = _encoder is not None and _encoder._btn_down
+    if delta or click or not (at_root and held):
+        # Any turn/click/release cancels an in-progress countdown.
+        if _reboot_arm_ms is not None:
+            _reboot_arm_ms = None
+            _reboot_last_remaining = -1
+            if _menu is not None:
+                _menu.dirty = True
+                _menu._needs_clear = True      # repaint the menu over the countdown
+        return False
+    now = time.ticks_ms()
+    if _reboot_arm_ms is None:
+        _reboot_arm_ms = now
+    elapsed = time.ticks_diff(now, _reboot_arm_ms)
+    if elapsed < 900:
+        return False                           # ignore the brief hold that opened global
+    if elapsed >= REBOOT_HOLD_MS:
+        _reboot()
+        return True
+    _draw_reboot_countdown((REBOOT_HOLD_MS - elapsed + 999) // 1000)
+    return True
+
 
 def loop():
     # Firmware calls this repeatedly (~60 ms).
+    global _reboot_poll
+    # Remote reboot request (dropped by a WiFi deploy) -- honored in every mode.
+    _reboot_poll += 1
+    if _reboot_poll >= REBOOT_POLL_EVERY:
+        _reboot_poll = 0
+        if _check_reboot_request():
+            return
     if _overlay:
         # Global menu is up over a paused (but still-sounding) sketch.
         delta, click, hold = _encoder.update()
+        if _service_reboot_hold(delta, click):
+            return
         if delta or click or hold:
             _menu.update(delta, click, hold)
         _menu.render()
@@ -574,6 +795,8 @@ def loop():
     else:
         # Cold-boot menu (no sketch resident).
         delta, click, hold = _encoder.update()
+        if _service_reboot_hold(delta, click):
+            return
         if delta or click or hold:
             _menu.update(delta, click, hold)
         _menu.render()
