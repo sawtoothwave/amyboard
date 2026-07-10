@@ -1467,15 +1467,43 @@ def fmt_flt_env(v):
     return 'Center' if amt == 0 else '%+.1f oct' % amt
 
 
-class _Param:
-    __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar')
+def _bucket_centers(fmt):
+    # One representative CC per distinct display bucket: the center of each run of
+    # equal fmt() labels across 0..127. Derived from the SAME fmt the editor shows,
+    # so the steps can never drift from the displayed buckets (e.g. 6 waveforms ->
+    # 6 centers, 4 filter types -> 4 centers).
+    labels = [fmt(cc) for cc in range(128)]
+    steps = []
+    i = 0
+    while i < 128:
+        j = i
+        while j < 128 and labels[j] == labels[i]:
+            j += 1
+        steps.append((i + j - 1) // 2)      # center of this run
+        i = j
+    return steps
 
-    def __init__(self, label, cc, default, fmt=None, bipolar=False):
+
+def _bucket_advance(steps, value, delta):
+    # Snap to the nearest bucket, then move by the raw detent count (one detent =
+    # one bucket; the list is short so quadratic accel would just overshoot).
+    idx = min(range(len(steps)), key=lambda i: abs(steps[i] - value))
+    idx = clamp(idx + int(delta), 0, len(steps) - 1)
+    return steps[idx]
+
+
+class _Param:
+    __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar', 'steps')
+
+    def __init__(self, label, cc, default, fmt=None, bipolar=False, stepped=False):
         self.label = label
         self.cc = cc
         self.default = default   # raw 0-127 value used until a CC/editor sets one
         self.fmt = fmt           # optional value(0-127) -> friendly label
         self.bipolar = bipolar   # editor readout shows a signed scale (0 = center)
+        # "Bucketed" params (a few discrete display values): one detent jumps to
+        # the next distinct bucket instead of crawling through identical CCs.
+        self.steps = _bucket_centers(fmt) if (stepped and fmt) else None
 
 
 # The editable-parameter list, shown numbered in the menu. Adding a row here is
@@ -1486,18 +1514,18 @@ class _Param:
 # a few are shortened from the requested names (see notes) -- Filt Type, Kbd
 # Track, the ADSR Atk/Dec/Sus/Rel forms, and the space-free Lfo>X routing.
 PARAMS = [
-    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch, bipolar=True),
-    _Param('Osc A Shape', CC_OSC_A_WAVE,   52, fmt_wave),
+    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch, bipolar=True, stepped=True),
+    _Param('Osc A Shape', CC_OSC_A_WAVE,   52, fmt_wave, stepped=True),
     _Param('Osc A Duty',  CC_OSC_A_DUTY,   64),
     _Param('Osc A Level', CC_OSC_A_LEVEL, 127),
-    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, fmt_osc_pitch, bipolar=True),
-    _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave),
+    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, fmt_osc_pitch, bipolar=True, stepped=True),
+    _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave, stepped=True),
     _Param('Osc B Duty',  CC_OSC_B_DUTY,   64),
     _Param('Osc B Level', CC_OSC_B_LEVEL,   0),
     _Param('Cutoff',      CC_FLT_CUTOFF,  127),
     _Param('Resonance',   CC_FLT_RES,       0),
     _Param('Filter Env',  CC_FLT_ENV_AMT,  64, fmt_flt_env, bipolar=True),
-    _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type),
+    _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type, stepped=True),
     _Param('Kbd Track',   CC_KEY_SCALE,     0),
     _Param('Vcf Atk',     CC_VCF_ATK,       0),
     _Param('Vcf Dec',     CC_VCF_DEC,      34),
@@ -1508,7 +1536,7 @@ PARAMS = [
     _Param('Vca Sus',     CC_VCA_SUS,     127),
     _Param('Vca Rel',     CC_VCA_REL,      34),
     _Param('Lfo Freq',    CC_LFO_FREQ,      0),
-    _Param('Lfo Shape',   CC_LFO_WAVE,      0, fmt_wave),
+    _Param('Lfo Shape',   CC_LFO_WAVE,      0, fmt_wave, stepped=True),
     _Param('Lfo>Pitch',   CC_LFO_PITCH,     0),
     _Param('Lfo>Pwm',     CC_LFO_PWM,       0),
     _Param('Lfo>Filter',  CC_LFO_FILT,      0),
@@ -2007,7 +2035,11 @@ class SketchMenu:
                 return
             if delta:                # turn: move the cursor + apply live
                 self._click_pending_at = 0     # a turn cancels a pending click
-                lvl.value = clamp(lvl.value + _accel(delta), 0, 127)
+                if lvl.param.steps:
+                    # Bucketed param: one detent = one bucket (skip identical CCs).
+                    lvl.value = _bucket_advance(lvl.param.steps, lvl.value, delta)
+                else:
+                    lvl.value = clamp(lvl.value + _accel(delta), 0, 127)
                 handle_cc(lvl.param.cc, lvl.value)
                 lvl.dirty = True
             if click:
