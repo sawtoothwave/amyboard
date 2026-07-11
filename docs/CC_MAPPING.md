@@ -2,7 +2,7 @@
 
 The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), received on **MIDI channel 12**. Each CC updates its parameter live — no voice reset, so held notes are never cut. Several CCs follow AMYboard/standard-MIDI defaults for backwards-compat — filter cutoff (74), resonance (71), the amp (VCA) ADSR (attack 73, decay 75, sustain 79, release 72), LFO rate (76) and vibrato depth (77); the rest use spare CCs.
 
-**CC range:** 1 (mod wheel), 20-32, 40-43, 71-83. Value ranges in the table are implementation choices (tunable without changing the CC assignments). The e16 controller's page/knob layout lives in [E16_SETUP.md](E16_SETUP.md).
+**CC range:** 1 (mod wheel), 20-33, 40-46, 71-87, 90-92, 95-98, 100-103. Value ranges in the table are implementation choices (tunable without changing the CC assignments). The e16 controller's page/knob layout lives in [E16_SETUP.md](E16_SETUP.md).
 
 ## CC Map
 
@@ -17,8 +17,12 @@ The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), receive
 | 30 | Filter Env Amount | **Bipolar** EG1 depth coefficient (octave-style), -2.0..+2.0, centered at CC 64 (=0, no effect). Positive opens the filter as the envelope rises; negative inverts it so the envelope closes the filter. |
 | 31 | Filter Type | Four buckets across 0-127: LPF24, LPF, BPF, HPF. |
 | 32 | Key Scale | Filter `note` tracking coefficient, 0.0-1.0 (0 = none, 1 = full keyboard tracking). |
+| 33 | Velocity → Filter | Velocity-to-cutoff depth, **unipolar** 0.0-2.0 octaves (0 = off). Adds a `vel` coefficient to the filter head's `filter_freq`, so harder hits open the filter. |
 | 40-43 | VCF A/D/S/R | Filter EG1 envelope. Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
+| 45 | VCF Env Shape | Filter EG1 envelope curve, four buckets: Linear, Normal, True Exp, DX7 (AMY `eg1_type`; default Normal). |
 | 73/75/79/72 | VCA A/D/S/R | Amp EG0 envelope (attack 73, decay 75, sustain 79, release 72). Times ~1-5000 ms (quadratic); sustain 0.0-1.0. |
+| 46 | VCA Env Shape | Amp EG0 envelope curve, four buckets: Linear, Normal, True Exp, DX7 (AMY `eg0_type`; default Normal). |
+| 44 | Velocity → Amp | Velocity-to-amp sensitivity depth, 0-100% (0 = ignore velocity/organ-like, 100% = fully velocity-sensitive; default 30%). Scales the amp `vel` coefficient, lifting soft playing while leaving hard hits unchanged. |
 | 76 | LFO Freq | LFO rate, logarithmic ~0.2-20 Hz. |
 | 78 | LFO Waveshape | Six-wave buckets (same map as CC 21/25): Sine, Pulse, Saw Down, Saw Up, Triangle, Noise. |
 | 77 | LFO → Pitch (Vibrato) | Global vibrato depth on both oscillators, quadratic, 0 to ±12 semitones (1 octave), via each osc's `freq` `mod` coef. Also driven by the mod wheel (CC 1). Held vibrato is smooth; sweeping the depth on a held note has a minor zipper (AMY applies `freq` coefficients immediately — no ramp — so a depth change steps the pitch; see the LFO notes below). |
@@ -27,6 +31,18 @@ The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), receive
 | 81 | LFO → Osc A Amp (Tremolo) | Downward tremolo depth on Osc A, 0.0-0.5. The LFO modulates Osc A's amplitude (via its amp `mod` coef) so the peak never exceeds Osc A's set level and the trough ducks toward silence at full depth (never above level, never below 0). |
 | 82 | LFO → Osc B Amp (Tremolo) | Downward tremolo depth on Osc B, 0.0-0.5 (independent of Osc A; same bounded `mod`-coef routing). |
 | 1 | Mod Wheel → Vibrato | Standard mod-wheel vibrato. Remapped to CC 77, so it sets the same global LFO→pitch depth (reflected in Param Control and captured by presets). |
+
+## Master Output & Effects
+
+Global controls on AMY's master bus (post-voice, one instance each — not per-voice). Per-patch and captured by presets. Effects default to **off** (EQ flat, chorus/echo/reverb level 0), so a patch sounds identical until they are dialed in. Effect "Level" is an **additive wet send** (dry stays at full), not a wet/dry mix, so there is no per-effect "100% wet". Signal chain: voices → EQ → chorus → echo → reverb → Master Level → soft-clip → out.
+
+| CC | Parameter | Behavior |
+|----|-----------|----------|
+| 84 | Master Level | Output volume (AMY global bus `volume`, post-FX). ~Mute up to +16 dB relative to AMY's quiet default; default **+12 dB**. Stepped in whole dB. AMY soft-clips peaks above ~-1 dBFS. |
+| 85 / 86 / 87 | EQ Low / Mid / High | 3-band master EQ, **bipolar** ±12 dB per band (CC 64 = flat). Sent as dB; AMY converts to linear gain. |
+| 90 / 91 / 92 | Chorus Level / Depth / Rate | Chorus wet send, modulation depth, and LFO rate (~0.1-10 Hz). `max_delay` fixed at init. |
+| 95 / 96 / 97 / 98 | Echo Level / Time / Fbk / Tone | Echo wet send, delay time (~1-740 ms), feedback (0-95%), and feedback-path damping (0-95%). `max_delay_ms` buffer fixed at init. |
+| 100 / 101 / 102 / 103 | Reverb Level / Decay / Damp / Xover | Reverb wet send, liveness/decay, HF damping, and damping crossover (~100 Hz-8 kHz, log). |
 
 ## Synth & Modulation Notes
 
@@ -49,7 +65,7 @@ Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison 
 
 ## Deferred Controls
 
-Not implemented: effects (reverb / echo / chorus). Everything else in the map — presets, the OLED display modes, and on-device Param Control editing — is implemented; see [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
+Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, and per-envelope curve shapes — all editable on-device (Param Control is now grouped into Osc / VCF / LFO / VCA / FX, with VCF and VCA each led by an **Env** sub-menu) and captured by presets. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
 
 ## Tuning and Wave Maps (Implemented)
 
