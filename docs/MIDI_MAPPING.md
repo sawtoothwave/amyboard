@@ -46,7 +46,7 @@ control surface.
 ### Oxi e16
 
 - **Encoders**: Real-time parameter control via the frozen CC range
-  (1, 20-32, 40-43, 71-83). See [CC_MAPPING.md](CC_MAPPING.md) for the full map.
+  (1, 20-33, 40-46, 71-87, 90-92, 95-98, 100-103). See [CC_MAPPING.md](CC_MAPPING.md) for the full map.
 - **Buttons / scene pages**: Layout intent is documented under "Controller
   Pages" in [CC_MAPPING.md](CC_MAPPING.md)
 
@@ -58,8 +58,10 @@ control surface.
   without changing the frozen CC assignments.
 - Onboard OLED + encoder navigation is implemented (see [MENU.md](MENU.md) and
   [DISPLAY_MODES.md](DISPLAY_MODES.md)).
-- On-device **Param Control** edits all 28 CC-mapped parameters directly from the
-  encoder — no control surface needed (polysynth menu → Param Control; see
-  [MENU.md](MENU.md)).
-- Not yet implemented: effects (reverb / echo / chorus) and pitch-bend routing.
-  (Mod-wheel vibrato and on-device presets are now implemented.)
+- On-device **Param Control** edits all 47 CC-mapped parameters directly from the
+  encoder — no control surface needed. It is grouped into Osc / VCF / LFO / VCA / FX,
+  with VCF and VCA each led by an **Env** sub-menu (polysynth menu → Param Control;
+  see [MENU.md](MENU.md)).
+- Implemented: master effects (EQ / chorus / echo / reverb), master output level,
+  velocity→filter and velocity→amp depth, per-envelope curve shapes, mod-wheel
+  vibrato, and on-device presets. Not yet implemented: pitch-bend routing.
