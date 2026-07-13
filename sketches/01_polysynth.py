@@ -4,7 +4,8 @@
 #   resonant filter with VCF envelope + key tracking, VCA envelope, plus a
 #   per-voice LFO routed to pitch, PWM and filter. 6-voice polyphony. MIDI ch12
 #   notes (auto-routed to synth 12 by AMY) + CCs (20-32, 40-47, 71, 74, 76-80)
-#   handled via midi.add_callback; CV1 1V/oct + CV2 gate.
+#   handled via midi.add_callback. (CV in/out support was attempted and removed --
+#   see CV_attempt.md for what we learned.)
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
 import amy, amyboard, midi, math, time, json
@@ -361,9 +362,7 @@ ECHO_TONE_MAX       = 0.95   # one-pole damping coef in the feedback path at CC 
 REV_XOVER_MIN_HZ    = 100    # reverb damping-crossover freq at CC 0
 REV_XOVER_MAX_HZ    = 8000   #                               at CC 127 (log curve)
 
-# CV input
-CV_GATE_THRESHOLD = 1.0
-CV1_BASE_NOTE = 60
+# (CV in/out support was attempted here and removed -- see CV_attempt.md.)
 
 # ---------------------------------------------------------------------------
 # Display modes. The OLED (firmware-owned amyboard.display) is driven by a
@@ -480,9 +479,6 @@ fx = {
 # quiet 1.0 baseline) so a single note sits near modular levels; per-patch, so a
 # dense-chord patch can back this off to keep peaks under the soft-clip knee.
 master_vol = 3.98
-
-cv_gate_active  = False
-cv_current_note = 69
 
 
 # ---------------------------------------------------------------------------
@@ -639,11 +635,6 @@ def cc_to_echo_tone(cc):
 def cc_to_rev_xover(cc):
     return REV_XOVER_MIN_HZ * math.pow(
         REV_XOVER_MAX_HZ / REV_XOVER_MIN_HZ, cc_unit(cc))
-
-
-def cv_volts_to_midi(volts):
-    n = int(round(CV1_BASE_NOTE + volts * 12.0))
-    return clamp(n, 0, 127)
 
 
 # ---------------------------------------------------------------------------
@@ -1268,7 +1259,7 @@ def setup_midi():
 # ---------------------------------------------------------------------------
 # Display infrastructure (shared by every display mode). All drawing happens via
 # service_display(), called only from loop() -- never from the MIDI callback --
-# and is fully wrapped so a display fault can never disturb audio/MIDI/CV.
+# and is fully wrapped so a display fault can never disturb audio/MIDI.
 # ---------------------------------------------------------------------------
 def init_display():
     # The firmware already owns/initializes the panel (it prints the boot
@@ -1690,7 +1681,7 @@ def _restore_display_mode():
 def service_display():
     # Throttled dispatch to the active display mode: handles the one-time boot
     # wipe, bounds the refresh rate, and routes drawing to whatever mode is
-    # currently selected. Any mode error is swallowed so audio/MIDI/CV continue.
+    # currently selected. Any mode error is swallowed so audio/MIDI continue.
     global _display_last_render
     if not DISPLAY_OK:
         return
@@ -2209,12 +2200,12 @@ class SketchMenu:
     def _root(self):
         # Preset actions live directly on the root now (no "Presets" submenu).
         return _MenuLevel('POLYSYNTH', [
-            ('Param Control', self._open_params),
-            ('Save As Preset', self._start_save),
-            ('Load Preset', self._open_load),
-            ('Delete Preset', self._open_delete),
-            ('Display Mode', self._open_display),
-            ('Resume Playing', self.close),
+            ('Param control', self._open_params),
+            ('Save as preset', self._start_save),
+            ('Load preset', self._open_load),
+            ('Delete preset', self._open_delete),
+            ('Display mode', self._open_display),
+            ('Resume playing', self.close),
         ])
 
     def _open_params(self):
@@ -2282,7 +2273,7 @@ class SketchMenu:
             # (INIT is write-protected, so it never reaches the Overwrite chooser.)
             self.stack.append(_MenuLevel('Current preset:\n%s\n' % name[:MENU_LABEL_MAX], [
                 ('Overwrite', (lambda n=name: self._confirm_overwrite(n))),
-                ('Save as New', self._start_name_entry),
+                ('Save as new', self._start_name_entry),
                 ('Cancel', self._pop),
             ]))
             self.dirty = True
@@ -2962,31 +2953,6 @@ init_display()
 _restore_display_mode()
 
 
-def _service_cv():
-    # Monophonic CV: CV1 = 1V/oct pitch, CV2 = gate.
-    global cv_gate_active, cv_current_note
-    try:
-        cv1 = amyboard.cv_in(0)
-        cv2 = amyboard.cv_in(1)
-
-        gate_high = cv2 >= CV_GATE_THRESHOLD
-        new_note = cv_volts_to_midi(cv1)
-
-        if gate_high and not cv_gate_active:
-            cv_current_note = new_note
-            cv_gate_active = True
-            amy.send(synth=SYNTH, note=cv_current_note, vel=0.8)
-        elif gate_high and cv_gate_active and new_note != cv_current_note:
-            amy.send(synth=SYNTH, note=cv_current_note, vel=0)
-            cv_current_note = new_note
-            amy.send(synth=SYNTH, note=cv_current_note, vel=0.8)
-        elif not gate_high and cv_gate_active:
-            cv_gate_active = False
-            amy.send(synth=SYNTH, note=cv_current_note, vel=0)
-    except Exception:
-        pass
-
-
 def loop():
     # Standalone (no wrapper): we are the sole encoder reader, so pump our own
     # reader first to fill launcher.delta/.click/.back. Wrapped: the wrapper has
@@ -2997,10 +2963,6 @@ def loop():
     # Drive the encoder-driven menu from the launcher's input events first.
     _pump_menu()
 
-    # The instrument stays live even while the menu is open: keep servicing CV
-    # (notes/audio also keep running via the MIDI callback regardless).
-    _service_cv()
-
     if menu.is_open:
         menu.render()                # the menu owns the OLED while open
     else:
@@ -3009,7 +2971,7 @@ def loop():
         if launcher.repaint:
             launcher.repaint = False
             _force_display_redraw()
-        # Display last so a CV read error never blocks the screen, and vice versa.
+        # Display last so a display error never blocks audio/MIDI, and vice versa.
         service_display()
 
     # Standalone: clear the one-shot events so the menu never re-consumes them
