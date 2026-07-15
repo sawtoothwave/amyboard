@@ -2127,6 +2127,41 @@ PARAM_GROUPS = ('Osc', 'VCF', 'LFO', 'VCA', 'FX')
 # Last raw 0-127 value seen per editable CC, seeded with each param's default.
 param_values = {p.cc: p.default for p in PARAMS}
 
+# Ultra-short (<=5 char, 8px font -> <=40px, fits a ~42px grid cell) labels for the
+# Param Control knob grid cells. The header shows each param's FULL label; the cells
+# use these tight abbreviations. One dict (vs. touching every _Param) keeps it in one
+# place. ADSR labels repeat across VCF/VCA but never collide (different groups/pages).
+GRID_LABELS = {
+    CC_OSC_A_PITCH: 'APIT', CC_OSC_A_WAVE: 'AWAV', CC_OSC_A_DUTY: 'ADTY', CC_OSC_A_LEVEL: 'ALVL',
+    CC_OSC_B_PITCH: 'BPIT', CC_OSC_B_WAVE: 'BWAV', CC_OSC_B_DUTY: 'BDTY', CC_OSC_B_LEVEL: 'BLVL',
+    CC_OCTAVE: 'OCT',
+    CC_VCF_ATK: 'ATK', CC_VCF_DEC: 'DEC', CC_VCF_SUS: 'SUS', CC_VCF_REL: 'REL',
+    CC_FLT_ENV_SHAPE: 'FSHP', CC_FLT_CUTOFF: 'CUT', CC_FLT_RES: 'RES', CC_FLT_ENV_AMT: 'FENV',
+    CC_VEL_FILT: 'VFLT', CC_FLT_TYPE: 'FTYP', CC_KEY_SCALE: 'KEY',
+    CC_LFO_FREQ: 'LHZ', CC_LFO_WAVE: 'LWAV', CC_LFO_PITCH: 'VIB', CC_LFO_PWM: 'PWM',
+    CC_LFO_FILT: 'LFLT', CC_LFO_AMP_A: 'TRMA', CC_LFO_AMP_B: 'TRMB',
+    CC_DRIFT_DEPTH: 'DRFT', CC_DRIFT_RATE: 'DRHZ',
+    CC_VCA_ATK: 'ATK', CC_VCA_DEC: 'DEC', CC_VCA_SUS: 'SUS', CC_VCA_REL: 'REL',
+    CC_AMP_ENV_SHAPE: 'ASHP', CC_VEL_SENS: 'VAMP', CC_MASTER_VOL: 'VOL',
+    CC_EQ_LOW: 'EQLO', CC_EQ_MID: 'EQMD', CC_EQ_HIGH: 'EQHI',
+    CC_CHO_LEVEL: 'CHLV', CC_CHO_DEPTH: 'CHDP', CC_CHO_RATE: 'CHRT',
+    CC_ECHO_LEVEL: 'ECLV', CC_ECHO_TIME: 'ECTM', CC_ECHO_FBK: 'ECFB', CC_ECHO_TONE: 'ECTN',
+    CC_REV_LEVEL: 'RVLV', CC_REV_DECAY: 'RVDC', CC_REV_DAMP: 'RVDP', CC_REV_XOVER: 'RVXO',
+}
+
+# Header (full-name) overrides for params whose _Param.label is a poor standalone
+# name once flattened out of their sub-menu -- the ADSR envelopes (label 'A'/'D'/
+# 'S'/'R') and the two env-shape params (label 'Shape'). We embed the VCF/VCA
+# context here since the grid header no longer shows a separate group tag. Kept
+# <=12 chars so "<name>: <value>" fits the 16-char header. Others use p.label.
+GRID_HEADER_NAMES = {
+    CC_VCF_ATK: 'Filt Attack', CC_VCF_DEC: 'Filt Decay',
+    CC_VCF_SUS: 'Filt Sustain', CC_VCF_REL: 'Filt Release',
+    CC_VCA_ATK: 'Amp Attack', CC_VCA_DEC: 'Amp Decay',
+    CC_VCA_SUS: 'Amp Sustain', CC_VCA_REL: 'Amp Release',
+    CC_FLT_ENV_SHAPE: 'Filt EnvShp', CC_AMP_ENV_SHAPE: 'Amp EnvShp',
+}
+
 
 # ---------------------------------------------------------------------------
 # On-device menu (encoder-driven). Reachable by a short CLICK while playing and
@@ -2295,6 +2330,158 @@ class _NameLevel:
         self.full = True
 
 
+# ---------------------------------------------------------------------------
+# Param Control knob grid. A group's params are shown as a 3x4 grid of value
+# bars (12/page) instead of a text list + single-slider editor. A CURSOR (bright
+# bounding box) navigates cell-to-cell; a CLICK SELECTS the cell (knockout /
+# reverse-video) and turning then adjusts that param live; click/back returns to
+# the cursor. The header shows the focused param's FULL label + value (bucketed
+# params show their word via fmt; bipolar bars anchor at center). Drawing is
+# fill_rect/text only and redraws just the changed cell(s) to stay audio-safe.
+# ---------------------------------------------------------------------------
+GRID_COLS = 3
+GRID_ROWS = 4
+GRID_PER_PAGE = GRID_COLS * GRID_ROWS                 # 12 cells/page
+GRID_HDR_H = 14                                        # header band height (px)
+GRID_CELL_W = DISPLAY_WIDTH // GRID_COLS               # 42
+GRID_CELL_H = (128 - GRID_HDR_H) // GRID_ROWS          # 28 (panel is 128 tall)
+GRID_BAR_W = 32
+GRID_BAR_H = 6          # bar height (px), thinned from 8 -> fewer lit OLED pixels to
+                        # cut the current-coupled audio noise. Fill is GRID_BAR_H-4
+                        # tall (2px here); lower further if more reduction is needed.
+
+# Grid grayscale levels (0-255), in one place so brightness can be tuned by ear.
+# Bright OLED pixels draw more current, which couples audible noise into the audio
+# path (its tone shifts as the highlight lights up). Currently at the original
+# bright values -- first noise lever is thinning the bars (above); dimming these is
+# the next lever if needed.
+GRID_C_LABEL    = 215   # unfocused cell label
+GRID_C_BAR_OUT  = 110   # unfocused bar outline
+GRID_C_BAR_FILL = 205   # unfocused bar fill
+GRID_C_TICK     = 150   # bipolar center tick
+GRID_C_CURSOR   = 255   # cursor box + its brightened content
+GRID_C_KNOCK    = 255   # selected-cell knockout block
+GRID_C_HDR_NAME = 210   # header param name
+GRID_C_HDR_VAL  = 255   # header value
+GRID_C_RULE     = 70    # header rule line
+GRID_C_PAGE_OFF = 20    # inactive page-indicator mark. The panel is 4-bit (top
+                        # nibble), so this is level 1 -- the dimmest still-visible
+                        # step (below ~16 is fully off, which would hide the 2nd-page
+                        # cue). If active/inactive still read alike, the panel can't
+                        # go dimmer -> switch to a filled(active)/hollow(inactive) shape.
+
+
+def _grid_disp(p, v):
+    # Header value string: the param's friendly fmt (a WORD for bucketed params,
+    # a unit'd number for others) when it has one, else the raw 0-127.
+    if p.fmt:
+        try:
+            return p.fmt(v)
+        except Exception:
+            pass
+    return str(v)
+
+
+def _draw_grid_cell(d, slot, label, val01, bipolar, state):
+    # slot 0..11 (position on the current page). state: 'none'|'cursor'|'selected'.
+    col = slot % GRID_COLS
+    row = slot // GRID_COLS
+    x0 = col * GRID_CELL_W
+    ctop = GRID_HDR_H + row * GRID_CELL_H
+    cxc = x0 + GRID_CELL_W // 2
+    d.fill_rect(x0, ctop, GRID_CELL_W, GRID_CELL_H, 0)      # clear cell first
+    if state == 'selected':
+        d.fill_rect(x0 + 2, ctop + 1, GRID_CELL_W - 4, GRID_CELL_H - 3, GRID_C_KNOCK)  # knockout
+        fg = 0; barout = 0; barfill = 0; tick = 0
+    else:
+        fg = GRID_C_LABEL; barout = GRID_C_BAR_OUT; barfill = GRID_C_BAR_FILL; tick = GRID_C_TICK
+        if state == 'cursor':
+            fg = GRID_C_CURSOR; barout = GRID_C_CURSOR; barfill = GRID_C_CURSOR; tick = GRID_C_CURSOR
+            bw = GRID_CELL_W - 2; bh = GRID_CELL_H - 1
+            d.fill_rect(x0 + 1, ctop, bw, 1, GRID_C_CURSOR)
+            d.fill_rect(x0 + 1, ctop + bh - 1, bw, 1, GRID_C_CURSOR)
+            d.fill_rect(x0 + 1, ctop, 1, bh, GRID_C_CURSOR)
+            d.fill_rect(x0 + bw, ctop, 1, bh, GRID_C_CURSOR)
+    lx = cxc - (len(label) * CHAR_W) // 2
+    d.text(label, max(x0 + 1, lx), ctop + 1, fg)
+    bx = cxc - GRID_BAR_W // 2
+    by = ctop + 12
+    d.fill_rect(bx, by, GRID_BAR_W, 1, barout)
+    d.fill_rect(bx, by + GRID_BAR_H - 1, GRID_BAR_W, 1, barout)
+    d.fill_rect(bx, by, 1, GRID_BAR_H, barout)
+    d.fill_rect(bx + GRID_BAR_W - 1, by, 1, GRID_BAR_H, barout)
+    if bipolar:
+        cxb = bx + GRID_BAR_W // 2
+        d.fill_rect(cxb, by, 1, GRID_BAR_H, tick)          # center anchor tick
+        half = (GRID_BAR_W - 4) // 2
+        w = int(round(half * (val01 - 0.5) * 2))
+        if w > 0:
+            d.fill_rect(cxb, by + 2, w, GRID_BAR_H - 4, barfill)
+        elif w < 0:
+            d.fill_rect(cxb + w, by + 2, -w, GRID_BAR_H - 4, barfill)
+    else:
+        fw = int(round((GRID_BAR_W - 4) * val01))
+        if fw > 0:
+            d.fill_rect(bx + 2, by + 2, fw, GRID_BAR_H - 4, barfill)
+
+
+def _draw_grid_header(d, full_label, disp):
+    # Focused param's full name + value. No separate group tag (the grid implies the
+    # group; ADSR/shape names embed VCF/VCA via GRID_HEADER_NAMES). Left-aligned name,
+    # right-aligned value so the value is always visible; the name is clipped between.
+    d.fill_rect(0, 0, DISPLAY_WIDTH, GRID_HDR_H, 0)
+    maxc = DISPLAY_WIDTH // CHAR_W                          # 16 chars
+    vs = str(disp)
+    vw = len(vs)
+    d.text(vs, DISPLAY_WIDTH - vw * CHAR_W, 2, GRID_C_HDR_VAL)   # value, right-aligned
+    lab = '%s:' % full_label
+    avail = maxc - vw - 1                                   # leave a 1-char gap
+    if avail > 0:
+        if len(lab) > avail:
+            lab = lab[:avail]
+        d.text(lab, 0, 2, GRID_C_HDR_NAME)                 # name, left-aligned
+    d.fill_rect(0, GRID_HDR_H - 2, DISPLAY_WIDTH, 1, GRID_C_RULE)   # header rule
+
+
+def _draw_grid_pages(d, page, npages):
+    # Page indicator: one mark per page stacked in the 2px right margin (x >= 126),
+    # which no cell ever draws or clears -- so it survives incremental cell redraws
+    # without being repainted. Current page bright, others dim. Hidden for 1 page.
+    if npages < 2:
+        return
+    w, h, gap = 2, 5, 4
+    off_h = 3               # inactive mark is shorter (+dimmer) than the active one
+    total = npages * h + (npages - 1) * gap
+    y = (128 - total) // 2
+    x = DISPLAY_WIDTH - w
+    for i in range(npages):
+        if i == page:
+            d.fill_rect(x, y, w, h, GRID_C_HDR_VAL)                       # active: full + bright
+        else:
+            d.fill_rect(x, y + (h - off_h) // 2, w, off_h, GRID_C_PAGE_OFF)  # inactive: short + dim
+        y += h + gap
+
+
+class _GridLevel:
+    # A Param Control group shown as the knob grid. `idx` is the cursor position in
+    # `params` (flat, all of the group's params -- sub-buckets are flattened into
+    # cells); `editing` distinguishes cursor (box) from selected (knockout). Live
+    # values come from param_values, so no per-param value is cached here.
+    __slots__ = ('group', 'params', 'idx', 'editing', 'entry_value', 'dirty',
+                 'full', 'prev_idx', 'prev_page')
+
+    def __init__(self, group):
+        self.group = group
+        self.params = [p for p in PARAMS if p.group == group]
+        self.idx = 0
+        self.editing = False
+        self.entry_value = 0     # value snapshot when editing began (hold-to-revert)
+        self.dirty = True
+        self.full = True
+        self.prev_idx = 0
+        self.prev_page = 0
+
+
 class SketchMenu:
     def __init__(self):
         self.stack = []          # empty => closed (playing)
@@ -2373,6 +2560,8 @@ class SketchMenu:
         if isinstance(cur, _EditLevel) and cur.param.cc == cc:
             cur.value = clamp(int(val), 0, 127)
             cur.dirty = True
+        elif isinstance(cur, _GridLevel) and cur.editing and cur.params[cur.idx].cc == cc:
+            cur.dirty = True   # focused param moved by an external CC -> repaint it
 
     def service_pending(self, now):
         # Fire a deferred editor single-click (commit + exit to the list) once the
@@ -2382,10 +2571,16 @@ class SketchMenu:
         if time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
             return
         self._click_pending_at = 0
-        if self.stack and isinstance(self.cur, _EditLevel):
+        if not self.stack:
+            return
+        cur = self.cur
+        if isinstance(cur, _EditLevel):
             self.stack.pop()          # keep the current value, back to the list
             self.dirty = True
             self._needs_clear = True
+        elif isinstance(cur, _GridLevel) and cur.editing:
+            cur.editing = False       # commit: keep value, back to the cursor
+            cur.dirty = True
 
     def _root(self):
         # Preset actions live directly on the root now (no "Presets" submenu).
@@ -2410,28 +2605,10 @@ class SketchMenu:
         self._needs_clear = True
 
     def _open_param_group(self, group):
-        # A category level. Entries are a mix (in PARAMS order) of editable params
-        # (sub == '') and sub-bucket drill-ins: the first param of each distinct
-        # sub becomes one "<Sub> >" item (the '>' marks a drill-in) that opens
-        # _open_param_sub; that sub's later params are folded into it. Everything is
-        # numbered sequentially. A category with no subs (Osc/LFO/FX) lists flat.
-        items = []
-        seen = []
-        n = 1
-        for p in PARAMS:
-            if p.group != group:
-                continue
-            if p.sub:
-                if p.sub in seen:
-                    continue
-                seen.append(p.sub)
-                items.append(('%d. %s >' % (n, p.sub),
-                              (lambda s=p.sub: self._open_param_sub(group, s))))
-            else:
-                items.append(('%d. %s' % (n, p.label),
-                              (lambda p=p: self._edit_param(p))))
-            n += 1
-        self.stack.append(_MenuLevel(group.upper(), items))
+        # A category: shown as the 3x4 knob grid (_GridLevel). All of the group's
+        # params become cells (sub-buckets like the VCF/VCA Env ADSR are flattened
+        # inline rather than drilled into). Cursor navigates; click selects to edit.
+        self.stack.append(_GridLevel(group))
         self.dirty = True
         self._needs_clear = True
 
@@ -2662,6 +2839,9 @@ class SketchMenu:
         if not self.is_open:
             return
         lvl = self.cur
+        if isinstance(lvl, _GridLevel):
+            self._handle_grid(lvl, delta, click, back)
+            return
         if isinstance(lvl, _EditLevel):
             # Parameter editor: turn adjusts LIVE, single click keeps + exits,
             # double click resets to the patch default, hold reverts + exits.
@@ -2739,6 +2919,56 @@ class SketchMenu:
                 cb()
                 self.dirty = True
 
+    def _handle_grid(self, lvl, delta, click, back):
+        # SELECTED (editing): turn adjusts live; single click commits (keeps value,
+        # back to cursor -- deferred so a 2nd click can arrive); DOUBLE click resets
+        # to the param default (stays editing); HOLD reverts to the entry value and
+        # exits. CURSOR: turn moves cell-to-cell; click selects (snapshots the value
+        # for revert); hold pops back to the group chooser.
+        if lvl.editing:
+            p = lvl.params[lvl.idx]
+            if back:                             # hold: revert + exit editing
+                self._click_pending_at = 0
+                handle_cc(p.cc, lvl.entry_value)
+                lvl.editing = False
+                lvl.dirty = True
+                return
+            if delta:                            # turn cancels a pending click
+                self._click_pending_at = 0
+                v = int(param_values.get(p.cc, p.default))
+                if p.steps:                      # bucketed: one detent = one bucket
+                    v = _bucket_advance(p.steps, v, delta)
+                else:
+                    v = clamp(v + _accel(delta), 0, 127)
+                handle_cc(p.cc, v)               # applies live + records param_values
+                lvl.dirty = True
+            if click:
+                now = time.ticks_ms()
+                if self._click_pending_at and \
+                        time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
+                    # double click: reset to the param default, stay editing.
+                    self._click_pending_at = 0
+                    handle_cc(p.cc, p.default)
+                    lvl.dirty = True
+                else:
+                    # first click: defer commit-and-exit so a 2nd click can arrive
+                    # (fired by service_pending once the window passes).
+                    self._click_pending_at = now
+            return
+        if back:
+            self.stack.pop()
+            self.dirty = True
+            self._needs_clear = True
+            return
+        if delta:
+            lvl.idx = clamp(lvl.idx + delta, 0, len(lvl.params) - 1)
+            lvl.dirty = True
+        if click:
+            p = lvl.params[lvl.idx]
+            lvl.entry_value = int(param_values.get(p.cc, p.default))  # for hold-revert
+            lvl.editing = True
+            lvl.dirty = True
+
     def _draw_row(self, d, y, kind, payload):
         d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
         if kind == 't':
@@ -2808,6 +3038,70 @@ class SketchMenu:
         d.fill_rect(EDIT_LINE_X0, EDIT_TRACK_Y, EDIT_LINE_X1 - EDIT_LINE_X0, 1, 180)
         d.fill_rect(clamp(cx - 1, 0, DISPLAY_WIDTH - 3),
                     EDIT_TRACK_Y - EDIT_TICK_H, 3, EDIT_TICK_H * 2 + 1, 255)
+
+    def _render_grid(self, cur):
+        # Full draw on open / resume / page-change (flushed progressively);
+        # otherwise redraw only the changed cell(s) + header. The value is applied
+        # live in _handle_grid, so sound tracks every detent even when a redraw is
+        # throttled to the next frame.
+        if not (self.dirty or cur.dirty):
+            return
+        now = time.ticks_ms()
+        page = cur.idx // GRID_PER_PAGE
+        full = cur.full or self._needs_clear or (page != cur.prev_page)
+        if not full and time.ticks_diff(now, self._edit_last_render) < EDIT_REFRESH_MS:
+            return
+        self.dirty = False
+        cur.dirty = False
+        self._edit_last_render = now
+        try:
+            d = amyboard.display
+            start = page * GRID_PER_PAGE
+            page_params = cur.params[start:start + GRID_PER_PAGE]
+            fp = cur.params[cur.idx]                     # focused param
+            fv = int(param_values.get(fp.cc, fp.default))
+            hlabel = GRID_HEADER_NAMES.get(fp.cc, fp.label).upper()
+            hdisp = _grid_disp(fp, fv)
+            if full:
+                d.fill(0)
+                _draw_grid_header(d, hlabel, hdisp)
+                for i, p in enumerate(page_params):
+                    gi = start + i
+                    st = ('selected' if cur.editing else 'cursor') if gi == cur.idx else 'none'
+                    v = int(param_values.get(p.cc, p.default))
+                    _draw_grid_cell(d, i, GRID_LABELS.get(p.cc, p.label[:5].upper()),
+                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
+                _draw_grid_pages(d, page,
+                                 (len(cur.params) + GRID_PER_PAGE - 1) // GRID_PER_PAGE)
+                cur.full = False
+                self._needs_clear = False
+                self._panel_dirty_to = 128
+                cur.prev_idx = cur.idx
+                cur.prev_page = page
+                _begin_flush(0, 127)
+                return
+            # Incremental: header (focused param/value changed) + the changed cells.
+            _draw_grid_header(d, hlabel, hdisp)
+            if not _push_rows(0, GRID_HDR_H - 1):
+                amyboard.display_refresh()
+            for gi in {cur.prev_idx, cur.idx}:           # dedup (same cell when editing)
+                if start <= gi < start + len(page_params):
+                    i = gi - start
+                    p = page_params[i]
+                    st = ('selected' if cur.editing else 'cursor') if gi == cur.idx else 'none'
+                    v = int(param_values.get(p.cc, p.default))
+                    _draw_grid_cell(d, i, GRID_LABELS.get(p.cc, p.label[:5].upper()),
+                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
+                    col = i % GRID_COLS
+                    row = i // GRID_COLS
+                    x0 = col * GRID_CELL_W
+                    ctop = GRID_HDR_H + row * GRID_CELL_H
+                    if not _push_window(x0, x0 + GRID_CELL_W - 1, ctop, ctop + GRID_CELL_H - 1):
+                        amyboard.display_refresh()
+            cur.prev_idx = cur.idx
+            cur.prev_page = page
+        except Exception:
+            pass
 
     def _render_edit(self, cur):
         # 0-127 slider editor. On open/resume (cur.full) do one full clear+draw
@@ -2966,6 +3260,9 @@ class SketchMenu:
         if not self.is_open:
             return
         cur = self.cur
+        if isinstance(cur, _GridLevel):
+            self._render_grid(cur)
+            return
         if isinstance(cur, _EditLevel):
             self._render_edit(cur)
             return

@@ -70,7 +70,7 @@ Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison 
 
 ## Deferred Controls
 
-Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device (Param Control is now grouped into Osc / VCF / LFO / VCA / FX, with VCF and VCA each led by an **Env** sub-menu) and captured by presets. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
+Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device and captured by presets. Param Control is a **3×4 value-bar "knob" grid** per group (Osc / VCF / LFO / VCA / FX): a cursor box navigates cell-to-cell, a click selects a cell (knockout highlight) and turning then adjusts it live, double-click resets to default, hold reverts. The header shows the focused param's full name + value (bucketed params show their word; bipolar params draw a center-anchored bar). VCF/VCA envelope params (ADSR + shape) appear inline as cells rather than in a sub-menu; groups over 12 params (FX) paginate, with a right-margin page indicator. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
 
 ## Tuning and Wave Maps (Implemented)
 
