@@ -211,6 +211,11 @@ CC_OSC_B_PITCH = 24
 CC_OSC_B_WAVE  = 25
 CC_OSC_B_DUTY  = 26
 CC_OSC_B_LEVEL = 27
+# Global pitch transpose in whole octaves (both oscs shift together, keyboard
+# tracking preserved). Exists to reconcile the middle-C naming convention: a
+# controller/sequencer that labels MIDI note 60 "C3" (Yamaha) sits one octave
+# above AMY's rendering, so the default is -1 oct. Spare CC.
+CC_OCTAVE      = 34
 CC_FLT_ENV_AMT = 30
 CC_FLT_TYPE    = 31
 CC_KEY_SCALE   = 32
@@ -424,6 +429,11 @@ _boot_cleared = False
 # ---------------------------------------------------------------------------
 # Live patch state (musical defaults; overwritten by incoming CCs)
 # ---------------------------------------------------------------------------
+# Global pitch transpose in whole octaves, applied to both oscs in osc_freq().
+# Defaults to -1 so a "note 60 == C3" (Yamaha-convention) controller plays at the
+# expected pitch; adjustable per-patch via CC_OCTAVE / the Osc-group Octave param.
+octave = -1
+
 a_cents = 0.0
 a_wave  = amy.SAW_DOWN
 a_duty  = 0.5
@@ -513,6 +523,20 @@ def cc_to_detune_cents(cc):
     if cc <= 104:
         return 1200.0                               # one octave up
     return 2400.0                                   # two octaves up
+
+
+def cc_to_octave(cc):
+    # Five equal-ish buckets across 0-127 -> whole-octave transpose -2..+2.
+    cc = clamp(int(cc), 0, 127)
+    if cc <= 25:
+        return -2
+    if cc <= 51:
+        return -1
+    if cc <= 76:
+        return 0
+    if cc <= 102:
+        return 1
+    return 2
 
 
 def cc_to_wave(cc):
@@ -647,9 +671,11 @@ HEAD_AMP = {'const': 1.0, 'vel': 0, 'eg0': 0}
 
 def osc_freq(cents):
     # const in Hz at note 69, note coef 1.0 -> tracks keyboard with cents offset.
+    # `octave` shifts the reference by whole octaves (global transpose); folding it
+    # into the exponent keeps note-tracking intact -- every note moves together.
     # 'mod' adds the shared LFO vibrato at the global depth (unit-per-octave), so
     # A and B track the same vibrato -- the standard mod-wheel form.
-    return {'const': REF_HZ * math.pow(2.0, cents / 1200.0), 'note': 1,
+    return {'const': REF_HZ * math.pow(2.0, cents / 1200.0 + octave), 'note': 1,
             'mod': lfo_pitch_depth}
 
 
@@ -757,6 +783,13 @@ def init_synth():
     # the fixed delay buffers exist and every effect is armed at its default
     # (all OFF) before any preset restore replays FX CCs.
     init_fx()
+
+
+def update_octave():
+    # Global transpose changed: re-send both sounding oscs' freq (each folds the
+    # new `octave` into its const via osc_freq). Live -- held notes glide, not cut.
+    amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
+    amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
 
 
 def update_filter_freq():
@@ -1071,6 +1104,7 @@ def _restore_current_preset():
 # held notes are never cut off).
 # ---------------------------------------------------------------------------
 def handle_cc(cc, val):
+    global octave
     global a_cents, a_wave, a_duty, a_level
     global b_cents, b_wave, b_duty, b_level
     global flt_cutoff, flt_res, flt_type, flt_env_amt, key_scale, vel_filt_depth
@@ -1115,6 +1149,9 @@ def handle_cc(cc, val):
         b_level = cc_unit(val)
         amy.send(synth=SYNTH, osc=OSC_B, amp=osc_amp(b_level, lfo_amp_b_depth))
         keep_filter_head_alive()
+    elif cc == CC_OCTAVE:
+        octave = cc_to_octave(val)
+        update_octave()
     elif cc == CC_FLT_CUTOFF:
         flt_cutoff = cc_to_cutoff(val)
         update_filter_freq()
@@ -1723,6 +1760,12 @@ def fmt_osc_pitch(v):
     return ('%+dc' % c) if c else 'Unison'
 
 
+def fmt_octave(v):
+    # Whole-octave transpose, bucketed like cc_to_octave(); 0 reads 'Center'.
+    o = cc_to_octave(v)
+    return 'Center' if o == 0 else '%+d oct' % o
+
+
 def fmt_wave(v):
     # Name the six core waves, bucketed exactly like cc_to_wave() so the label
     # always matches the wave the synth actually selects.
@@ -1871,6 +1914,7 @@ PARAMS = [
     _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave, stepped=True, group='Osc'),
     _Param('Osc B Duty',  CC_OSC_B_DUTY,   64, group='Osc'),
     _Param('Osc B Level', CC_OSC_B_LEVEL,   0, group='Osc'),
+    _Param('Octave',      CC_OCTAVE,        38, fmt_octave, bipolar=True, stepped=True, group='Osc'),
     # VCF: filter controls. The filter envelope leads, in its own 'Env' sub-bucket
     # (ADSR + curve Shape; Shape default raw 48 = the 'Normal' bucket, stepped one
     # detent per curve type), then Cutoff/Resonance, the env AMOUNT, velocity->
@@ -2323,7 +2367,8 @@ class SketchMenu:
                 ('Back', self._pop),
             ]))
         else:
-            self.stack.append(_MenuLevel('OVERWRITE?' if exists else 'SAVE?', [
+            head = 'OVERWRITE\n"%s"?' if exists else 'SAVE\n"%s"?'
+            self.stack.append(_MenuLevel(head % name[:MENU_LABEL_MAX], [
                 ('Yes', (lambda n=name: self._do_save(n))),
                 ('No', self._pop),
             ]))
