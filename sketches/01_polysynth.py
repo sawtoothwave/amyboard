@@ -2,7 +2,8 @@
 # DESCRIPTION: 2-oscillator (A/B) analog-style synth matching the frozen CC map.
 #   Stepped musical tuning per osc, 6-way wave buckets (no wavetable/PCM/ALGO),
 #   resonant filter with VCF envelope + key tracking, VCA envelope, plus a
-#   per-voice LFO routed to pitch, PWM and filter. 6-voice polyphony. MIDI ch12
+#   per-voice LFO routed to pitch, PWM and filter, plus a control-rate analog
+#   drift (smooth-random pitch wander -- tape wow/warble). 6-voice polyphony. MIDI ch12
 #   notes (auto-routed to synth 12 by AMY) + CCs (20-32, 40-47, 71, 74, 76-80)
 #   handled via midi.add_callback. (CV in/out support was attempted and removed --
 #   see CV_attempt.md for what we learned.)
@@ -256,6 +257,15 @@ CC_LFO_AMP_A   = 81
 CC_LFO_AMP_B   = 82
 CC_LFO_PWM     = 83
 
+# Analog drift (control-rate smooth-random pitch wander -- tape wow/warble). NOT
+# an AMY oscillator: AMY's LFO shapes are all periodic (its NOISE is white, not a
+# slow wander), so a slow ORGANIC drift is synthesized in loop() (see
+# service_drift) and folded into both oscs' freq const. Two spare CCs in the gap
+# after the osc block -- depth (amount) and rate (wander speed). Depth 0 = OFF
+# (default), so existing patches are unchanged.
+CC_DRIFT_DEPTH = 28
+CC_DRIFT_RATE  = 29
+
 # Global master effects (AMY's EQ / chorus / echo / reverb). Unlike every CC
 # above, these are NOT per-osc/per-synth: AMY runs one instance of each on the
 # final mix bus, so their handle_cc branches issue GLOBAL amy.send()s (no synth=/
@@ -340,6 +350,25 @@ LFO_PWM_DEPTH_MAX   = 0.45   # duty modulation depth around the set duty
 LFO_FILT_DEPTH_MAX  = 2.0    # octaves (matches FLT_ENV_AMT_MAX)
 LFO_AMP_DEPTH_MAX   = 0.5    # tremolo depth (per osc); full ~ -60 dB dip to silence
 
+# --- Analog-drift ranges (control-rate smooth-random pitch wander) -----------
+# Depth is the +/- pitch excursion in cents at full knob (linear so the low end
+# resolves finely -- a subtle few-cent wobble is the common analog setting). Rate
+# is the wander SPEED: how many fresh random targets the wander eases through per
+# second (logarithmic), from a very slow drift up to a fast warble. See
+# service_drift() for the smooth-random generator.
+DRIFT_DEPTH_MAX_CENTS = 100.0  # +/- cents at CC 127 (0 = OFF, the default); a full
+                               # semitone each way at the top for extreme lo-fi
+DRIFT_RATE_MIN_HZ     = 0.05   # ~1 new target / 20 s at CC 0 (slow drift)
+DRIFT_RATE_MAX_HZ     = 12.0   # ~12 new targets / s at CC 127 (fast warble/flutter)
+DRIFT_TICK_MS         = 25     # control-rate update period (~40 Hz). Each tick issues
+                               # two amy.send()s (osc A+B freq) in the same loop() that
+                               # repaints the OLED, so a faster tick starves the (slow)
+                               # screen blit -- 25 ms keeps the menu responsive. Trade-
+                               # off: since AMY applies freq changes instantly (no ramp),
+                               # fast+deep drift steps more here (the extreme max-depth +
+                               # max-rate corner is audibly grainy); slow-deep and fast-
+                               # shallow -- the usual musical settings -- stay smooth.
+
 # --- Master FX ranges (AMY global EQ / chorus / echo / reverb) ---------------
 # The 0-127 CC -> real-value maps for the master effects. Level/depth/damp/decay
 # are plain unit (cc_unit) 0..1 fractions and need no constant. Feedback-style
@@ -418,6 +447,7 @@ CC_LABELS = {
     CC_LFO_FREQ: 'LFO HZ',  CC_LFO_PITCH: 'VIB',   CC_MODWHEEL: 'MOD WH',
     CC_LFO_WAVE: 'LFO WV',  CC_LFO_PWM: 'LFO PW',  CC_LFO_FILT: 'LFO FL',
     CC_LFO_AMP_A: 'A TREM', CC_LFO_AMP_B: 'B TREM',
+    CC_DRIFT_DEPTH: 'DRIFT', CC_DRIFT_RATE: 'DRF HZ',
 }
 
 # Shared display state (owned by the display dispatcher, not by any one mode).
@@ -472,6 +502,23 @@ lfo_pwm_depth   = 0.0
 lfo_filt_depth  = 0.0
 lfo_amp_a_depth = 0.0
 lfo_amp_b_depth = 0.0
+
+# Analog-drift state. Depth 0 = OFF (default) so a fresh boot and every legacy
+# preset are unchanged. `_drift_cents` is the live wander offset that osc_freq()
+# folds into both oscs' pitch; the rest is the smooth-random generator's own
+# state, driven at control rate by service_drift(). _drift_rng is a tiny built-in
+# LCG (seeded lazily from amy.millis()) so we depend on no `random` module.
+drift_depth_cents = 0.0    # +/- cents excursion at full wander (0 = off)
+drift_rate_hz     = 0.40   # wander speed (targets/s); mirrors the 'Drift Rate'
+                           # Param default (raw 48 ~ 0.40 Hz) so a fresh boot
+                           # wanders sensibly the moment Amt is raised
+_drift_cents   = 0.0       # current offset in cents, read by osc_freq()
+_drift_prev    = 0.0       # previous random target (-1..1)
+_drift_next    = 0.0       # next random target (-1..1)
+_drift_phase   = 0.0       # 0..1 progress from prev -> next target
+_drift_last_ms = 0         # amy.millis() at the last serviced tick
+_drift_seeded  = False
+_drift_rng     = 1         # LCG state
 
 # Master FX state (real values, not raw CCs), mirrored from handle_cc. Every
 # effect starts OFF (level 0 / EQ flat), so a fresh boot and every legacy preset
@@ -600,6 +647,18 @@ def cc_to_time_ms(cc):
     return int(ENV_TIME_MIN_MS + (u * u) * (ENV_TIME_MAX_MS - ENV_TIME_MIN_MS))
 
 
+def cc_to_drift_depth(cc):
+    # Linear +/- cents excursion (0 at CC 0). Linear so the low, musically useful
+    # few-cent region resolves finely rather than being crushed by a log curve.
+    return cc_unit(cc) * DRIFT_DEPTH_MAX_CENTS
+
+
+def cc_to_drift_rate(cc):
+    # Logarithmic wander speed (targets/second), like the LFO/chorus rates.
+    return DRIFT_RATE_MIN_HZ * math.pow(
+        DRIFT_RATE_MAX_HZ / DRIFT_RATE_MIN_HZ, cc_unit(cc))
+
+
 def cc_to_lfo_freq(cc):
     return LFO_FREQ_MIN_HZ * math.pow(LFO_FREQ_MAX_HZ / LFO_FREQ_MIN_HZ, cc_unit(cc))
 
@@ -673,10 +732,12 @@ def osc_freq(cents):
     # const in Hz at note 69, note coef 1.0 -> tracks keyboard with cents offset.
     # `octave` shifts the reference by whole octaves (global transpose); folding it
     # into the exponent keeps note-tracking intact -- every note moves together.
+    # `_drift_cents` is the control-rate analog-drift wander (service_drift), added
+    # in cents so it rides on top of tuning/transpose and moves both oscs together.
     # 'mod' adds the shared LFO vibrato at the global depth (unit-per-octave), so
     # A and B track the same vibrato -- the standard mod-wheel form.
-    return {'const': REF_HZ * math.pow(2.0, cents / 1200.0 + octave), 'note': 1,
-            'mod': lfo_pitch_depth}
+    return {'const': REF_HZ * math.pow(2.0, (cents + _drift_cents) / 1200.0 + octave),
+            'note': 1, 'mod': lfo_pitch_depth}
 
 
 def osc_duty(duty):
@@ -859,6 +920,68 @@ def update_vel_sens():
     # vel_sens lives inside osc_amp, so re-send the full amp for both sounding oscs.
     update_lfo_amp_a()
     update_lfo_amp_b()
+
+
+# --- Analog drift (control-rate smooth-random pitch wander) ------------------
+# Emulates tape wow / analog oscillator drift. AMY's own LFO can only produce
+# PERIODIC shapes (its NOISE wave is full-rate white noise, not a slow wander), so
+# a slow, organic, non-repeating drift can't come from the audio engine. Instead
+# we generate a smooth-random bipolar "wander" here at control rate and fold it
+# into both oscs' freq const (osc_freq), re-sending A and B when it moves. This is
+# exactly the job MicroPython is fast enough for: sub-audio-rate parameter nudging.
+def _drift_rand():
+    # Tiny self-contained LCG -> bipolar float in [-1, 1). Avoids depending on a
+    # `random` module being present on the board's MicroPython build.
+    global _drift_rng
+    _drift_rng = (_drift_rng * 1103515245 + 12345) & 0x7fffffff
+    return (_drift_rng / 0x40000000) - 1.0
+
+
+def service_drift():
+    # Called every loop() tick. Off (depth 0) => no work and no sends, so the
+    # default state costs nothing. Otherwise advance a phase from one random target
+    # to the next and ease between them with a smoothstep (zero velocity at each
+    # end => no kinks), giving an organic, aperiodic wander. Fresh targets are
+    # picked on each crossing, so it never repeats.
+    global _drift_cents, _drift_prev, _drift_next, _drift_phase
+    global _drift_last_ms, _drift_seeded, _drift_rng
+    if drift_depth_cents <= 0.0:
+        return
+    now = amy.millis()
+    if not _drift_seeded:
+        _drift_rng = (int(now) & 0x7fffffff) or 1   # seed from the clock
+        _drift_next = _drift_rand()
+        _drift_last_ms = now
+        _drift_seeded = True
+        return
+    dt = now - _drift_last_ms
+    if dt < DRIFT_TICK_MS:
+        return
+    _drift_last_ms = now
+    _drift_phase += (dt / 1000.0) * drift_rate_hz
+    while _drift_phase >= 1.0:            # crossed into the next segment(s)
+        _drift_phase -= 1.0
+        _drift_prev = _drift_next
+        _drift_next = _drift_rand()
+    s = _drift_phase * _drift_phase * (3.0 - 2.0 * _drift_phase)   # smoothstep
+    new_cents = (_drift_prev + (_drift_next - _drift_prev) * s) * drift_depth_cents
+    # Re-send only when the pitch has moved >= ~1 cent. Caps the send rate and, by
+    # keeping each step below the pitch JND, makes the control-rate updates read as
+    # smooth even though AMY applies freq const changes immediately (no ramp).
+    if abs(new_cents - _drift_cents) >= 1.0:
+        _drift_cents = new_cents
+        amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
+        amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
+
+
+def update_drift_depth():
+    # When drift is turned OFF, snap the pitch back to base -- service_drift stops
+    # running at depth 0, so it can't clear the residual offset itself.
+    global _drift_cents
+    if drift_depth_cents <= 0.0 and _drift_cents != 0.0:
+        _drift_cents = 0.0
+        amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
+        amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
 
 
 # --- Master FX senders -------------------------------------------------------
@@ -1111,6 +1234,7 @@ def handle_cc(cc, val):
     global lfo_freq, lfo_wave, lfo_pitch_depth, lfo_pwm_depth, lfo_filt_depth
     global lfo_amp_a_depth, lfo_amp_b_depth, master_vol, vel_sens
     global amp_eg_type, flt_eg_type
+    global drift_depth_cents, drift_rate_hz
 
     # The mod wheel is the standard vibrato controller: treat it as the LFO->pitch
     # depth so a performer's wheel works out of the box and shares that one param
@@ -1224,6 +1348,11 @@ def handle_cc(cc, val):
     elif cc == CC_LFO_AMP_B:
         lfo_amp_b_depth = cc_to_lfo_amp(val)
         update_lfo_amp_b()
+    elif cc == CC_DRIFT_DEPTH:
+        drift_depth_cents = cc_to_drift_depth(val)
+        update_drift_depth()   # snaps pitch back to base if this turned drift OFF
+    elif cc == CC_DRIFT_RATE:
+        drift_rate_hz = cc_to_drift_rate(val)   # takes effect on the next segment
     # --- Master output + FX: update global state, then re-send --------------
     elif cc == CC_MASTER_VOL:
         master_vol = cc_to_master_vol(val)
@@ -1809,6 +1938,18 @@ def fmt_vel_filt(v):
     return 'Off' if amt == 0 else '+%.1f oct' % amt
 
 
+def fmt_drift_depth(v):
+    # Drift excursion in +/- cents; 0 reads 'Off' (the wander is disabled).
+    c = int(round(cc_to_drift_depth(v)))
+    return 'Off' if c == 0 else '+/-%dc' % c
+
+
+def fmt_drift_rate(v):
+    # Wander speed in Hz (random targets eased through per second).
+    hz = cc_to_drift_rate(v)
+    return '%.2f Hz' % hz if hz < 1.0 else '%.1f Hz' % hz
+
+
 # --- Master FX readouts (each mirrors its cc_to_* map) -----------------------
 def fmt_master_vol(v):
     # dB relative to AMY's old default (volume 1.0). vol 1 -> 0 dB, ~3 -> +10 dB,
@@ -1939,6 +2080,11 @@ PARAMS = [
     _Param('Lfo>Filter',  CC_LFO_FILT,      0, group='LFO'),
     _Param('Lfo>Amp A',   CC_LFO_AMP_A,     0, group='LFO'),
     _Param('Lfo>Amp B',   CC_LFO_AMP_B,     0, group='LFO'),
+    # Analog drift: a control-rate smooth-random pitch wander (tape wow/warble),
+    # separate from the audio LFO. Amt default 0 = off (patches unchanged); Rate
+    # default raw 48 ~ 0.3 Hz, a gentle wander for when Amt is dialed up.
+    _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, fmt_drift_depth, group='LFO'),
+    _Param('Drift Rate',  CC_DRIFT_RATE,   48, fmt_drift_rate, group='LFO'),
     # VCA: amp controls. The amp envelope in its own 'Env' sub-bucket (ADSR +
     # curve Shape), then velocity->amp sensitivity and the master output Level
     # (renamed from the old 'Output'; per-patch master volume, default +12 dB).
@@ -3004,6 +3150,10 @@ def loop():
     # already filled those around this call, so skip (and it clears them itself).
     if _STANDALONE:
         launcher.update()
+
+    # Analog drift: advance the control-rate pitch wander (no-op when off). Done
+    # before the menu so the audio keeps drifting even while the menu is open.
+    service_drift()
 
     # Drive the encoder-driven menu from the launcher's input events first.
     _pump_menu()

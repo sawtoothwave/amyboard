@@ -31,6 +31,8 @@ The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), receive
 | 80 | LFO → Filter | Filter-cutoff modulation depth, 0.0-2.0 octaves (matches CC 30 env amount). |
 | 81 | LFO → Osc A Amp (Tremolo) | Downward tremolo depth on Osc A, 0.0-0.5. The LFO modulates Osc A's amplitude (via its amp `mod` coef) so the peak never exceeds Osc A's set level and the trough ducks toward silence at full depth (never above level, never below 0). |
 | 82 | LFO → Osc B Amp (Tremolo) | Downward tremolo depth on Osc B, 0.0-0.5 (independent of Osc A; same bounded `mod`-coef routing). |
+| 28 | Drift Amount | Analog-drift pitch wander depth, **±0-100 cents** (0 = off, default; a full semitone each way at the top for extreme lo-fi). A control-rate smooth-random modulator (tape wow/warble), **not** an AMY oscillator — see the Analog Drift note below. Moves both oscillators together. |
+| 29 | Drift Rate | Drift wander speed, logarithmic ~0.05-12 Hz (new random target eased through per second). Default raw 48 ≈ 0.40 Hz. Only audible once Drift Amount > 0. |
 | 1 | Mod Wheel → Vibrato | Standard mod-wheel vibrato. Remapped to CC 77, so it sets the same global LFO→pitch depth (reflected in Param Control and captured by presets). |
 
 ## Master Output & Effects
@@ -58,6 +60,8 @@ Two notes on smoothness, both rooted in AMY applying **amplitude** changes with 
 
 LFO depths default to 0, so the LFO is inaudible until a depth knob (or the mod wheel) is moved.
 
+**Analog Drift (CC 28/29).** A separate modulator from the audio LFO, emulating tape wow / analog oscillator drift. AMY's LFO can only produce *periodic* shapes (its `NOISE` wave is full-rate white noise, not a slow wander), so a slow, organic, non-repeating drift is synthesized **at control rate in `loop()`** (`service_drift`) rather than by the audio engine: a smooth-random bipolar "wander" (random targets eased through with a smoothstep, so it never repeats and has no velocity kinks) is folded into both oscillators' `freq` const, moving them together. It re-sends only when the pitch has moved ≥ ~1 cent, keeping each step below the pitch JND so the control-rate updates read as smooth even though AMY applies `freq` changes immediately (no ramp). Depth 0 = off, so it costs nothing and leaves existing patches unchanged; extreme depth *and* rate together is intentionally gritty (larger per-step jumps). Lives in the **LFO** Param Control group as *Drift Amt* / *Drift Rate*, and is captured by presets.
+
 Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison at the center of the tuning map. To reintroduce a per-oscillator reference (for example an octave-down sub on Osc B), change `REF_HZ` handling in `sketch.py`.
 
 ## Rebuild Rule
@@ -66,7 +70,7 @@ Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison 
 
 ## Deferred Controls
 
-Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, and per-envelope curve shapes — all editable on-device (Param Control is now grouped into Osc / VCF / LFO / VCA / FX, with VCF and VCA each led by an **Env** sub-menu) and captured by presets. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
+Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device (Param Control is now grouped into Osc / VCF / LFO / VCA / FX, with VCF and VCA each led by an **Env** sub-menu) and captured by presets. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
 
 ## Tuning and Wave Maps (Implemented)
 
