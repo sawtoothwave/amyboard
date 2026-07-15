@@ -12,6 +12,7 @@ The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), receive
 | 21 / 25 | Osc A / B Wave | Six-wave buckets: Sine, Pulse, Saw Down, Saw Up, Triangle, Noise (see below). |
 | 22 / 26 | Osc A / B Duty | Pulse duty cycle, 0.05-0.95. |
 | 23 / 27 | Osc A / B Level | Oscillator amplitude, 0.0-1.0 (scales that osc's amp envelope). |
+| 34 | Octave | Global whole-octave transpose, five buckets: -2, -1, Center (0), +1, +2. Shifts both oscillators together while preserving keyboard tracking (folded into each osc's `freq` const). **Default -1 oct** to reconcile the middle-C naming convention — a controller/sequencer that labels MIDI note 60 as "C3" (Yamaha) otherwise plays an octave above expectation. |
 | 74 | Filter Cutoff | Logarithmic, ~30 Hz to ~16 kHz. |
 | 71 | Filter Resonance | ~0.0-6.0 (musical span of AMY's wider Q range). |
 | 30 | Filter Env Amount | **Bipolar** EG1 depth coefficient (octave-style), -2.0..+2.0, centered at CC 64 (=0, no effect). Positive opens the filter as the envelope rises; negative inverts it so the envelope closes the filter. |
