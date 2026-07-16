@@ -112,13 +112,15 @@ LABEL_MAX = 18
 
 
 # --- Audio-safe display push ------------------------------------------------
-# A full 128x128 refresh blits ~8KB over the 400kHz I2C bus (~150ms) and blocks
+# A full 128x128 refresh blits 8KB over the 400kHz I2C bus (~240ms MEASURED
+# 2026-07-16; an earlier "~150ms" here was theory, not measurement) and blocks
 # the single MicroPython thread long enough to drop a note-off -- and the global
 # menu opens OVER a sketch that is still sounding. So the menu never does a full
-# refresh: it pushes only changed rows (a cursor move touches two), and its full
-# repaint (open / level change) is flushed in bounded row BANDS spread across
-# successive loop() calls so no single blit exceeds a few tens of ms.
-FLUSH_BAND_ROWS = 12         # pixel-rows pushed per loop() while flushing (~19ms)
+# refresh: it pushes only changed rows (a cursor move touches two, ~4.5ms), and
+# its full repaint (open / level change) is flushed in bounded row BANDS spread
+# across successive loop() calls so no single blit exceeds ~19ms.
+FLUSH_BAND_ROWS = 12         # pixel-rows pushed per loop() while flushing (19ms measured
+                             # -- 12 rows = 768B; 2 rows = 4.5ms; the full 8KB = 240ms)
 _flush_active = False
 _flush_y = 0
 _flush_y1 = 127

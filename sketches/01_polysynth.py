@@ -418,10 +418,13 @@ REV_XOVER_MAX_HZ    = 8000   #                               at CC 127 (log curv
 #       when content changed,
 #   (3) drawing pushes ONLY the framebuffer rows that changed -- the SSD1327 has
 #       no partial-refresh in firmware, so a full display.show() blits the whole
-#       8KB framebuffer over the 400kHz I2C bus (~150-180ms of blocking time);
-#       _push_rows() windows it to the changed rows (~1KB / ~5-20ms), and
-#       DISPLAY_MAX_ROWS_PER_REFRESH caps rows-per-refresh so a busy screen can
-#       never hold the bus long enough to delay a note-off.
+#       8KB framebuffer over the 400kHz I2C bus. MEASURED 2026-07-16: that costs
+#       240ms of blocking time (an earlier "~150-180ms" here was the theoretical
+#       8192*9/400kHz = 184ms, which ignores per-byte overhead -- reality is ~30%
+#       worse, so budget from 240). _push_rows() windows it to the changed rows
+#       instead: at 64 B/row, the 2 rows a cursor move touches cost ~4.5ms and a
+#       12-row band ~19ms. DISPLAY_MAX_ROWS_PER_REFRESH caps rows-per-refresh so
+#       a busy screen can never hold the bus long enough to delay a note-off.
 # ---------------------------------------------------------------------------
 DISPLAY_MAX_LINES   = 6       # rows of CCs shown at once (newest at bottom)
 DISPLAY_REFRESH_MS  = 100     # min gap between refreshes. This is a CEILING of ~10 fps,
@@ -1556,15 +1559,22 @@ def _boot_wipe(now):
 
 
 # ---------------------------------------------------------------------------
-# Progressive framebuffer flush. A full 128x128 refresh blits ~8KB over the
-# 400kHz I2C bus (~150-180ms) and blocks the single MicroPython thread long
+# Progressive framebuffer flush. A full 128x128 refresh blits 8KB over the
+# 400kHz I2C bus (240ms MEASURED) and blocks the single MicroPython thread long
 # enough to drop a note-off. These helpers zero and/or push the framebuffer in
 # bounded row BANDS spread across successive loop() calls, so no single refresh
-# exceeds a few tens of ms (the same budget a two-row menu redraw already uses).
+# exceeds ~19ms (a 12-row band) instead of 240ms in one go.
+#
+# Cost of a full repaint: 128 rows / 12 = 11 bands, one per loop() tick at ~69ms
+# => ~760ms wall-clock before the screen is fully redrawn. That is the dominant
+# term in menu-open latency, and it is a deliberate trade: audio safety over
+# redraw speed. Raising FLUSH_BAND_ROWS shortens it but lengthens each blit, so
+# re-measure the note-off margin before touching it.
 # Used when entering a display mode (which must clear the previous screen) and by
 # the menu's full repaint.
 # ---------------------------------------------------------------------------
-FLUSH_BAND_ROWS = 12         # pixel-rows pushed per loop() while flushing (~19ms)
+FLUSH_BAND_ROWS = 12         # pixel-rows pushed per loop() while flushing. MEASURED:
+                             # 12 rows (768B) = 19ms, 2 rows = 4.5ms, full 8KB = 240ms.
 _flush_active = False
 _flush_y = 0
 _flush_y1 = 127
@@ -3370,8 +3380,10 @@ class SketchMenu:
                             amyboard.display_refresh()
                 else:
                     # Window scrolled (only at an edge now, thanks to edge-scroll):
-                    # every visible row shifted, so ~9 rows changed. Pushing them
-                    # all synchronously is ~150ms of I2C in one loop, which starves
+                    # every visible row shifted, so ~9 rows changed -- 9 * MENU_LINE_H
+                    # = ~108 pixel-rows. Interpolating the measured blits (12 rows =
+                    # 19ms, the full 128 = 240ms) that is ~170-200ms of I2C in one
+                    # loop -- an earlier "~150ms" here understated it -- which starves
                     # AMY's audio render and makes the LFO/vibrato stutter. Draw
                     # them, then blit PROGRESSIVELY over just the changed span (one
                     # band per loop) so no single loop holds the bus for long.
