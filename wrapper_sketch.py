@@ -7,9 +7,19 @@
 #
 # Firmware execution model (verified against the working sketch.py + the
 # amy_patch_examples encoder sketch): the firmware runs this file's top-level
-# code ONCE, then calls the module-level loop() repeatedly (~60 ms). We never
-# run our own `while True` loop -- doing so would block MIDI/audio servicing and
-# hang the deploy readback.
+# code ONCE, then calls the module-level loop() repeatedly (~69 ms -- MEASURED
+# on-device 2026-07-16: 69.4 ms avg, ~99 ms max; an earlier "~60 ms" here was a
+# guess and was wrong). We never run our own `while True` loop -- doing so would
+# block MIDI/audio servicing and hang the deploy readback.
+#
+# That ~69 ms is the single most load-bearing number in this codebase, because it
+# is the floor on input latency: an encoder detent waits up to a full tick just to
+# be SEEN, and anything drawn in bands takes one tick per band. It also makes any
+# throttle constant below ~69 ms INERT -- a `dt < N` gate can never fire when the
+# caller only arrives every 69 ms. Do not add or tune such a gate without checking
+# it against this number. A sketch's whole loop() body typically uses only ~7 ms of
+# the tick; the rest is firmware + our encoder read, so sketch-side optimisation
+# cannot move menu latency much.
 #
 # Runtime states (no reset between the first two):
 #   sketch  : a sketch is exec'd and resident; its module-level loop() is driven
@@ -743,7 +753,8 @@ def _service_reboot_hold(delta, click):
 
 
 def loop():
-    # Firmware calls this repeatedly (~60 ms).
+    # Firmware calls this repeatedly (~69 ms measured -- see the header note; any
+    # sub-69 ms throttle you add in here will never fire).
     global _reboot_poll
     # Remote reboot request (dropped by a WiFi deploy) -- honored in every mode.
     _reboot_poll += 1
