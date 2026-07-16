@@ -79,7 +79,7 @@ Opened by turn/click/short-hold while playing. Structure:
 
 ```
 POLYSYNTH
-├─ Param Control     → numbered list of all 28 synth params → per-param editor
+├─ Param Control     → Osc · VCF · LFO · VCA · FX → each a sectioned knob grid
 ├─ Save As Preset    → Overwrite current · Save as New · Cancel  (see Presets)
 ├─ Load Preset       → INIT (built-in) + saved presets
 ├─ Delete Preset     → saved presets (INIT is not deletable)
@@ -108,40 +108,58 @@ POLYSYNTH
   repaints, so navigating never holds the I2C bus long enough to drop a note.
   See the audio-safety rules in [DISPLAY_MODES.md](DISPLAY_MODES.md).
 
-### Param Control (parameter editor)
+### Param Control (the knob grid)
 
-**Param Control** lists all 28 editable synth parameters, numbered (`1. Osc A
-Pitch` … `28. Lfo>Amp B`). Selecting one opens a **0-127 slider editor** for that
-parameter, which drives the parameter's real MIDI CC through the same
-`handle_cc()` path a hardware knob uses — so on-device edits and the E16 knobs
-stay in sync and share all value→sound mapping. Exposing another parameter is a
-one-line addition to the `PARAMS` list.
+**Param Control** opens a list of the five parameter groups (Osc / VCF / LFO /
+VCA / FX). Selecting one opens that group's **knob grid**: every param is a cell
+with a short label and a value bar, edited in place. There is no separate editor
+screen — a click selects the cell you are on and turning then adjusts it live.
+Edits drive the param's real MIDI CC through the same `handle_cc()` path a
+hardware knob uses, so on-device edits and the E16 knobs stay in sync and share
+all value→sound mapping. Exposing another parameter is still a one-line addition
+to the `PARAMS` list; the layout re-packs itself around it.
 
-Editor gestures:
+The grid is 4 columns wide and cut into labelled **sections** of up to 4 params
+each — `OSC A`, `FILTER`, `ADSR`, `EQ`, `CHORUS`, and so on. Sections are not
+decoration: they carry the group prefix a label would otherwise need, which is
+what lets a cell label be 3 characters instead of 4, which is what makes 4
+columns legible at all. See [CC_MAPPING.md](CC_MAPPING.md) for the full
+structure, the 4-char hard limit, and the vertical budget (which has no slack).
 
-| Gesture | Action |
-|---|---|
-| **Turn** | Adjust the value **live** (you hear it). Encoder **acceleration**: a fast spin covers ground, a single detent stays 1:1 for fine control. |
-| **Single click** | Keep the current value and exit to the list. (Deferred `EDIT_DBLCLICK_MS` ≈ 400 ms to detect a double-click.) |
-| **Double click** | Reset the parameter to its patch default, staying in the editor. |
-| **Hold** | Revert to the value on entry and exit to the list. |
+Gestures — the cursor is the cell you are on, "selected" is the cell you are
+editing (shown knocked out / reverse-video):
 
-- **Display:** the raw 0-127 value and (for discrete params) a friendly label
-  render at **2× scale** over a cursor track; the title and end labels stay 1×.
-  (framebuf has only an 8×8 font and no scaling API, so `_text2x()` renders glyphs
-  into a temp buffer and blits each pixel as a 2×2 block.)
+| Gesture | With the cursor | With a cell selected |
+|---|---|---|
+| **Turn** | Move cell to cell, in reading order (across a row, then on to the next section). Clamps at the ends. | Adjust the value **live** (you hear it). Encoder **acceleration**: a fast spin covers ground, a single detent stays 1:1. Bucketed params step one bucket per detent. |
+| **Click** | Select this cell for editing (snapshots the value, so a hold can revert it). | Keep the value and go back to the cursor. Deferred `EDIT_DBLCLICK_MS` ≈ 400 ms so a second click can arrive. |
+| **Double click** | — | Reset the param to its patch default, staying selected. |
+| **Hold** | Back out to the group list. | Revert to the value on entry and go back to the cursor. |
+
+- **Top band:** the group name on the left, the focused param's live value on the
+  right. Bucketed params show their word rather than a number (`fmt`), bipolar
+  params draw a center-anchored bar.
 - **Discrete labels:** wave shapes show `Sine / Pulse / Saw Dn / Saw Up /
   Triangle / Noise`; filter type shows `LP 24 / LP / BP / HP`; osc pitch shows the
   interval / cents (`-1 oct`, `+5th`, `Unison`, `+12c`, …).
-- **Live MIDI:** while the editor is open, an incoming CC for that parameter moves
-  the cursor/value in real time, and the encoder continues from wherever MIDI left
-  it — the E16 and the encoder cooperate on one value.
-- **Rendering** pushes only a narrow *column window* around the moving cursor
-  (and a small central window for the value readout) per turn — a few hundred
-  bytes / a few ms of I2C via `_push_window()`, rather than the full-width band —
-  so dialing stays snappy and well within the audio-render budget.
-  `EDIT_REFRESH_MS` (~1 loop) still caps a stream of incoming CCs at one redraw
-  per loop.
+- **Live MIDI:** while a cell is selected, an incoming CC for that param moves its
+  value in real time, and the encoder continues from wherever MIDI left it — the
+  E16 and the encoder cooperate on one value.
+- **Pagination:** 3 sections fit a page (so 12 params); a group with more pages,
+  with a bright dash for the current page and a dim dot per other page, centred in
+  a reserved band at the bottom. Only FX (14 params) pages today.
+- **Rendering** redraws only the changed cell(s) plus the top band per turn, and
+  pushes exactly that cell's rectangle over I2C via `_push_window()` — a few
+  hundred bytes, a few ms — rather than the full panel, so dialing stays well
+  within the audio-render budget. Cell rectangles come from the layout pass
+  (`_grid_layout`), which resolves each group to absolute `(page, x, y)` once when
+  the level opens.
+
+> **History — there is no longer a separate slider editor.** Param Control used to
+> be a numbered list of every param; picking one opened a full-screen 0-127 slider
+> (`_EditLevel`). The grid replaced it, and the code was removed once it had been
+> unreachable for a while. Params are edited *in place* in the grid — if you are
+> looking for the slider screen, it is gone deliberately, not missing.
 
 ### Presets
 
