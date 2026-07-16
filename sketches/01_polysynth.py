@@ -1432,7 +1432,10 @@ def midi_cb(m):
         return
     active_display_mode.on_cc(m[1], m[2])   # cheap: record state for the display
     handle_cc(m[1], m[2])
-    menu.note_external_cc(m[1], m[2])       # let an open param editor track it live
+    menu.note_external_cc(m[1], m[2])       # let a selected grid cell track it live
+                                            # (AFTER handle_cc: that writes the value
+                                            # into param_values, which is what the cell
+                                            # renders from -- this only marks it dirty)
 
 
 def setup_midi():
@@ -2044,26 +2047,17 @@ def _bucket_advance(steps, value, delta):
 
 
 class _Param:
-    __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar', 'steps', 'group', 'sub',
+    __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar', 'steps', 'group',
                  'section')
 
     def __init__(self, label, cc, default, fmt=None, bipolar=False, stepped=False,
-                 group='', sub='', section=''):
+                 group='', section=''):
         self.label = label
         self.cc = cc
         self.default = default   # raw 0-127 value used until a CC/editor sets one
         self.fmt = fmt           # optional value(0-127) -> friendly label
         self.bipolar = bipolar   # editor readout shows a signed scale (0 = center)
         self.group = group       # Param Control category (see PARAM_GROUPS)
-        self.sub = sub           # optional sub-bucket within a category (e.g. Env
-                                 # -> VCF/VCA); '' = the category lists params flat.
-                                 # NOTE: read only by _open_param_sub, which nothing
-                                 # calls since the grid flattened sub-buckets inline
-                                 # -- i.e. this field is currently inert. It overlaps
-                                 # in meaning with `section` below; the two want
-                                 # merging (see the param-table refactor), but they
-                                 # are NOT the same today -- VCF/VCA carry sub='Env'
-                                 # and must not sprout a header row from it yet.
         self.section = section   # grid: draws a header row above this param's run and
                                  # lets its cells use shorter labels (the header now
                                  # carries the context the label used to). '' = no
@@ -2104,19 +2098,15 @@ PARAMS = [
     # Shape; Shape default raw 48 = the 'Normal' bucket, stepped one detent per curve
     # type), then the two modulation depths. Reordering these MOVES CELLS on screen,
     # so keep the rows-of-4 grouping intact if you add a param.
-    # The 'Env' sub tag no longer affects layout: the grid flattens sub-buckets
-    # inline, so these need not stay contiguous (an older comment here claimed they
-    # must -- that stopped being true when the grid replaced the "Env >" drill-in,
-    # and _open_param_sub, the only reader of `sub`, is now unreachable).
     _Param('Cutoff',      CC_FLT_CUTOFF,  127, group='VCF', section='Filter'),
     _Param('Resonance',   CC_FLT_RES,       0, group='VCF', section='Filter'),
     _Param('Filter Env',  CC_FLT_ENV_AMT,  64, fmt_flt_env, bipolar=True, group='VCF', section='Filter'),
     _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type, stepped=True, group='VCF', section='Filter'),
-    _Param('A',          CC_VCF_ATK,       0, group='VCF', sub='Env', section='ADSR'),
-    _Param('D',          CC_VCF_DEC,      34, group='VCF', sub='Env', section='ADSR'),
-    _Param('S',          CC_VCF_SUS,      25, group='VCF', sub='Env', section='ADSR'),
-    _Param('R',          CC_VCF_REL,      31, group='VCF', sub='Env', section='ADSR'),
-    _Param('Shape',      CC_FLT_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCF', sub='Env', section='Etc'),
+    _Param('A',          CC_VCF_ATK,       0, group='VCF', section='ADSR'),
+    _Param('D',          CC_VCF_DEC,      34, group='VCF', section='ADSR'),
+    _Param('S',          CC_VCF_SUS,      25, group='VCF', section='ADSR'),
+    _Param('R',          CC_VCF_REL,      31, group='VCF', section='ADSR'),
+    _Param('Shape',      CC_FLT_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCF', section='Etc'),
     _Param('Kbd Track',   CC_KEY_SCALE,     0, group='VCF', section='Etc'),
     _Param('Vel>Filter',  CC_VEL_FILT,      0, fmt_vel_filt, group='VCF', section='Etc'),
     _Param('Lfo Freq',    CC_LFO_FREQ,      0, group='LFO'),
@@ -2131,14 +2121,14 @@ PARAMS = [
     # default raw 48 ~ 0.3 Hz, a gentle wander for when Amt is dialed up.
     _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, fmt_drift_depth, group='LFO'),
     _Param('Drift Rate',  CC_DRIFT_RATE,   48, fmt_drift_rate, group='LFO'),
-    # VCA: amp controls. The amp envelope in its own 'Env' sub-bucket (ADSR +
-    # curve Shape), then velocity->amp sensitivity and the master output Level
-    # (renamed from the old 'Output'; per-patch master volume, default +12 dB).
-    _Param('A',          CC_VCA_ATK,       0, group='VCA', sub='Env', section='ADSR'),
-    _Param('D',          CC_VCA_DEC,      25, group='VCA', sub='Env', section='ADSR'),
-    _Param('S',          CC_VCA_SUS,     127, group='VCA', sub='Env', section='ADSR'),
-    _Param('R',          CC_VCA_REL,      34, group='VCA', sub='Env', section='ADSR'),
-    _Param('Shape',      CC_AMP_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCA', sub='Env', section='Etc'),
+    # VCA: amp controls. The amp envelope (ADSR + curve Shape) as one section, then
+    # velocity->amp sensitivity and the master output Level (renamed from the old
+    # 'Output'; per-patch master volume, default +12 dB).
+    _Param('A',          CC_VCA_ATK,       0, group='VCA', section='ADSR'),
+    _Param('D',          CC_VCA_DEC,      25, group='VCA', section='ADSR'),
+    _Param('S',          CC_VCA_SUS,     127, group='VCA', section='ADSR'),
+    _Param('R',          CC_VCA_REL,      34, group='VCA', section='ADSR'),
+    _Param('Shape',      CC_AMP_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCA', section='Etc'),
     _Param('Vel>Amp',    CC_VEL_SENS,   38, fmt_pct, group='VCA', section='Etc'),
     _Param('Level',      CC_MASTER_VOL, 84, fmt_master_vol, stepped=True, group='VCA', section='Etc'),
     # Master FX (global effects). Defaults leave every effect OFF: EQ flat (64),
@@ -2165,9 +2155,9 @@ PARAMS = [
     _Param('Rev Xover',  CC_REV_XOVER,  99, fmt_hz_khz, stepped=True, group='FX', section='Reverb'),
 ]
 
-# Param Control categories, in display order. Each opens a filtered PARAMS list;
-# a param's `group` (above) decides where it lands, so the two never drift. VCF
-# and VCA further split into sub-buckets via `sub` (see _open_param_group).
+# Param Control categories, in display order. Each opens that group's knob grid;
+# a param's `group` (above) decides where it lands, so the two never drift, and its
+# `section` decides which labelled row it joins there (see _grid_layout).
 PARAM_GROUPS = ('Osc', 'VCF', 'LFO', 'VCA', 'FX')
 
 # Last raw 0-127 value seen per editable CC, seeded with each param's default.
@@ -2257,29 +2247,11 @@ MENU_LABEL_MAX = 18
 MENU_IDLE_MS = 15000     # auto-close the menu to the display mode after this idle
 TOAST_MS = 1200          # how long a confirmation toast (e.g. "PRESET SAVED!") shows
 
-# Parameter-editor (Param Control) layout: a 0-127 track with a cursor, the raw
-# value floating over the cursor, and (for discrete params) a friendly label.
-# Rows are laid out so the per-turn moving parts (value number, cursor) sit in
-# non-overlapping bands that can be pushed on their own -- see _render_edit. The
-# value and friendly label are drawn 2x (see _text2x); the title + end labels
-# stay 1x.
 CHAR_W = 8               # framebuf font cell width (for centering text)
 CHAR_H = 8               # framebuf font cell height
-EDIT_TEXT_SCALE = 2      # value/label magnification
-EDIT_TEXT_W = CHAR_W * EDIT_TEXT_SCALE   # 2x glyph width
-EDIT_TEXT_H = CHAR_H * EDIT_TEXT_SCALE   # 2x glyph height (band height)
 EDIT_TITLE_Y = 2         # param name (1x, static after open)
-EDIT_LABEL_Y = 24        # friendly discrete label (2x; redrawn only on change)
-EDIT_VALUE_Y = 50        # raw 0-127 value (2x, over the cursor; per-turn band)
-EDIT_TRACK_Y = 88        # the 0-127 track line
-EDIT_LINE_X0 = 6
-EDIT_LINE_X1 = 121
-EDIT_TICK_H  = 6         # cursor half-height above/below the track
-EDIT_ENDS_Y  = 100       # "0" / "127" end labels (1x, static)
 NAME_ROW_Y   = 44        # name-entry: the word + inline active slot, one 1x row
 # Cursor band = the track line +/- the tick, pushed as a unit each turn.
-EDIT_TRACK_BAND_Y0 = EDIT_TRACK_Y - EDIT_TICK_H - 1
-EDIT_TRACK_BAND_Y1 = EDIT_TRACK_Y + EDIT_TICK_H + 1
 EDIT_REFRESH_MS = 16     # Min gap between editor redraws -- currently INERT, and kept
                          # only as a floor if the loop ever gets faster. loop() runs
                          # every ~69 ms (measured), so this 16 ms gate can never fire;
@@ -2307,29 +2279,6 @@ def _accel(delta):
     return delta * min(a, ENC_ACCEL_CAP)  # faster spins step quadratically further
 
 
-def _text2x(d, s, x, y, color):
-    # Draw text at 2x scale. framebuf's only font is 8x8 and it has no scaling
-    # API, so render the string into a 1-bit temp buffer, then blit each set
-    # pixel as a 2x2 block. Falls back to 1x if framebuf is unavailable.
-    if framebuf is None:
-        d.text(s, x, y, color)
-        return
-    try:
-        w = len(s) * CHAR_W
-        if w <= 0:
-            return
-        buf = bytearray(((w + 7) // 8) * CHAR_H)
-        tmp = framebuf.FrameBuffer(buf, w, CHAR_H, framebuf.MONO_HLSB)
-        tmp.text(s, 0, 0, 1)
-        for py in range(CHAR_H):
-            yy = y + py * 2
-            for px in range(w):
-                if tmp.pixel(px, py):
-                    d.fill_rect(x + px * 2, yy, 2, 2, color)
-    except Exception:
-        d.text(s, x, y, color)
-
-
 class _MenuLevel:
     __slots__ = ('title', 'items', 'idx', 'start')
 
@@ -2340,25 +2289,6 @@ class _MenuLevel:
         self.idx = 0
         self.start = 0    # index of the top visible item = current page origin
                           # (page-aligned; recomputed from idx in render)
-
-
-class _EditLevel:
-    # A parameter-adjustment "level" pushed on the menu stack. Turning adjusts the
-    # value LIVE (applied via handle_cc, so you hear it as you dial); a CLICK keeps
-    # the current value and pops back to the parameter list; a HOLD (back) reverts
-    # to entry_value and pops. entry_value is the snapshot taken when the editor
-    # opened -- the only state hold-to-restore needs.
-    __slots__ = ('param', 'value', 'entry_value', 'dirty', 'full', 'prev_label',
-                 'prev_cx')
-
-    def __init__(self, param, value):
-        self.param = param
-        self.value = value
-        self.entry_value = value
-        self.dirty = True         # something changed -> redraw needed
-        self.full = True          # next draw is a full clear+draw (open/resume)
-        self.prev_label = None    # last drawn friendly label (redraw on change)
-        self.prev_cx = None       # last cursor pixel-x (windowed-push union span)
 
 
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
@@ -2392,7 +2322,7 @@ class _NameLevel:
     # Preset-name entry pushed on the menu stack. `name` is the committed string so
     # far; `sel` indexes _NAME_RING for the in-progress slot. Turn scrolls the
     # candidate, click commits it, hold (back) cancels the whole name. Like
-    # _EditLevel it owns a full/dirty pair driving its own render path.
+    # _GridLevel it owns a full/dirty pair driving its own render path.
     __slots__ = ('name', 'sel', 'dirty', 'full')
 
     def __init__(self):
@@ -2710,8 +2640,8 @@ def _draw_grid_pages(d, page, npages):
 
 class _GridLevel:
     # A Param Control group shown as the knob grid. `idx` is the cursor position in
-    # `params` (flat, all of the group's params -- sub-buckets are flattened into
-    # cells); `editing` distinguishes cursor (box) from selected (knockout). Live
+    # `params` (flat, all of the group's params); `editing` distinguishes cursor
+    # (rule) from selected (knockout). Live
     # values come from param_values, so no per-param value is cached here.
     __slots__ = ('group', 'params', 'cells', 'heads', 'npages', 'idx', 'editing',
                  'entry_value', 'dirty', 'full', 'prev_idx', 'prev_page')
@@ -2793,23 +2723,16 @@ class SketchMenu:
         self._needs_clear = True
         self._edit_last_render = 0
         self._panel_dirty_to = 128    # the display mode was full-screen while idle
-        if self.stack and isinstance(self.cur, _EditLevel):
-            cur = self.cur
-            cur.value = int(param_values.get(cur.param.cc, cur.value))
-            cur.full = True
-            cur.dirty = True
 
     def note_external_cc(self, cc, val):
-        # Called from the MIDI callback: if the open editor is on this CC, reflect
+        # Called from the MIDI callback: if the selected cell is on this CC, reflect
         # the incoming value live. Records state only (never draws) -- loop()'s
-        # render picks it up -- so it stays audio-safe.
+        # render picks it up -- so it stays audio-safe. The value itself is already
+        # in param_values (handle_cc put it there); this only marks the cell dirty.
         if self.suspended or not self.stack:
             return
         cur = self.cur
-        if isinstance(cur, _EditLevel) and cur.param.cc == cc:
-            cur.value = clamp(int(val), 0, 127)
-            cur.dirty = True
-        elif isinstance(cur, _GridLevel) and cur.editing and cur.params[cur.idx].cc == cc:
+        if isinstance(cur, _GridLevel) and cur.editing and cur.params[cur.idx].cc == cc:
             cur.dirty = True   # focused param moved by an external CC -> repaint it
 
     def service_pending(self, now):
@@ -2823,11 +2746,7 @@ class SketchMenu:
         if not self.stack:
             return
         cur = self.cur
-        if isinstance(cur, _EditLevel):
-            self.stack.pop()          # keep the current value, back to the list
-            self.dirty = True
-            self._needs_clear = True
-        elif isinstance(cur, _GridLevel) and cur.editing:
+        if isinstance(cur, _GridLevel) and cur.editing:
             cur.editing = False       # commit: keep value, back to the cursor
             cur.dirty = True
 
@@ -2855,25 +2774,9 @@ class SketchMenu:
 
     def _open_param_group(self, group):
         # A category: shown as the 3x4 knob grid (_GridLevel). All of the group's
-        # params become cells (sub-buckets like the VCF/VCA Env ADSR are flattened
-        # inline rather than drilled into). Cursor navigates; click selects to edit.
+        # params become cells, grouped into labelled sections by _Param.section.
+        # Cursor navigates; click selects to edit.
         self.stack.append(_GridLevel(group))
-        self.dirty = True
-        self._needs_clear = True
-
-    def _open_param_sub(self, group, sub):
-        # Numbered list of the params in one sub-bucket of a category.
-        ps = [p for p in PARAMS if p.group == group and p.sub == sub]
-        items = [('%d. %s' % (i + 1, p.label), (lambda p=p: self._edit_param(p)))
-                 for i, p in enumerate(ps)]
-        self.stack.append(_MenuLevel(sub.upper(), items))
-        self.dirty = True
-        self._needs_clear = True
-
-    def _edit_param(self, p):
-        # Open the 0-127 slider editor on this param's current value.
-        v = int(param_values.get(p.cc, p.default))
-        self.stack.append(_EditLevel(p, v))
         self.dirty = True
         self._needs_clear = True
 
@@ -3091,39 +2994,6 @@ class SketchMenu:
         if isinstance(lvl, _GridLevel):
             self._handle_grid(lvl, delta, click, back)
             return
-        if isinstance(lvl, _EditLevel):
-            # Parameter editor: turn adjusts LIVE, single click keeps + exits,
-            # double click resets to the patch default, hold reverts + exits.
-            if back:                 # hold: restore the entry value, then pop
-                self._click_pending_at = 0
-                handle_cc(lvl.param.cc, lvl.entry_value)
-                self.stack.pop()
-                self.dirty = True
-                self._needs_clear = True
-                return
-            if delta:                # turn: move the cursor + apply live
-                self._click_pending_at = 0     # a turn cancels a pending click
-                if lvl.param.steps:
-                    # Bucketed param: one detent = one bucket (skip identical CCs).
-                    lvl.value = _bucket_advance(lvl.param.steps, lvl.value, delta)
-                else:
-                    lvl.value = clamp(lvl.value + _accel(delta), 0, 127)
-                handle_cc(lvl.param.cc, lvl.value)
-                lvl.dirty = True
-            if click:
-                now = time.ticks_ms()
-                if self._click_pending_at and \
-                        time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
-                    # Double click: reset to the patch default, stay in the editor.
-                    self._click_pending_at = 0
-                    lvl.value = lvl.param.default
-                    handle_cc(lvl.param.cc, lvl.value)
-                    lvl.dirty = True
-                else:
-                    # First click: defer commit+exit so a 2nd click can arrive
-                    # (fired by service_pending once the window passes).
-                    self._click_pending_at = now
-            return
         if isinstance(lvl, _NameLevel):
             # Name entry: turn scrolls the ring candidate, click commits it (append
             # char / backspace / confirm), hold cancels the whole name.
@@ -3246,48 +3116,6 @@ class SketchMenu:
             else:
                 d.text(label[:MENU_LABEL_MAX], 12, y, 110)
 
-    def _edit_label(self, d, label):
-        # Friendly discrete label, centered, 2x. Cleared band + redraw so a
-        # shorter label never leaves stale characters behind.
-        d.fill_rect(0, EDIT_LABEL_Y, DISPLAY_WIDTH, EDIT_TEXT_H, 0)
-        if label:
-            w = len(label) * EDIT_TEXT_W
-            sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
-            _text2x(d, label, sx, EDIT_LABEL_Y, 255)
-
-    def _edit_value(self, d, v, bipolar=False):
-        # Readout row below the track: end labels + centered current value, all 1x
-        # (the value the same size as the end labels). The raw value is 1x -- not
-        # 2x -- so its refresh band is a single 8px row (~half the I2C of the old 2x
-        # number), which keeps a fast sweep from holding the bus long enough to
-        # starve the audio render. The 2x treatment is reserved for the friendly
-        # bucket name (see _edit_label), which only redraws when it changes.
-        #   unipolar: "0 <v> 127"
-        #   bipolar : "-64 <+/-n> +63" with 0 = center (unity); the value the knob
-        #             sits at 64 reads 0, so the sign shows which way it is offset.
-        d.fill_rect(0, EDIT_ENDS_Y, DISPLAY_WIDTH, CHAR_H, 0)
-        if bipolar:
-            lo, hi = '-64', '+63'
-            n = int(v) - 64
-            vs = '0' if n == 0 else ('%+d' % n)
-        else:
-            lo, hi = '0', '127'
-            vs = '%d' % v
-        d.text(lo, 0, EDIT_ENDS_Y, 110)
-        d.text(hi, DISPLAY_WIDTH - len(hi) * CHAR_W, EDIT_ENDS_Y, 110)
-        w = len(vs) * CHAR_W
-        vx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
-        d.text(vs, vx, EDIT_ENDS_Y, 255)
-
-    def _edit_track(self, d, cx):
-        # The 0-127 track line plus the cursor tick, drawn together in the cursor
-        # band (cleared first so the old tick position is erased).
-        band_h = EDIT_TRACK_BAND_Y1 - EDIT_TRACK_BAND_Y0 + 1
-        d.fill_rect(0, EDIT_TRACK_BAND_Y0, DISPLAY_WIDTH, band_h, 0)
-        d.fill_rect(EDIT_LINE_X0, EDIT_TRACK_Y, EDIT_LINE_X1 - EDIT_LINE_X0, 1, 180)
-        d.fill_rect(clamp(cx - 1, 0, DISPLAY_WIDTH - 3),
-                    EDIT_TRACK_Y - EDIT_TICK_H, 3, EDIT_TICK_H * 2 + 1, 255)
-
     def _render_grid(self, cur):
         # Full draw on open / resume / page-change (flushed progressively);
         # otherwise redraw only the changed cell(s) + header. The value is applied
@@ -3351,72 +3179,6 @@ class SketchMenu:
             cur.prev_page = page
         except Exception as e:
             _render_fault('_render_grid', e)
-
-    def _render_edit(self, cur):
-        # 0-127 slider editor. On open/resume (cur.full) do one full clear+draw
-        # flushed in audio-safe bands. On a turn/MIDI update push ONLY the moving
-        # bands -- the cursor and the 1x value readout row -- (and the 2x friendly
-        # bucket name only when it changes), so dialing stays snappy AND the small
-        # per-detent I2C doesn't starve the audio render. The value is applied live
-        # in handle() regardless, so sound tracks every detent even when a redraw
-        # is throttled to the next frame.
-        if not (self.dirty or cur.dirty):
-            return
-        now = time.ticks_ms()
-        if not cur.full and time.ticks_diff(now, self._edit_last_render) < EDIT_REFRESH_MS:
-            return                    # throttle incremental redraws (keep dirty)
-        self.dirty = False
-        cur.dirty = False
-        self._edit_last_render = now
-        try:
-            d = amyboard.display
-            p = cur.param
-            v = cur.value
-            span = EDIT_LINE_X1 - EDIT_LINE_X0
-            cx = EDIT_LINE_X0 + int(round(v * span / 127.0))
-            label = p.fmt(v) if p.fmt else None
-            if cur.full:
-                d.fill(0)
-                d.text(p.label.upper()[:MENU_LABEL_MAX], 0, EDIT_TITLE_Y, 255)
-                self._edit_label(d, label)
-                self._edit_track(d, cx)
-                self._edit_value(d, v, p.bipolar)   # draws the ends + value readout row
-                cur.prev_label = label
-                cur.prev_cx = cx
-                cur.full = False
-                self._panel_dirty_to = 128   # editor owned the full screen
-                # Full clear on open/resume: the prior screen (a display mode's
-                # screensaver dot can sit anywhere) must be wiped before the editor
-                # draws. The per-turn snappiness comes from the windowed incremental
-                # pushes below, not from trimming this one-time open flush.
-                _begin_flush(0, 127)
-                return
-            # Incremental: push the moving parts as NARROW COLUMN WINDOWS instead
-            # of full-width bands, so a detent is only a few ms of I2C -- snappier
-            # AND less bus time than before (strictly safer for the audio render).
-            #   * cursor band: window spans just old->new cursor x (+/-2 for the
-            #     tick width); a single detent moves ~1px, so the strip is tiny
-            #     (an accelerated jump widens it but is a one-off).
-            #   * value readout: a fixed central window covers every 1-3 digit
-            #     value while leaving the static "0"/"127" end labels untouched.
-            # The value is applied live in handle() regardless, so sound tracks
-            # every detent even when a redraw is throttled to the next frame.
-            self._edit_track(d, cx)
-            px = cur.prev_cx if cur.prev_cx is not None else cx
-            if not _push_window(min(px, cx) - 2, max(px, cx) + 2,
-                                EDIT_TRACK_BAND_Y0, EDIT_TRACK_BAND_Y1):
-                amyboard.display_refresh()
-            cur.prev_cx = cx
-            self._edit_value(d, v, p.bipolar)
-            if not _push_window(40, 88, EDIT_ENDS_Y, EDIT_ENDS_Y + CHAR_H - 1):
-                amyboard.display_refresh()
-            if label != cur.prev_label:
-                self._edit_label(d, label)
-                if not _push_rows(EDIT_LABEL_Y, EDIT_LABEL_Y + EDIT_TEXT_H - 1):
-                    amyboard.display_refresh()
-                cur.prev_label = label
-        except Exception as e:
-            _render_fault('_render_edit', e)
 
     def _draw_name_line(self, d, cur):
         # One row: the committed name, then the active append slot rendered IN
@@ -3511,9 +3273,6 @@ class SketchMenu:
         cur = self.cur
         if isinstance(cur, _GridLevel):
             self._render_grid(cur)
-            return
-        if isinstance(cur, _EditLevel):
-            self._render_edit(cur)
             return
         if isinstance(cur, _NameLevel):
             self._render_name(cur)
