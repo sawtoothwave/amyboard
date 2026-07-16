@@ -2507,6 +2507,33 @@ GRID_C_PAGE_OFF = 20    # inactive page-indicator mark. The panel is 4-bit (top
                         # go dimmer -> switch to a filled(active)/hollow(inactive) shape.
 
 
+_render_faults = set()          # render sites that have already reported once
+
+
+def _render_fault(where, exc):
+    # Report a render failure ONCE per site, then stay quiet.
+    #
+    # The render paths below deliberately swallow exceptions: a drawing fault must
+    # never take audio down with it. But swallowing SILENTLY turns a hard error into
+    # a blank screen with no clue, which is the worst possible failure mode -- a real
+    # one (a call site left on an old signature, so every grid draw raised TypeError)
+    # presented as "the menu doesn't open, then unfreezes", and cost a debug round on
+    # hardware. Printing keeps the safety and buys back the traceback.
+    #
+    # Once-per-site matters: these run inside loop(), so an unconditional print would
+    # emit ~14x/second forever and bury the first, most useful report. Deploying new
+    # code resets the sketch, hence the set, so a fix always gets a fresh report.
+    if where in _render_faults:
+        return
+    _render_faults.add(where)
+    print('RENDER FAULT in %s: %s: %s' % (where, type(exc).__name__, exc))
+    try:
+        import sys
+        sys.print_exception(exc)        # MicroPython's traceback printer
+    except Exception:
+        pass
+
+
 def _grid_layout(params):
     # Resolve a group's params into absolute screen positions ONCE, at level open.
     # Before section headers a cell's position was pure arithmetic on the cursor index
@@ -3322,8 +3349,8 @@ class SketchMenu:
                         amyboard.display_refresh()
             cur.prev_idx = cur.idx
             cur.prev_page = page
-        except Exception:
-            pass
+        except Exception as e:
+            _render_fault('_render_grid', e)
 
     def _render_edit(self, cur):
         # 0-127 slider editor. On open/resume (cur.full) do one full clear+draw
@@ -3388,8 +3415,8 @@ class SketchMenu:
                 if not _push_rows(EDIT_LABEL_Y, EDIT_LABEL_Y + EDIT_TEXT_H - 1):
                     amyboard.display_refresh()
                 cur.prev_label = label
-        except Exception:
-            pass
+        except Exception as e:
+            _render_fault('_render_edit', e)
 
     def _draw_name_line(self, d, cur):
         # One row: the committed name, then the active append slot rendered IN
@@ -3427,8 +3454,8 @@ class SketchMenu:
             d.text(msg, sx, 60, 255)
             self._panel_dirty_to = 128   # toast owned the full screen
             _begin_flush(0, 127)
-        except Exception:
-            pass
+        except Exception as e:
+            _render_fault('_draw_toast', e)
 
     def _render_name(self, cur):
         # Preset-name entry, drawn 1x. On open/resume do a full clear; on a
@@ -3453,8 +3480,8 @@ class SketchMenu:
             self._draw_name_line(d, cur)
             if not _push_rows(NAME_ROW_Y, NAME_ROW_Y + CHAR_H - 1):
                 amyboard.display_refresh()
-        except Exception:
-            pass
+        except Exception as e:
+            _render_fault('_render_name', e)
 
     def render(self):
         # If a progressive full-repaint flush is in flight, keep pushing bands
@@ -3586,8 +3613,8 @@ class SketchMenu:
                         ys.append(ry)
                     _begin_flush(min(ys), max(ys) + MENU_LINE_H - 1)
             self._prev = frame
-        except Exception:
-            pass
+        except Exception as e:
+            _render_fault('render', e)
 
 
 menu = SketchMenu()
@@ -3650,8 +3677,8 @@ def _force_display_redraw():
     if DISPLAY_OK:
         try:
             active_display_mode.on_activate()
-        except Exception:
-            pass
+        except Exception as e:
+            _render_fault('_force_display_redraw', e)
 
 
 # ---------------------------------------------------------------------------

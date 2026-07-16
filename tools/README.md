@@ -1,0 +1,74 @@
+# tools/
+
+Dev tooling for the polysynth sketch. Nothing here ships to the board — these are
+host-side checks and a display harness. (Deploy scripts live at the repo root:
+`deploy_auto.py`, `board_serial.py`, `deploy_wifi.py`.)
+
+## `arity_check.py` — catch call-site/signature mismatches
+
+```sh
+python3 tools/arity_check.py                       # defaults to sketches/01_polysynth.py
+python3 tools/arity_check.py wrapper_sketch.py
+```
+
+Exits non-zero on a mismatch. **Run it before every deploy.**
+
+It exists because of a real bug: `_draw_grid_header(d, disp)` grew a `group`
+argument and its two call sites were left behind. Every grid render raised
+`TypeError`, which `_render_grid`'s `except Exception` swallowed, so the screen
+just went blank. Nothing else catches this class:
+
+- `py_compile` passes — a wrong-arity call is valid *syntax*.
+- `grid_preview.py` passes — it execs the real `_draw_grid_*` functions but
+  supplies its **own** call sites, so it validates their insides, not their callers.
+- The board itself is the only other detector, and (before `_render_fault`) it
+  reported the failure as a blank screen.
+
+Handles defaults, `*args`, `**kwargs`, and keyword arguments. Module-level
+functions only — methods are not checked.
+
+## `grid_preview.py` — render the knob grid offline at 128×128
+
+```sh
+python3 -m venv venv && ./venv/bin/pip install pillow
+./venv/bin/python tools/grid_preview.py            # -> tools/preview_out/*.png
+./venv/bin/python tools/grid_preview.py path/to/other_sketch.py
+```
+
+Writes one true 128×128 PNG per group per page, plus a `sheet.png` contact strip.
+Needs Pillow; nothing else. Iterate on layout here rather than burning ~20s deploy
+cycles — and, more to the point, **look at it before believing arithmetic**. It has
+already caught a spacing bug that a clean-looking calculation missed.
+
+### What it is and is not faithful about
+
+- **Geometry: exact.** It execs the sketch's real `_grid_layout` and `_draw_grid_*`
+  against a fake framebuf, so positions and sizes are whatever the shipped code
+  computes — not a re-implementation that can drift.
+- **Font: exact.** `font8x8.json` holds the board's actual 8×8 glyphs, read off the
+  hardware by `grab_font.py`. This matters more than it sounds: an earlier version
+  substituted a Mac mono font and made 4-char labels look survivable when on the
+  real font they fuse into a wall (`EQLOEQMDEQHICHLV`). A lookalike font is worse
+  than no preview.
+- **Greys: exact.** Quantised to the panel's 16 levels (it is 4-bit, top nibble
+  only), so a dim level here is one the panel can actually show.
+- **NOT faithful:** OLED contrast and pixel bloom. Anything resting on *"is this
+  dim thing visible"* — `GRID_C_SECT_RUL`, `GRID_C_PAGE_OFF` — needs the hardware.
+- **NOT faithful:** the caller. It reimplements `_render_grid`'s drawing sequence,
+  so it cannot catch bugs in `_render_grid` itself. That is `arity_check.py`'s job.
+
+It parses `PARAMS` and `GRID_LABELS` out of the source with regexes rather than
+importing the sketch (which needs `amy`/`amyboard`). If a `_Param(...)` line grows a
+new shape, the parser may need a nudge.
+
+## `grab_font.py` — read the board's 8×8 font over serial
+
+```sh
+python3 tools/grab_font.py        # board must be connected; rewrites tools/font8x8.json
+```
+
+Renders every glyph (chr 32..126) into an in-RAM `framebuf` on the board, reads the
+pixels back, and writes `font8x8.json`. **You should not need to run this** — the
+font is checked in. Re-run it only if the board's MicroPython/framebuf font changes.
+
+Note it drops the board to a REPL, so the sketch stops until you re-deploy or reset.
