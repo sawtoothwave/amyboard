@@ -70,7 +70,21 @@ Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison 
 
 ## Deferred Controls
 
-Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device and captured by presets. Param Control is a **3×4 value-bar "knob" grid** per group (Osc / VCF / LFO / VCA / FX): a cursor box navigates cell-to-cell, a click selects a cell (knockout highlight) and turning then adjusts it live, double-click resets to default, hold reverts. The header shows the focused param's full name + value (bucketed params show their word; bipolar params draw a center-anchored bar). VCF/VCA envelope params (ADSR + shape) appear inline as cells rather than in a sub-menu; groups over 12 params (FX) paginate, with a right-margin page indicator. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
+Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device and captured by presets. Param Control is a **4-wide value-bar "knob" grid** per group (Osc / VCF / LFO / VCA / FX), cut into labelled **sections** of up to 4 params. Params fill **row-major** — across a row, then on to the next section — and the cursor travels the same way. A group's param order is therefore a layout decision: each run of ≤4 params sharing a `section` is one row, under a centred header. A click selects a cell (knockout highlight) and turning then adjusts it live, double-click resets to default, hold reverts. The top band shows the **group name** left and the focused param's **live value** right (bucketed params show their word; bipolar params draw a center-anchored bar). VCF/VCA envelope params (ADSR + shape) appear inline as cells rather than in a sub-menu.
+
+The current structure — **3 sections per page, ≤4 controls each, so 12 params/page**:
+
+| Group | Sections | Pages |
+|---|---|---|
+| Osc | `OSC A` PIT/WAV/DTY/LVL · `OSC B` PIT/WAV/DTY/LVL · `ETC` OCT | 1 |
+| VCF | `FILTER` CUT/RES/ENV/TYP · `ADSR` ATK/DEC/SUS/REL · `ETC` SHP/KBD/VEL | 1 |
+| LFO | *(unsectioned — still on 4-char labels, pending redesign)* | 1 |
+| VCA | `ADSR` ATK/DEC/SUS/REL · `ETC` SHP/VEL/LVL | 1 |
+| FX | `EQ` LO/MID/HI · `CHORUS` LEV/DEP/HZ · `ECHO` LEV/TIM/FBK/TON · `REVERB` LEV/DEC/DMP/XVR | 2 |
+
+**Labels repeat across sections by design** (`ATK`, `LEV`, `VEL`, `SHP`…) — the section header above the cell is what disambiguates them, and that is the whole reason sections exist. It is what lets a label be 3 chars instead of 4, which is not cosmetic: a cell is `128/4 = 32px` and the framebuf font is a fixed 8px cell, so a 4-char label inks x+1..x+30 and **fuses with its neighbours** into an unreadable wall (`EQLOEQMDEQHICHLV` — verified by rendering the board's own font at 128×128, not estimated). 3 chars ink 24px and leave ~4px of air each side. **Hard limit is 4 chars** — a 5th silently spills into the next cell — but prefer 3. LFO is the last group still on 4 and reads as the counter-example.
+
+Two more constraints worth knowing before editing the grid. The **cursor is a single horizontal rule below the cell**, not a bounding box: a box's vertical edges would cost the 2px the label needs. And the **vertical budget has zero slack** — `12 (top band) + 3 × (16 section + 21 cell) = 123`, exactly the limit left by the 5px page-indicator band. Grow any of those constants and you drop to 2 sections/page. The page indicator sits **bottom-centre** (a bright dash for the current page, a dim dot for each other) because 4×32 consumes the full panel width and leaves no right margin. Deferred: pitch-bend routing. See [MENU.md](MENU.md) and [DISPLAY_MODES.md](DISPLAY_MODES.md).
 
 ## Tuning and Wave Maps (Implemented)
 
