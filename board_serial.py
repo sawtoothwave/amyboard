@@ -52,8 +52,19 @@ class BoardSerialSession:
             rtscts=False,
             dsrdtr=False,
         )
-        time.sleep(0.2)
-        self.interrupt_to_prompt()
+        # Everything after the port is open must be guarded. `with Session(...)`
+        # does NOT call __exit__ if __enter__ raises, so an unguarded failure here
+        # (interrupt_to_prompt raises whenever the board doesn't answer) would leave
+        # the port open until the process died -- and macOS then makes the NEXT open
+        # block for ~60s, so a single failure cascaded into a pile-up of "failures"
+        # that looked like a dying board. Close on the way out and re-raise.
+        try:
+            time.sleep(0.2)
+            self.interrupt_to_prompt()
+        except BaseException:
+            self.serial.close()
+            self.serial = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, exc_tb):
