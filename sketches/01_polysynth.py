@@ -2378,6 +2378,9 @@ GRID_HDR_H = 12         # top band: the focused param's VALUE only, right-aligne
 # gap below ties it to its OWN knobs. Above must therefore be the larger of the two,
 # or the header reads as belonging to the section it sits under. (It shipped with 1px
 # above / 3px below, which did exactly that.)
+GRID_SECT_RULE_W = 24   # max px of divider rule each side of a section name. Clipped
+                        # to the room the name leaves, so a long title shortens both
+                        # rules rather than overrunning the panel.
 GRID_SECT_TOP = 5       # air above the header text
 GRID_SECT_BOT = 3       # air below the header text, before its cells
 GRID_SECT_H = GRID_SECT_TOP + 8 + GRID_SECT_BOT        # 16
@@ -2527,11 +2530,19 @@ def _draw_grid_section(d, y, text):
     ry = ty + 3
     gap = 4                     # px of clear air each side of the name. The glyphs
                                 # already carry ~1px of their own, so this reads as ~5.
-    if tx - gap > 0:
-        d.fill_rect(0, ry, tx - gap, 1, GRID_C_SECT_RUL)
-    rx = tx + tw + gap
-    if rx < DISPLAY_WIDTH:
-        d.fill_rect(rx, ry, DISPLAY_WIDTH - rx, 1, GRID_C_SECT_RUL)
+    # Each rule is a fixed-length stub butted against the name, NOT a line to the panel
+    # edge: it marks the name as a divider without drawing the eye out to the margins,
+    # where there is nothing to look at. Both are clipped to whatever room the name
+    # leaves, so a long section title shortens them symmetrically instead of pushing
+    # them off-panel.
+    lend = tx - gap                              # left rule ends here
+    lx = max(0, lend - GRID_SECT_RULE_W)
+    if lend > lx:
+        d.fill_rect(lx, ry, lend - lx, 1, GRID_C_SECT_RUL)
+    rx = tx + tw + gap                           # right rule starts here
+    rend = min(DISPLAY_WIDTH, rx + GRID_SECT_RULE_W)
+    if rend > rx:
+        d.fill_rect(rx, ry, rend - rx, 1, GRID_C_SECT_RUL)
 
 
 def _grid_disp(p, v):
