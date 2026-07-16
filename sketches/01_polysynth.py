@@ -952,15 +952,14 @@ def service_drift():
     global _drift_last_ms, _drift_seeded, _drift_rng
     if drift_depth_cents <= 0.0:
         return
-    # MUST be time.ticks_ms(), never amy.millis(). Both return the same
-    # millisecond clock, but a single amy.millis() read costs ~97 ms (measured;
-    # time.ticks_ms() is ~12 us -- ~8000x cheaper). Reading it once per tick here
-    # was stalling loop() for ~82 ms EVERY tick, which is what made the menu lag
-    # whenever drift was on. Everything else in this file already keeps time with
-    # time.ticks_ms(); this was the one call site that didn't.
+    # MUST be time.ticks_ms(), never amy.millis(). They return the SAME millisecond
+    # clock, but an amy.millis() read costs ~97 ms against ~12 us (both measured on
+    # the board) -- so once per tick here is enough to stall loop() and lag the menu.
+    # Do not "tidy" this back to amy.millis() for consistency with the amy.* calls
+    # around it: every other clock read in this file is time.ticks_ms() too.
     now = time.ticks_ms()
     if not _drift_seeded:
-        _drift_rng = (int(now) & 0x7fffffff) or 1   # seed from the clock
+        _drift_rng = (now & 0x7fffffff) or 1        # seed from the clock
         _drift_next = _drift_rand()
         _drift_last_ms = now
         _drift_seeded = True
