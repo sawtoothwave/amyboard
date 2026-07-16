@@ -155,14 +155,11 @@ editing (shown knocked out / reverse-video):
   (`_grid_layout`), which resolves each group to absolute `(page, x, y)` once when
   the level opens.
 
-> **Note — the 0-127 slider editor is currently unreachable.** `_EditLevel` (a
-> full-screen single-param slider, with a 2×-scale readout via `_text2x`) is only
-> constructed by `_edit_param`, which is only called from `_open_param_sub`, which
-> nothing has called since the grid began flattening sub-buckets inline as cells.
-> The code is still present and the `EDIT_*` constants it shares are still live
-> (`EDIT_DBLCLICK_MS` and `EDIT_REFRESH_MS` are used by the grid), but the screen
-> itself cannot be opened. Treat this section's history as removed UI, not as an
-> alternative path.
+> **History — there is no longer a separate slider editor.** Param Control used to
+> be a numbered list of every param; picking one opened a full-screen 0-127 slider
+> (`_EditLevel`). The grid replaced it, and the code was removed once it had been
+> unreachable for a while. Params are edited *in place* in the grid — if you are
+> looking for the slider screen, it is gone deliberately, not missing.
 
 ### Presets
 
