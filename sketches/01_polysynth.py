@@ -2378,9 +2378,11 @@ GRID_HDR_H = 12         # top band: the focused param's VALUE only, right-aligne
 # gap below ties it to its OWN knobs. Above must therefore be the larger of the two,
 # or the header reads as belonging to the section it sits under. (It shipped with 1px
 # above / 3px below, which did exactly that.)
-GRID_SECT_RULE_W = 24   # max px of divider rule each side of a section name. Clipped
+GRID_SECT_RULE_W = 12   # max px of divider rule each side of a section name. Clipped
                         # to the room the name leaves, so a long title shortens both
-                        # rules rather than overrunning the panel.
+                        # rules rather than overrunning the panel. Went edge-to-edge,
+                        # then 24; at 12 these are short ticks flanking the name rather
+                        # than lines leading to it -- confirmed legible on the panel.
 GRID_SECT_TOP = 5       # air above the header text
 GRID_SECT_BOT = 3       # air below the header text, before its cells
 GRID_SECT_H = GRID_SECT_TOP + 8 + GRID_SECT_BOT        # 16

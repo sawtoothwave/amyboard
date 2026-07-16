@@ -52,8 +52,12 @@ already caught a spacing bug that a clean-looking calculation missed.
   than no preview.
 - **Greys: exact.** Quantised to the panel's 16 levels (it is 4-bit, top nibble
   only), so a dim level here is one the panel can actually show.
-- **NOT faithful:** OLED contrast and pixel bloom. Anything resting on *"is this
-  dim thing visible"* — `GRID_C_SECT_RUL`, `GRID_C_PAGE_OFF` — needs the hardware.
+- **NOT faithful:** OLED contrast and pixel bloom, and it errs in one direction —
+  **dim greys read much brighter on the panel than they do here** (confirmed on
+  hardware 2026-07-16). So anything resting on *"is this dim thing visible"* —
+  `GRID_C_SECT_RUL` at level 4/16, `GRID_C_PAGE_OFF` at level 1/16 — will look
+  more marginal in the mock than it is. Don't brighten a constant because the PNG
+  looks faint; check the panel.
 - **NOT faithful:** the caller. It reimplements `_render_grid`'s drawing sequence,
   so it cannot catch bugs in `_render_grid` itself. That is `arity_check.py`'s job.
 
