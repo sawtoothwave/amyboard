@@ -53,8 +53,8 @@ Controllers → MIDI → AMYboard → Audio Output
 **Deployment / Verification**
 - Sketches deploy to internal flash (`/user/sketches`), not the SD card: the board's FatFs can read but not write the large exFAT card. The wrapper launcher (`wrapper_sketch.py`, deployed to the boot file `/user/current/sketch.py`) loads from `/user/sketches` first.
 - `board_serial.py`: direct serial REPL session helper
-- `deploy_auto.py`: deploy a local file to the board (default `/user/sketches/<name>`) and verify an exact readback; `--activate` sets `launcher_state` and reboots into the sketch
-- `verify.py`: read back the active board sketch and compare it to local source
+- `deploy_auto.py`: deploy a local file to the board (`/user/sketches/<name>`) and verify it by comparing sha256 of the board copy against the local file; `--activate` sets `launcher_state` and reboots into the sketch. `--sketch` is required — there is no default, because the board hosts many sketches and guessing one would silently deploy the wrong thing.
+- `verify.py`: read `/user/current/sketch.py` (the boot file — i.e. the **launcher**, not a sketch) off the board and compare it to a local file; normally `--sketch wrapper_sketch.py`. Sketches themselves are verified by `deploy_auto.py` at deploy time.
 
 ### Control Sections (E16 Pages)
 

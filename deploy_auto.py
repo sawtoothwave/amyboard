@@ -5,9 +5,18 @@ board copy is byte-for-byte identical to the local file.
 
 The board's FatFs can read but not write the SD card (it is large-capacity
 exFAT), so sketches are deployed to *internal flash*, which is always writable
-over serial. By default a sketch lands in /user/sketches/<basename>, which is
-the folder the wrapper launcher loads from first -- so no SD card is needed to
-iterate on a sketch.
+over serial. A sketch lands in /user/sketches/<basename>, which is the folder the
+wrapper launcher loads from first -- so no SD card is needed to iterate.
+
+--sketch is REQUIRED. There is deliberately no default: the board hosts many
+sketches, so any default would silently deploy the wrong one. (It used to default
+to a stale root sketch.py, which is exactly the accident this prevents.)
+
+Verification hashes the file ON the board and compares sha256 -- it does NOT read
+the file back. Reading back a 158 KB sketch meant ~15 s of unthrottled serial and
+died with "unterminated string literal" if a single byte dropped; hashing costs 64
+bytes of output and is a stronger check. The full readback now only runs when the
+hash MISMATCHES, to produce a diff (best effort -- we're already in an error path).
 
 Examples:
     # Deploy a sketch to flash and verify (does not auto-boot it):
@@ -24,6 +33,7 @@ import argparse
 import ast
 import base64
 import difflib
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -31,11 +41,13 @@ import sys
 from board_serial import BoardSerialSession, detect_port
 
 
-DEFAULT_SKETCH_PATH = 'sketch.py'
 SKETCH_DEST_DIR = '/user/sketches'
 STATE_FILE = '/user/launcher_state'
 CHUNK_SIZE = 180
+HASH_CHUNK = 512               # bytes read per hash update on the board
 WRITE_MARKER = '__WRITE_OK__'
+SIZE_MARKER = '__SIZE__'
+SHA_MARKER = '__SHA__'
 READBACK_BEGIN = '__READBACK_BEGIN__'
 READBACK_END = '__READBACK_END__'
 
@@ -100,50 +112,102 @@ def extract_readback(output):
     return ast.literal_eval(payload)
 
 
+def build_hash_script(dest):
+    # Hash the file ON the board and print only size + hex digest (~80 bytes total),
+    # instead of shipping the whole file back. Chunked so a large sketch never needs
+    # to be held in the board's RAM all at once.
+    return (
+        "import uhashlib, ubinascii\n"
+        "_h = uhashlib.sha256()\n"
+        "_n = 0\n"
+        "_f = open(%r, 'rb')\n"
+        "while True:\n"
+        "    _b = _f.read(%d)\n"
+        "    if not _b:\n"
+        "        break\n"
+        "    _n += len(_b)\n"
+        "    _h.update(_b)\n"
+        "_f.close()\n"
+        "print('%s' + str(_n))\n"
+        "print('%s' + ubinascii.hexlify(_h.digest()).decode())\n"
+    ) % (dest, HASH_CHUNK, SIZE_MARKER, SHA_MARKER)
+
+
+def extract_hash(output):
+    # Paste mode echoes the script, so match only on lines that START with a marker
+    # (the echoed `print('__SHA__' + ...)` line starts with "print(", not the marker).
+    size = sha = None
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith(SIZE_MARKER):
+            try:
+                size = int(line[len(SIZE_MARKER):])
+            except ValueError:
+                pass
+        elif line.startswith(SHA_MARKER):
+            sha = line[len(SHA_MARKER):].strip()
+    if size is None or not sha:
+        raise RuntimeError('Board did not report a hash for the deployed file.\n' + output)
+    return size, sha
+
+
 def write_loaded_file(path, content):
     Path(path).write_text(content, encoding='utf-8')
 
 
-def ensure_identical(local_code, loaded_code, local_path, dest):
-    if local_code == loaded_code:
-        return
-
-    diff = ''.join(
-        difflib.unified_diff(
-            local_code.splitlines(keepends=True),
-            loaded_code.splitlines(keepends=True),
-            fromfile=local_path,
-            tofile=dest,
+def report_mismatch(session, local_code, local_path, dest, board_size, board_sha):
+    # Only reached when the hash already proved a mismatch. Try the full readback to
+    # show WHAT differs -- best effort, since that readback is exactly what struggles
+    # on a large file. Never let a failure here mask the real error.
+    detail = ''
+    try:
+        out = session.run_command(build_readback_command(dest), timeout=30)
+        loaded_code = extract_readback(out)
+        detail = '\n' + ''.join(
+            difflib.unified_diff(
+                local_code.splitlines(keepends=True),
+                loaded_code.splitlines(keepends=True),
+                fromfile=local_path,
+                tofile=dest,
+            )
         )
-    )
+    except Exception as exc:
+        detail = f'\n(could not read the board copy back for a diff: {exc})'
     raise RuntimeError(
-        'Deployment verification failed: board copy differs from local file.\n' + diff
+        'Deployment verification failed: board copy differs from local file.\n'
+        f'  local: {len(local_code.encode("utf-8"))} bytes sha256={hashlib.sha256(local_code.encode("utf-8")).hexdigest()}\n'
+        f'  board: {board_size} bytes sha256={board_sha}' + detail
     )
 
 
 def deploy_and_verify(port, sketch_path, dest, loaded_path=None,
                       reset_after=True, activate=False):
     local_code = load_text(sketch_path)
+    local_bytes = local_code.encode('utf-8')
+    local_sha = hashlib.sha256(local_bytes).hexdigest()
     deploy_script = build_deploy_script(local_code, dest)
 
     print(f'Connecting to AMYboard on {port}...')
-    print(f'Deploying {sketch_path} ({len(local_code)} bytes) -> {dest}...')
+    print(f'Deploying {sketch_path} ({len(local_bytes)} bytes) -> {dest}...')
 
-    outputs = []
     with BoardSerialSession(port) as session:
-        deploy_output = session.run_paste_script(deploy_script, timeout=30)
+        deploy_output = session.run_paste_script(deploy_script, timeout=60)
         if WRITE_MARKER not in {line.strip() for line in deploy_output.splitlines()}:
             raise RuntimeError('Board did not confirm write.\n' + deploy_output)
-        outputs.append(deploy_output)
 
-        readback_output = session.run_command(build_readback_command(dest), timeout=20)
-        outputs.append(readback_output)
+        board_size, board_sha = extract_hash(
+            session.run_paste_script(build_hash_script(dest), timeout=45)
+        )
+        if board_size != len(local_bytes) or board_sha != local_sha:
+            report_mismatch(session, local_code, sketch_path, dest, board_size, board_sha)
+        print(f'Verified: board copy of {dest} matches {sketch_path} '
+              f'({board_size} bytes, sha256 {board_sha[:12]}...)')
 
-        loaded_code = extract_readback(''.join(outputs))
         if loaded_path:
-            write_loaded_file(loaded_path, loaded_code)
-        ensure_identical(local_code, loaded_code, sketch_path, dest)
-        print(f'Verified: board copy of {dest} matches {sketch_path}')
+            # The hash just proved the board copy is byte-identical to local_code, so
+            # writing local_code here records exactly what is on the board -- without
+            # dragging the whole file back over serial to learn what we already know.
+            write_loaded_file(loaded_path, local_code)
 
         if activate:
             name = dest.rsplit('/', 1)[-1]
@@ -163,7 +227,10 @@ def parse_args():
         description='Deploy a Python file to the AMYboard internal flash and verify it.'
     )
     parser.add_argument('--port', help='Serial port, e.g. /dev/cu.usbmodem1101. Auto-detected if omitted.')
-    parser.add_argument('--sketch', default=DEFAULT_SKETCH_PATH, help='Local file to deploy.')
+    parser.add_argument('--sketch', required=True,
+                        help='Local file to deploy (REQUIRED -- no default: the board hosts '
+                             'many sketches, so guessing one would silently deploy the wrong '
+                             'thing. e.g. sketches/01_polysynth.py)')
     parser.add_argument('--dest', default=None,
                         help='Board destination path. Defaults to %s/<basename>.' % SKETCH_DEST_DIR)
     parser.add_argument('--loaded', default=None,

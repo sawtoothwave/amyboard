@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Pull /user/current/sketch.py from AMYboard into sketch-loaded.py and compare it
-against the local sketch.py.
+Pull /user/current/sketch.py off the AMYboard and compare it against a local file.
+
+/user/current/sketch.py is the file the firmware boots -- i.e. the LAUNCHER
+(wrapper_sketch.py), not a synth. So this answers "is the board's launcher what I
+think it is?", and --sketch is almost always wrapper_sketch.py:
+
+    python verify.py --sketch wrapper_sketch.py
+
+Sketches live in /user/sketches/ and the launcher exec's the one named in
+/user/launcher_state; they are verified by deploy_auto.py at deploy time, which
+compares sha256 instead of reading the file back.
 
 This is intentionally separate from deployment so transport issues during deploy
 and content mismatches during verification stay independent.
@@ -16,8 +25,14 @@ import sys
 from board_serial import BoardSerialSession, detect_port
 
 
-DEFAULT_SKETCH_PATH = 'sketch.py'
-DEFAULT_LOADED_PATH = 'sketch-loaded.py'
+# This tool reads /user/current/sketch.py -- the file the firmware boots, which is
+# the LAUNCHER (wrapper_sketch.py), not a sketch. So --sketch is almost always
+# wrapper_sketch.py. It is REQUIRED: it used to default to a root sketch.py, a
+# leftover from before the launcher existed (back when /user/current/sketch.py WAS
+# the polysynth). That default compared the launcher against an old synth and could
+# never match. Sketches themselves live in /user/sketches/ and are verified by
+# deploy_auto.py at deploy time.
+BOARD_BOOT_FILE = '/user/current/sketch.py'
 BEGIN_MARKER = '__READBACK_BEGIN__'
 END_MARKER = '__READBACK_END__'
 
@@ -29,7 +44,7 @@ def load_text(path):
 def run_readback(port):
     command = (
         f"print('{BEGIN_MARKER}');"
-        "print(repr(open('/user/current/sketch.py').read()));"
+        f"print(repr(open({BOARD_BOOT_FILE!r}).read()));"
         f"print('{END_MARKER}')"
     )
     with BoardSerialSession(port) as session:
@@ -69,26 +84,35 @@ def diff_text(local_text, loaded_text, local_path, loaded_path):
     )
 
 
-def verify(port, sketch_path, loaded_path):
+def verify(port, sketch_path, loaded_path=None):
     output = run_readback(port)
     loaded_text = extract_readback(output)
-    write_loaded_file(loaded_path, loaded_text)
+    if loaded_path:
+        write_loaded_file(loaded_path, loaded_text)
 
     local_text = load_text(sketch_path)
+    label = loaded_path or BOARD_BOOT_FILE
     if local_text == loaded_text:
-        print(f'Verified: {loaded_path} matches {sketch_path}')
+        print(f'Verified: {label} matches {sketch_path}')
         return 0
 
-    print(f'Mismatch: {loaded_path} differs from {sketch_path}')
-    print(diff_text(local_text, loaded_text, sketch_path, loaded_path), end='')
+    print(f'Mismatch: {label} differs from {sketch_path}')
+    print(diff_text(local_text, loaded_text, sketch_path, label), end='')
     return 1
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Pull active AMYboard sketch and compare it to the local sketch.')
+    parser = argparse.ArgumentParser(
+        description=f'Read {BOARD_BOOT_FILE} (the LAUNCHER the firmware boots) off the '
+                    'board and compare it to a local file. Usually: --sketch wrapper_sketch.py')
     parser.add_argument('--port', help='Serial port, e.g. /dev/cu.usbmodem1101. Auto-detected if omitted.')
-    parser.add_argument('--sketch', default=DEFAULT_SKETCH_PATH, help='Path to local sketch file.')
-    parser.add_argument('--loaded', default=DEFAULT_LOADED_PATH, help='Path to write the board readback file.')
+    parser.add_argument('--sketch', required=True,
+                        help=f'Local file to compare against {BOARD_BOOT_FILE} (REQUIRED -- '
+                             'no default. Almost always wrapper_sketch.py, since that file '
+                             'is the launcher, not a sketch.)')
+    parser.add_argument('--loaded', default=None,
+                        help='Optional path to write the board readback to (for debugging). '
+                             'Omit to just diff without leaving a file behind.')
     return parser.parse_args()
 
 
