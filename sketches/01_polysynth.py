@@ -10,10 +10,6 @@
 #   See docs/CC_MAPPING.md for the authoritative control map.
 
 import amy, amyboard, midi, math, time, json
-try:
-    import framebuf                # for 2x-scaled text in the parameter editor
-except Exception:
-    framebuf = None
 
 # --- Launcher integration ---------------------------------------------------
 # This sketch always talks to a "launcher-shaped" input object (the global
@@ -2638,13 +2634,31 @@ def _draw_grid_pages(d, page, npages):
         x += w + gap
 
 
+GRID_EXT_MAX = 2        # Max externally-changed (MIDI/CC) cells repainted per tick;
+                        # any others carry to the next tick. This is a MEASURED audio
+                        # budget, not a guess -- on-device, min-of-7:
+                        #   one cell (32x21, 336 B) = 9.5 ms
+                        #   top band (128x12, 768 B) = 19.5 ms
+                        #   full panel (8192 B)      = 241.7 ms
+                        # loop() arrives every ~69 ms and the render blocks it, so the
+                        # worst incremental frame must stay well inside that: header
+                        # 19.5 + two cursor cells 19 + two ext cells 19 = 57.5 ms. The
+                        # shipped code already spent 38.5 ms/frame without trouble, so
+                        # 57.5 is ~1.5x a known-good figure -- but it IS the ceiling.
+                        # Raising this trades audio headroom for CC-flood catch-up
+                        # speed; 12 stale cells drain in 6 ticks (~0.4 s) at 2, which
+                        # only a bulk CC dump can even provoke. One or two knobs moving
+                        # -- the real case -- is caught up in a single tick.
+
+
 class _GridLevel:
     # A Param Control group shown as the knob grid. `idx` is the cursor position in
     # `params` (flat, all of the group's params); `editing` distinguishes cursor
     # (rule) from selected (knockout). Live
     # values come from param_values, so no per-param value is cached here.
-    __slots__ = ('group', 'params', 'cells', 'heads', 'npages', 'idx', 'editing',
-                 'entry_value', 'dirty', 'full', 'prev_idx', 'prev_page')
+    __slots__ = ('group', 'params', 'cells', 'heads', 'npages', 'cc_idx', 'ext',
+                 'idx', 'editing', 'entry_value', 'dirty', 'full', 'prev_idx',
+                 'prev_page', 'prev_hdisp')
 
     def __init__(self, group):
         self.group = group
@@ -2652,6 +2666,12 @@ class _GridLevel:
         # Resolved once here, not per frame: the layout depends only on PARAMS, which
         # never changes at runtime. cells[i] = (page, x, y) for params[i].
         self.cells, self.heads, self.npages = _grid_layout(self.params)
+        # cc -> cell index, so an incoming CC can find the cell it belongs to in O(1)
+        # from the MIDI callback (which must stay cheap -- it runs in the ISR path and
+        # records only, never draws).
+        self.cc_idx = {p.cc: i for i, p in enumerate(self.params)}
+        self.ext = set()         # cell indices moved by an EXTERNAL CC since the last
+                                 # render, awaiting repaint (drained GRID_EXT_MAX/tick)
         self.idx = 0
         self.editing = False
         self.entry_value = 0     # value snapshot when editing began (hold-to-revert)
@@ -2659,6 +2679,7 @@ class _GridLevel:
         self.full = True
         self.prev_idx = 0
         self.prev_page = 0
+        self.prev_hdisp = None   # last header string drawn; None = never drawn
 
 
 class SketchMenu:
@@ -2725,15 +2746,27 @@ class SketchMenu:
         self._panel_dirty_to = 128    # the display mode was full-screen while idle
 
     def note_external_cc(self, cc, val):
-        # Called from the MIDI callback: if the selected cell is on this CC, reflect
-        # the incoming value live. Records state only (never draws) -- loop()'s
-        # render picks it up -- so it stays audio-safe. The value itself is already
-        # in param_values (handle_cc put it there); this only marks the cell dirty.
+        # Called from the MIDI callback: mark whichever cell this CC drives so the
+        # next render repaints it. Records state only (never draws) -- loop()'s render
+        # picks it up -- so it stays audio-safe. The value itself is already in
+        # param_values (handle_cc put it there, before us); this only says "that cell
+        # is stale".
+        #
+        # ANY cell, not just the selected one. It used to be `cur.editing and
+        # cur.params[cur.idx].cc == cc` -- correct for the old full-screen slider,
+        # which showed exactly ONE param, so nothing else could be on screen to go
+        # stale. The grid shows twelve, so that same condition silently left up to 11
+        # bars lying about their parameter: turn an E16 knob for a visible-but-not-
+        # selected param and its bar would not move until a FULL repaint (reopening
+        # the group, changing page, or an idle-resume) happened to correct it.
         if self.suspended or not self.stack:
             return
         cur = self.cur
-        if isinstance(cur, _GridLevel) and cur.editing and cur.params[cur.idx].cc == cc:
-            cur.dirty = True   # focused param moved by an external CC -> repaint it
+        if isinstance(cur, _GridLevel):
+            i = cur.cc_idx.get(cc)
+            if i is not None:
+                cur.ext.add(i)
+                cur.dirty = True
 
     def service_pending(self, now):
         # Fire a deferred editor single-click (commit + exit to the list) once the
@@ -3156,13 +3189,33 @@ class SketchMenu:
                 self._panel_dirty_to = 128
                 cur.prev_idx = cur.idx
                 cur.prev_page = page
+                cur.prev_hdisp = hdisp
+                cur.ext.clear()          # every cell was just drawn from param_values
                 _begin_flush(0, 127)
                 return
-            # Incremental: header (focused param/value changed) + the changed cells.
-            _draw_grid_header(d, cur.group.upper(), hdisp)
-            if not _push_rows(0, GRID_HDR_H - 1):
-                amyboard.display_refresh()
-            for gi in {cur.prev_idx, cur.idx}:           # dedup (same cell when editing)
+            # Incremental: the header (only if its text actually changed) + the cells
+            # that moved -- the two cursor cells, plus any a CC moved out from under us.
+            if hdisp != cur.prev_hdisp:
+                # Guarded because this band costs 19.5 ms MEASURED -- as much as two
+                # cells -- and the value is unchanged on most frames (a cursor move to
+                # a param that reads the same, or a CC on a cell we are not focused on).
+                # Redrawing it unconditionally spent half the frame's budget restating
+                # a fact.
+                _draw_grid_header(d, cur.group.upper(), hdisp)
+                if not _push_rows(0, GRID_HDR_H - 1):
+                    amyboard.display_refresh()
+                cur.prev_hdisp = hdisp
+            todo = {cur.prev_idx, cur.idx}               # dedup (same cell when editing)
+            if cur.ext:
+                # Externally-changed cells. Drop any not on this page -- switching page
+                # is a full repaint, which draws them from param_values anyway.
+                cur.ext = set(i for i in cur.ext if cur.cells[i][0] == page)
+                spare = [i for i in cur.ext if i not in todo]
+                todo |= set(spare[:GRID_EXT_MAX])        # bounded: see GRID_EXT_MAX
+                cur.ext.difference_update(todo)
+                if cur.ext:
+                    cur.dirty = True                     # more to drain next tick
+            for gi in todo:
                 cpage, cx, cy = cur.cells[gi]
                 if cpage == page:                        # the other cell may be off-page
                     p = cur.params[gi]

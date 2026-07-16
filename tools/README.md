@@ -61,6 +61,36 @@ It parses `PARAMS` and `GRID_LABELS` out of the source with regexes rather than
 importing the sketch (which needs `amy`/`amyboard`). If a `_Param(...)` line grows a
 new shape, the parser may need a nudge.
 
+## `grid_sim.py` — run the real menu code on the host
+
+```sh
+python3 tools/grid_sim.py                          # defaults to sketches/01_polysynth.py
+```
+
+Exits non-zero on failure. Stubs `amy` / `amyboard` / `midi` (and adds MicroPython's
+`time.ticks_*`), execs the sketch, and drives the **actual** `SketchMenu` — not a
+re-implementation, so it cannot drift from the shipped code.
+
+It exists because the CC→grid path has no other way to be tested: reflecting an
+incoming CC needs a MIDI source, and the board has no REPL while the sketch runs, so
+a CC cannot be injected over serial either. The alternative was shipping it on
+reasoning alone.
+
+Currently checks that an external CC marks the right cell stale, that the cell is
+actually pushed, that the 19.5ms header band is skipped when the value has not
+changed, that a CC flood is bounded per tick and drains rather than being dropped,
+and that the worst-case frame stays inside the ~69ms `loop()` tick.
+
+- **Proves:** state-machine behaviour — which cells go stale, what gets pushed, on
+  which tick.
+- **Does NOT prove:** real I2C timing, audio, or anything visual. Frame costs are
+  computed from the measured per-push figures (9.5ms/cell, 19.5ms/band), not timed.
+- **Gotcha:** renders are gated by `EDIT_REFRESH_MS` against the last render's
+  timestamp. On the board `loop()` arrives every ~69ms so the gate always passes;
+  in the sim, calls are microseconds apart and get throttled away. Drive renders
+  through `tick()`, which ages the timestamp. Skip it and the sim renders **nothing**
+  while every check appears to pass.
+
 ## `grab_font.py` — read the board's 8×8 font over serial
 
 ```sh
