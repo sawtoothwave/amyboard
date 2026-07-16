@@ -424,7 +424,11 @@ REV_XOVER_MAX_HZ    = 8000   #                               at CC 127 (log curv
 #       never hold the bus long enough to delay a note-off.
 # ---------------------------------------------------------------------------
 DISPLAY_MAX_LINES   = 6       # rows of CCs shown at once (newest at bottom)
-DISPLAY_REFRESH_MS  = 100     # min gap between refreshes (~10 fps cap)
+DISPLAY_REFRESH_MS  = 100     # min gap between refreshes. This is a CEILING of ~10 fps,
+                              # not the rate you get: loop() only runs every ~69 ms
+                              # (measured), so the gate passes every 2nd tick and the
+                              # real refresh rate is ~139 ms / ~7 fps. Any value in
+                              # 0..69 would be inert (the gate could never fire).
 DISPLAY_MAX_ROWS_PER_REFRESH = 2  # cap rows blitted per refresh so a busy screen
                                   # can't hold the I2C bus long enough to delay
                                   # note-offs; extra changed rows wait for the
@@ -2224,10 +2228,16 @@ NAME_ROW_Y   = 44        # name-entry: the word + inline active slot, one 1x row
 # Cursor band = the track line +/- the tick, pushed as a unit each turn.
 EDIT_TRACK_BAND_Y0 = EDIT_TRACK_Y - EDIT_TICK_H - 1
 EDIT_TRACK_BAND_Y1 = EDIT_TRACK_Y + EDIT_TICK_H + 1
-EDIT_REFRESH_MS = 16     # min gap between editor redraws. Low (~1 loop) because each
-                         # incremental redraw is now a couple of narrow windowed
-                         # pushes (a few ms), so a detent isn't deferred an extra
-                         # loop; still non-zero to cap a MIDI-CC flood at 1/loop.
+EDIT_REFRESH_MS = 16     # Min gap between editor redraws -- currently INERT, and kept
+                         # only as a floor if the loop ever gets faster. loop() runs
+                         # every ~69 ms (measured), so this 16 ms gate can never fire;
+                         # redraws are already bounded at one per loop() because
+                         # render() is called once per tick. It is not protecting
+                         # against a MIDI-CC flood -- an earlier comment here claimed
+                         # that, but CCs only mark the editor dirty from the callback
+                         # and never draw. Deferring a detent is likewise not a risk:
+                         # an incremental redraw is a couple of narrow windowed pushes.
+                         # Raising this above ~69 ms WOULD start dropping frames.
 EDIT_DBLCLICK_MS = 400   # two clicks within this window = double-click (reset);
                          # a single click's exit is deferred this long to detect it
 
