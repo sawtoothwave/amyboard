@@ -360,14 +360,19 @@ DRIFT_DEPTH_MAX_CENTS = 100.0  # +/- cents at CC 127 (0 = OFF, the default); a f
                                # semitone each way at the top for extreme lo-fi
 DRIFT_RATE_MIN_HZ     = 0.05   # ~1 new target / 20 s at CC 0 (slow drift)
 DRIFT_RATE_MAX_HZ     = 12.0   # ~12 new targets / s at CC 127 (fast warble/flutter)
-DRIFT_TICK_MS         = 25     # control-rate update period (~40 Hz). Each tick issues
-                               # two amy.send()s (osc A+B freq) in the same loop() that
-                               # repaints the OLED, so a faster tick starves the (slow)
-                               # screen blit -- 25 ms keeps the menu responsive. Trade-
-                               # off: since AMY applies freq changes instantly (no ramp),
-                               # fast+deep drift steps more here (the extreme max-depth +
-                               # max-rate corner is audibly grainy); slow-deep and fast-
-                               # shallow -- the usual musical settings -- stay smooth.
+DRIFT_TICK_MS         = 25     # Minimum gap between drift updates -- a FLOOR, not the
+                               # actual rate. Measured: the firmware calls loop() only
+                               # every ~69 ms, so any value below ~69 means "every tick"
+                               # and tuning within 0..69 does nothing at all. Do not
+                               # reach for this as a "send rate" knob: it is inert in
+                               # that range, and the two amy.send()s a tick issues cost
+                               # only ~2 ms each -- they were never the expensive part.
+                               # (The thing that made drift lag the menu was reading
+                               # amy.millis(), at ~97 ms/call; service_drift() now uses
+                               # time.ticks_ms(). See the note there.) Trade-off that
+                               # remains real: AMY applies freq changes instantly (no
+                               # ramp), so max-depth + max-rate is audibly grainy; the
+                               # usual musical settings stay smooth.
 
 # --- Master FX ranges (AMY global EQ / chorus / echo / reverb) ---------------
 # The 0-127 CC -> real-value maps for the master effects. Level/depth/damp/decay
@@ -507,7 +512,7 @@ lfo_amp_b_depth = 0.0
 # preset are unchanged. `_drift_cents` is the live wander offset that osc_freq()
 # folds into both oscs' pitch; the rest is the smooth-random generator's own
 # state, driven at control rate by service_drift(). _drift_rng is a tiny built-in
-# LCG (seeded lazily from amy.millis()) so we depend on no `random` module.
+# LCG (seeded lazily from the clock) so we depend on no `random` module.
 drift_depth_cents = 0.0    # +/- cents excursion at full wander (0 = off)
 drift_rate_hz     = 0.40   # wander speed (targets/s); mirrors the 'Drift Rate'
                            # Param default (raw 48 ~ 0.40 Hz) so a fresh boot
@@ -516,7 +521,7 @@ _drift_cents   = 0.0       # current offset in cents, read by osc_freq()
 _drift_prev    = 0.0       # previous random target (-1..1)
 _drift_next    = 0.0       # next random target (-1..1)
 _drift_phase   = 0.0       # 0..1 progress from prev -> next target
-_drift_last_ms = 0         # amy.millis() at the last serviced tick
+_drift_last_ms = 0         # time.ticks_ms() at the last serviced tick
 _drift_seeded  = False
 _drift_rng     = 1         # LCG state
 
@@ -947,14 +952,20 @@ def service_drift():
     global _drift_last_ms, _drift_seeded, _drift_rng
     if drift_depth_cents <= 0.0:
         return
-    now = amy.millis()
+    # MUST be time.ticks_ms(), never amy.millis(). Both return the same
+    # millisecond clock, but a single amy.millis() read costs ~97 ms (measured;
+    # time.ticks_ms() is ~12 us -- ~8000x cheaper). Reading it once per tick here
+    # was stalling loop() for ~82 ms EVERY tick, which is what made the menu lag
+    # whenever drift was on. Everything else in this file already keeps time with
+    # time.ticks_ms(); this was the one call site that didn't.
+    now = time.ticks_ms()
     if not _drift_seeded:
         _drift_rng = (int(now) & 0x7fffffff) or 1   # seed from the clock
         _drift_next = _drift_rand()
         _drift_last_ms = now
         _drift_seeded = True
         return
-    dt = now - _drift_last_ms
+    dt = time.ticks_diff(now, _drift_last_ms)   # wraparound-safe (ticks_ms wraps)
     if dt < DRIFT_TICK_MS:
         return
     _drift_last_ms = now
