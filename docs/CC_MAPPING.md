@@ -12,7 +12,6 @@ The MIDI CC map for the AMYboard polysynth (`sketches/01_polysynth.py`), receive
 | 21 / 25 | Osc A / B Wave | Six-wave buckets: Sine, Pulse, Saw Down, Saw Up, Triangle, Noise (see below). |
 | 22 / 26 | Osc A / B Duty | Pulse duty cycle, 0.05-0.95. |
 | 23 / 27 | Osc A / B Level | Oscillator amplitude, 0.0-1.0 (scales that osc's amp envelope). |
-| 34 | Octave | Global whole-octave transpose, five buckets: -2, -1, Center (0), +1, +2. Shifts both oscillators together while preserving keyboard tracking (folded into each osc's `freq` const). **Default -1 oct** to reconcile the middle-C naming convention — a controller/sequencer that labels MIDI note 60 as "C3" (Yamaha) otherwise plays an octave above expectation. |
 | 74 | Filter Cutoff | Logarithmic, ~30 Hz to ~16 kHz. |
 | 71 | Filter Resonance | ~0.0-6.0 (musical span of AMY's wider Q range). |
 | 30 | Filter Env Amount | **Bipolar** EG1 depth coefficient (octave-style), -2.0..+2.0, centered at CC 64 (=0, no effect). Positive opens the filter as the envelope rises; negative inverts it so the envelope closes the filter. |
@@ -60,7 +59,7 @@ Two notes on smoothness, both rooted in AMY applying **amplitude** changes with 
 
 LFO depths default to 0, so the LFO is inaudible until a depth knob (or the mod wheel) is moved.
 
-**Analog Drift (CC 28/29).** A separate modulator from the audio LFO, emulating tape wow / analog oscillator drift. AMY's LFO can only produce *periodic* shapes (its `NOISE` wave is full-rate white noise, not a slow wander), so a slow, organic, non-repeating drift is synthesized **at control rate in `loop()`** (`service_drift`) rather than by the audio engine: a smooth-random bipolar "wander" (random targets eased through with a smoothstep, so it never repeats and has no velocity kinks) is folded into both oscillators' `freq` const, moving them together. It re-sends only when the pitch has moved ≥ ~1 cent, keeping each step below the pitch JND so the control-rate updates read as smooth even though AMY applies `freq` changes immediately (no ramp). Depth 0 = off, so it costs nothing and leaves existing patches unchanged; extreme depth *and* rate together is intentionally gritty (larger per-step jumps). Lives in the **LFO** Param Control group as *Drift Amt* / *Drift Rate*, and is captured by presets.
+**Analog Drift (CC 28/29).** Lives on the **Osc** page under a `DRIFT` header (it is a pitch control — it rides on each osc's tuning via `osc_freq()`). It sat on the LFO page next to the LFO's own rate knob and read as a second LFO, which it is not. A separate modulator from the audio LFO, emulating tape wow / analog oscillator drift. AMY's LFO can only produce *periodic* shapes (its `NOISE` wave is full-rate white noise, not a slow wander), so a slow, organic, non-repeating drift is synthesized **at control rate in `loop()`** (`service_drift`) rather than by the audio engine: a smooth-random bipolar "wander" (random targets eased through with a smoothstep, so it never repeats and has no velocity kinks) is folded into both oscillators' `freq` const, moving them together. It re-sends only when the pitch has moved ≥ ~1 cent, keeping each step below the pitch JND so the control-rate updates read as smooth even though AMY applies `freq` changes immediately (no ramp). Depth 0 = off, so it costs nothing and leaves existing patches unchanged; extreme depth *and* rate together is intentionally gritty (larger per-step jumps). Lives in the **LFO** Param Control group as *Drift Amt* / *Drift Rate*, and is captured by presets.
 
 Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison at the center of the tuning map. To reintroduce a per-oscillator reference (for example an octave-down sub on Osc B), change `REF_HZ` handling in `sketch.py`.
 
@@ -70,15 +69,15 @@ Both oscillators reference 440 Hz (`REF_HZ` in `sketch.py`), so they are unison 
 
 ## Deferred Controls
 
-Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device and captured by presets. Param Control is a **4-wide value-bar "knob" grid** per group (Osc / VCF / LFO / VCA / FX), cut into labelled **sections** of up to 4 params. Params fill **row-major** — across a row, then on to the next section — and the cursor travels the same way. A group's param order is therefore a layout decision: each run of ≤4 params sharing a `section` is one row, under a centred header. A click selects a cell (knockout highlight) and turning then adjusts it live, double-click resets to default, hold reverts. The top band shows the **group name** left and the focused param's **live value** right (bucketed params show their word; bipolar params draw a center-anchored bar). VCF/VCA envelope params (ADSR + shape) appear inline as cells rather than in a sub-menu.
+Implemented: the full effects section (EQ / chorus / echo / reverb), master output level, velocity→filter and velocity→amp depth, per-envelope curve shapes, and analog drift (CC 28/29) — all editable on-device and captured by presets. Param Control is a **4-wide value-bar "knob" grid** per group (Osc / VCF / LFO / VCA / FX), cut into labelled **sections** of up to 4 params. Params fill **row-major** — across a row, then on to the next section — and the cursor travels the same way. A group's param order is therefore a layout decision: a run of params sharing a `section` sits under one centred header, wrapping every 4 cells — or wherever a param sets `newrow`. A click selects a cell (knockout highlight) and turning then adjusts it live, double-click resets to default, hold reverts. The top band shows the **group name** left and the focused param's **live value** right (bucketed params show their word; bipolar params draw a center-anchored bar). VCF/VCA envelope params (ADSR + shape) appear inline as cells rather than in a sub-menu.
 
-The current structure — **3 sections per page, ≤4 controls each, so 12 params/page**:
+The current structure — **3 sections per page, ≤4 controls per row**. A section is normally one row, but may take more: LFO's five destinations are split 3 **+** 2 by a `newrow` flag on Osc-A-tremolo, so the shared depths (both oscs move together) read as one row and the per-oscillator tremolos as another. Plain wrapping would have given 4 + 1.
 
 | Group | Sections | Pages |
 |---|---|---|
-| Osc | `OSC A` PIT/WAV/DTY/LVL · `OSC B` PIT/WAV/DTY/LVL · `ETC` OCT | 1 |
+| Osc | `OSC A` PIT/WAV/DTY/LVL · `OSC B` PIT/WAV/DTY/LVL · `DRIFT` AMT/HZ | 1 |
 | VCF | `FILTER` CUT/RES/ENV/TYP · `ADSR` ATK/DEC/SUS/REL · `ETC` SHP/KBD/VEL | 1 |
-| LFO | *(unsectioned — still on 4-char labels, pending redesign)* | 1 |
+| LFO | `WAVE` HZ/SHP · `DEST` VIB/PWM/FLT **+** LVA/LVB | 1 |
 | VCA | `ADSR` ATK/DEC/SUS/REL · `ETC` SHP/VEL/LVL | 1 |
 | FX | `EQ` LO/MID/HI · `CHORUS` LEV/DEP/HZ · `ECHO` LEV/TIM/FBK/TON · `REVERB` LEV/DEC/DMP/XVR | 2 |
 

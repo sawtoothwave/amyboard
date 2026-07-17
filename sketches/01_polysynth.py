@@ -210,9 +210,6 @@ CC_OSC_B_DUTY  = 26
 CC_OSC_B_LEVEL = 27
 # Global pitch transpose in whole octaves (both oscs shift together, keyboard
 # tracking preserved). Exists to reconcile the middle-C naming convention: a
-# controller/sequencer that labels MIDI note 60 "C3" (Yamaha) sits one octave
-# above AMY's rendering, so the default is -1 oct. Spare CC.
-CC_OCTAVE      = 34
 CC_FLT_ENV_AMT = 30
 CC_FLT_TYPE    = 31
 CC_KEY_SCALE   = 32
@@ -467,11 +464,6 @@ _boot_cleared = False
 # ---------------------------------------------------------------------------
 # Live patch state (musical defaults; overwritten by incoming CCs)
 # ---------------------------------------------------------------------------
-# Global pitch transpose in whole octaves, applied to both oscs in osc_freq().
-# Defaults to -1 so a "note 60 == C3" (Yamaha-convention) controller plays at the
-# expected pitch; adjustable per-patch via CC_OCTAVE / the Osc-group Octave param.
-octave = -1
-
 a_cents = 0.0
 a_wave  = amy.SAW_DOWN
 a_duty  = 0.5
@@ -579,19 +571,6 @@ def cc_to_detune_cents(cc):
         return 1200.0                               # one octave up
     return 2400.0                                   # two octaves up
 
-
-def cc_to_octave(cc):
-    # Five equal-ish buckets across 0-127 -> whole-octave transpose -2..+2.
-    cc = clamp(int(cc), 0, 127)
-    if cc <= 25:
-        return -2
-    if cc <= 51:
-        return -1
-    if cc <= 76:
-        return 0
-    if cc <= 102:
-        return 1
-    return 2
 
 
 def cc_to_wave(cc):
@@ -738,13 +717,11 @@ HEAD_AMP = {'const': 1.0, 'vel': 0, 'eg0': 0}
 
 def osc_freq(cents):
     # const in Hz at note 69, note coef 1.0 -> tracks keyboard with cents offset.
-    # `octave` shifts the reference by whole octaves (global transpose); folding it
-    # into the exponent keeps note-tracking intact -- every note moves together.
     # `_drift_cents` is the control-rate analog-drift wander (service_drift), added
     # in cents so it rides on top of tuning/transpose and moves both oscs together.
     # 'mod' adds the shared LFO vibrato at the global depth (unit-per-octave), so
     # A and B track the same vibrato -- the standard mod-wheel form.
-    return {'const': REF_HZ * math.pow(2.0, (cents + _drift_cents) / 1200.0 + octave),
+    return {'const': REF_HZ * math.pow(2.0, (cents + _drift_cents) / 1200.0),
             'note': 1, 'mod': lfo_pitch_depth}
 
 
@@ -852,13 +829,6 @@ def init_synth():
     # the fixed delay buffers exist and every effect is armed at its default
     # (all OFF) before any preset restore replays FX CCs.
     init_fx()
-
-
-def update_octave():
-    # Global transpose changed: re-send both sounding oscs' freq (each folds the
-    # new `octave` into its const via osc_freq). Live -- held notes glide, not cut.
-    amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
-    amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
 
 
 def update_filter_freq():
@@ -1240,7 +1210,6 @@ def _restore_current_preset():
 # held notes are never cut off).
 # ---------------------------------------------------------------------------
 def handle_cc(cc, val):
-    global octave
     global a_cents, a_wave, a_duty, a_level
     global b_cents, b_wave, b_duty, b_level
     global flt_cutoff, flt_res, flt_type, flt_env_amt, key_scale, vel_filt_depth
@@ -1286,9 +1255,6 @@ def handle_cc(cc, val):
         b_level = cc_unit(val)
         amy.send(synth=SYNTH, osc=OSC_B, amp=osc_amp(b_level, lfo_amp_b_depth))
         keep_filter_head_alive()
-    elif cc == CC_OCTAVE:
-        octave = cc_to_octave(val)
-        update_octave()
     elif cc == CC_FLT_CUTOFF:
         flt_cutoff = cc_to_cutoff(val)
         update_filter_freq()
@@ -1912,11 +1878,6 @@ def fmt_osc_pitch(v):
     return ('%+dc' % c) if c else 'Unison'
 
 
-def fmt_octave(v):
-    # Whole-octave transpose, bucketed like cc_to_octave(); 0 reads 'Center'.
-    o = cc_to_octave(v)
-    return 'Center' if o == 0 else '%+d oct' % o
-
 
 def fmt_wave(v):
     # Name the six core waves, bucketed exactly like cc_to_wave() so the label
@@ -1965,6 +1926,14 @@ def fmt_drift_depth(v):
     # Drift excursion in +/- cents; 0 reads 'Off' (the wander is disabled).
     c = int(round(cc_to_drift_depth(v)))
     return 'Off' if c == 0 else '+/-%dc' % c
+
+
+def fmt_lfo_freq(v):
+    # LFO rate in real Hz (0.2 .. 20), not the raw CC -- the CC is exponential, so
+    # the number alone told you nothing about the speed. Two decimals below 1 Hz
+    # where the steps are fine, one above; same convention as fmt_drift_rate.
+    hz = cc_to_lfo_freq(v)
+    return '%.2f Hz' % hz if hz < 1.0 else '%.1f Hz' % hz
 
 
 def fmt_drift_rate(v):
@@ -2044,10 +2013,10 @@ def _bucket_advance(steps, value, delta):
 
 class _Param:
     __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar', 'steps', 'group',
-                 'section')
+                 'section', 'newrow')
 
     def __init__(self, label, cc, default, fmt=None, bipolar=False, stepped=False,
-                 group='', section=''):
+                 group='', section='', newrow=False):
         self.label = label
         self.cc = cc
         self.default = default   # raw 0-127 value used until a CC/editor sets one
@@ -2059,6 +2028,12 @@ class _Param:
                                  # carries the context the label used to). '' = no
                                  # header; a '' run following a sectioned one gets a
                                  # padding gap instead. See _grid_layout.
+        self.newrow = newrow     # grid: force a row break BEFORE this cell even though
+                                 # its row is not full -- for grouping inside a section
+                                 # whose members don't split 4-at-a-time (LFO's five
+                                 # destinations read as 3 + 2, not the 4 + 1 that plain
+                                 # wrapping gives). Ignored if the cell already starts
+                                 # a row.
         # "Bucketed" params (a few discrete display values): one detent jumps to
         # the next distinct bucket instead of crawling through identical CCs.
         self.steps = _bucket_centers(fmt) if (stepped and fmt) else None
@@ -2074,11 +2049,11 @@ class _Param:
 # A few are shortened from the requested names -- Filt Type, Kbd Track, the ADSR
 # Atk/Dec/Sus/Rel forms, the space-free Lfo>X routing, and the FX Cho/Rev prefixes.
 PARAMS = [
-    # Osc: two sectioned rows of 4 (an OSC A row, an OSC B row) then Octave on its
-    # own after a padding gap. The section headers are what let these cells drop to
-    # 3-char labels (PIT/WAV/DTY/LVL, repeated per section) -- the header carries the
-    # A/B context that used to be crammed into APIT/AWAV/... Keep each section's 4
-    # params contiguous and in this order: they ARE the row.
+    # Osc: two sectioned rows of 4 (an OSC A row, an OSC B row), then Drift. The
+    # section headers are what let these cells drop to 3-char labels (PIT/WAV/DTY/LVL,
+    # repeated per section) -- the header carries the A/B context that used to be
+    # crammed into APIT/AWAV/... Keep each section's params contiguous and in this
+    # order: they ARE the row.
     _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch, bipolar=True, stepped=True, group='Osc', section='Osc A'),
     _Param('Osc A Shape', CC_OSC_A_WAVE,   52, fmt_wave, stepped=True, group='Osc', section='Osc A'),
     _Param('Osc A Duty',  CC_OSC_A_DUTY,   64, group='Osc', section='Osc A'),
@@ -2087,7 +2062,14 @@ PARAMS = [
     _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave, stepped=True, group='Osc', section='Osc B'),
     _Param('Osc B Duty',  CC_OSC_B_DUTY,   64, group='Osc', section='Osc B'),
     _Param('Osc B Level', CC_OSC_B_LEVEL,   0, group='Osc', section='Osc B'),
-    _Param('Octave',      CC_OCTAVE,        38, fmt_octave, bipolar=True, stepped=True, group='Osc', section='Etc'),
+    # Analog drift: a control-rate smooth-random pitch wander (tape wow/warble). It
+    # lives on the Osc page because it IS a pitch control -- it rides on top of each
+    # osc's tuning via osc_freq(). It sat on the LFO page next to the LFO's own Rate
+    # and read as a second LFO, which it is not: the audio LFO is an AMY oscillator,
+    # drift is Python (see service_drift). Amt default 0 = off (patches unchanged);
+    # Rate default raw 48 ~ 0.3 Hz, a gentle wander for when Amt is dialed up.
+    _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, fmt_drift_depth, group='Osc', section='Drift'),
+    _Param('Drift Rate',  CC_DRIFT_RATE,   48, fmt_drift_rate, group='Osc', section='Drift'),
     # VCF: filter controls. Order is chosen for the ROW-MAJOR 4-wide grid (see
     # GRID_COLS) -- these 11 land as three read-across rows: the filter proper
     # (Cutoff, Res, env Amount, Type), then the whole filter envelope (ADSR + curve
@@ -2105,18 +2087,20 @@ PARAMS = [
     _Param('Shape',      CC_FLT_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCF', section='Etc'),
     _Param('Kbd Track',   CC_KEY_SCALE,     0, group='VCF', section='Etc'),
     _Param('Vel>Filter',  CC_VEL_FILT,      0, fmt_vel_filt, group='VCF', section='Etc'),
-    _Param('Lfo Freq',    CC_LFO_FREQ,      0, group='LFO'),
-    _Param('Lfo Shape',   CC_LFO_WAVE,      0, fmt_wave, stepped=True, group='LFO'),
-    _Param('Lfo>Pitch',   CC_LFO_PITCH,     0, group='LFO'),
-    _Param('Lfo>Pwm',     CC_LFO_PWM,       0, group='LFO'),
-    _Param('Lfo>Filter',  CC_LFO_FILT,      0, group='LFO'),
-    _Param('Lfo>Amp A',   CC_LFO_AMP_A,     0, group='LFO'),
-    _Param('Lfo>Amp B',   CC_LFO_AMP_B,     0, group='LFO'),
-    # Analog drift: a control-rate smooth-random pitch wander (tape wow/warble),
-    # separate from the audio LFO. Amt default 0 = off (patches unchanged); Rate
-    # default raw 48 ~ 0.3 Hz, a gentle wander for when Amt is dialed up.
-    _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, fmt_drift_depth, group='LFO'),
-    _Param('Drift Rate',  CC_DRIFT_RATE,   48, fmt_drift_rate, group='LFO'),
+    # LFO: the oscillator itself (rate + shape), then where it goes. One LFO drives
+    # every destination -- AMY allows one mod_source per oscillator, so the depths
+    # below are all fed from this single LFO at independent strengths; they are not
+    # separate LFOs and cannot have their own rates.
+    _Param('Lfo Freq',    CC_LFO_FREQ,      0, fmt_lfo_freq, group='LFO', section='Wave'),
+    _Param('Lfo Shape',   CC_LFO_WAVE,      0, fmt_wave, stepped=True, group='LFO', section='Wave'),
+    # Destinations. Five, deliberately split 3 + 2 (newrow on Amp A) rather than left
+    # to wrap 4 + 1: the first row is the shared depths (both oscs move together), the
+    # second is the per-oscillator tremolos.
+    _Param('Lfo>Pitch',   CC_LFO_PITCH,     0, group='LFO', section='Dest'),
+    _Param('Lfo>Pwm',     CC_LFO_PWM,       0, group='LFO', section='Dest'),
+    _Param('Lfo>Filter',  CC_LFO_FILT,      0, group='LFO', section='Dest'),
+    _Param('Lfo>Amp A',   CC_LFO_AMP_A,     0, group='LFO', section='Dest', newrow=True),
+    _Param('Lfo>Amp B',   CC_LFO_AMP_B,     0, group='LFO', section='Dest'),
     # VCA: amp controls. The amp envelope (ADSR + curve Shape) as one section, then
     # velocity->amp sensitivity and the master output Level (renamed from the old
     # 'Output'; per-patch master volume, default +12 dB).
@@ -2178,13 +2162,16 @@ GRID_LABELS = {
     # old 4-char APIT/AWAV/... did not.
     CC_OSC_A_PITCH: 'PIT', CC_OSC_A_WAVE: 'WAV', CC_OSC_A_DUTY: 'DTY', CC_OSC_A_LEVEL: 'LVL',
     CC_OSC_B_PITCH: 'PIT', CC_OSC_B_WAVE: 'WAV', CC_OSC_B_DUTY: 'DTY', CC_OSC_B_LEVEL: 'LVL',
-    CC_OCTAVE: 'OCT',
     CC_FLT_CUTOFF: 'CUT', CC_FLT_RES: 'RES', CC_FLT_ENV_AMT: 'ENV', CC_FLT_TYPE: 'TYP',
     CC_VCF_ATK: 'ATK', CC_VCF_DEC: 'DEC', CC_VCF_SUS: 'SUS', CC_VCF_REL: 'REL',
     CC_FLT_ENV_SHAPE: 'SHP', CC_KEY_SCALE: 'KBD', CC_VEL_FILT: 'VEL',
-    CC_LFO_FREQ: 'LHZ', CC_LFO_WAVE: 'LWAV', CC_LFO_PITCH: 'VIB', CC_LFO_PWM: 'PWM',
-    CC_LFO_FILT: 'LFLT', CC_LFO_AMP_A: 'TRMA', CC_LFO_AMP_B: 'TRMB',
-    CC_DRIFT_DEPTH: 'DRFT', CC_DRIFT_RATE: 'DRHZ',
+    # LFO: the group prefixes are gone (LHZ/LWAV/LFLT -> HZ/SHP/FLT) now that the
+    # WAV and DEST headers carry the context. HZ repeats on the Osc page under DRIFT
+    # and SHP repeats under VCF/VCA ADSR -- different pages, and the header says which.
+    CC_LFO_FREQ: 'HZ', CC_LFO_WAVE: 'SHP',
+    CC_LFO_PITCH: 'VIB', CC_LFO_PWM: 'PWM', CC_LFO_FILT: 'FLT',
+    CC_LFO_AMP_A: 'LVA', CC_LFO_AMP_B: 'LVB',
+    CC_DRIFT_DEPTH: 'AMT', CC_DRIFT_RATE: 'HZ',
     CC_VCA_ATK: 'ATK', CC_VCA_DEC: 'DEC', CC_VCA_SUS: 'SUS', CC_VCA_REL: 'REL',
     CC_AMP_ENV_SHAPE: 'SHP', CC_VEL_SENS: 'VEL', CC_MASTER_VOL: 'LVL',
     # FX: every label drops its group prefix because the section header now carries it
@@ -2343,7 +2330,7 @@ class _NameLevel:
 # are written in fours. Reordering a group MOVES CELLS on screen.
 #
 # SECTION HEADERS (_Param.section) cut a group into labelled runs -- Osc is an "OSC A"
-# row and an "OSC B" row, then Octave after a gap. They exist to make the CELLS
+# row, an "OSC B" row, then "DRIFT". They exist to make the CELLS
 # readable: with the header carrying the context, a cell label drops from 4 chars to 3
 # (APIT -> PIT), and 3 chars is 24px in a 32px cell, i.e. actual margins. 4-char labels
 # packed 4-across with no gap were an unreadable wall. Sections cost vertical space, so
@@ -2478,10 +2465,10 @@ def _grid_layout(params):
     # page -- we page-break BEFORE a run that would not fit, never mid-run, so a
     # header can never strand its cells on the next page.
     #
-    # EVERY run reserves a header row, labelled or not. An unlabelled one (Osc's
-    # Octave, VCF's Cut/Res/Env/Typ) draws nothing but still holds the space, which
-    # does two jobs: it separates the run from the one above, and -- because the slot
-    # is unconditional -- row N of one group lands at the same y as row N of every
+    # EVERY run reserves a header row, labelled or not. An unlabelled one draws
+    # nothing but still holds the space, which does two jobs: it separates the run from
+    # the one above, and -- because the slot is unconditional -- row N of one group
+    # lands at the same y as row N of every
     # other, so paging between groups doesn't make the cells jump.
     limit = 128 - GRID_PAGE_H           # keep the page-indicator band clear
     cells = []
@@ -2495,19 +2482,29 @@ def _grid_layout(params):
         j = i
         while j < n and params[j].section == sect:
             j += 1
-        nrows = (j - i + GRID_COLS - 1) // GRID_COLS
-        need = GRID_SECT_H + nrows * GRID_CELL_H
+        # Split the run into rows FIRST -- a row ends when it is full OR when the next
+        # param asks to start one (_Param.newrow), so this is no longer derivable by
+        # arithmetic on the index.
+        rows = []
+        row = []
+        for k in range(i, j):
+            if row and (params[k].newrow or len(row) == GRID_COLS):
+                rows.append(row)
+                row = []
+            row.append(k)
+        if row:
+            rows.append(row)
+        need = GRID_SECT_H + len(rows) * GRID_CELL_H
         if cells and y + need > limit:               # won't fit -> break before the run
             page += 1
             y = GRID_HDR_H
         if sect:                                     # unlabelled: reserve, draw nothing
             heads.append((page, y, sect.upper()))
         y += GRID_SECT_H
-        for k in range(i, j):
-            s = k - i
-            cells.append((page, (s % GRID_COLS) * GRID_CELL_W,
-                          y + (s // GRID_COLS) * GRID_CELL_H))
-        y += nrows * GRID_CELL_H
+        for r, row in enumerate(rows):
+            for c, k in enumerate(row):
+                cells.append((page, c * GRID_CELL_W, y + r * GRID_CELL_H))
+        y += len(rows) * GRID_CELL_H
         i = j
     return cells, heads, page + 1
 
