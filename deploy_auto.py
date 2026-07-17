@@ -18,6 +18,16 @@ died with "unterminated string literal" if a single byte dropped; hashing costs 
 bytes of output and is a stronger check. The full readback now only runs when the
 hash MISMATCHES, to produce a diff (best effort -- we're already in an error path).
 
+BEFORE uploading anything, the sketch is checked for call sites that don't match
+their function's signature (tools/arity_check.py, run in-process). This is a gate,
+not a lint: MicroPython raises TypeError at CALL time, so a mismatched call can sit
+in code that imports and runs fine until the moment it fires -- and if it fires
+somewhere that swallows exceptions (the sketch's render paths do, deliberately, to
+keep audio alive) it shows up as a blank screen with no traceback. That exact bug
+cost a debug round on hardware. Nothing else catches it: py_compile passes because
+the syntax is valid, and the offline preview passes because it supplies its own call
+sites. --no-check skips it; you almost never want to.
+
 Examples:
     # Deploy a sketch to flash and verify (does not auto-boot it):
     python deploy_auto.py --sketch sketches/01_polysynth.py
@@ -222,6 +232,47 @@ def deploy_and_verify(port, sketch_path, dest, loaded_path=None,
             session.reset_board()
 
 
+def preflight(sketch_path):
+    """Refuse to deploy code whose call sites don't match their signatures.
+
+    Delegates to tools/arity_check.py so there is ONE implementation -- running it
+    by import rather than as a subprocess keeps the failure legible and avoids
+    depending on cwd or the python on PATH.
+
+    Returns True to proceed. Never raises for a missing checker: the tool is a
+    convenience of this repo, not a dependency of deploying, and a checkout without
+    it should still be able to talk to the board.
+    """
+    tools = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools')
+    checker = os.path.join(tools, 'arity_check.py')
+    if not os.path.exists(checker):
+        print('note: tools/arity_check.py not found; skipping the pre-deploy check')
+        return True
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    try:
+        import arity_check
+    except Exception as exc:
+        print(f'note: could not load the arity checker ({exc}); skipping')
+        return True
+    try:
+        bad = arity_check.check_file(sketch_path)
+    except Exception as exc:
+        print(f'note: arity check errored ({exc}); skipping')
+        return True
+    if bad:
+        print(f'\nREFUSING TO DEPLOY {sketch_path} -- {len(bad)} call site(s) do not '
+              f'match their signature:\n')
+        for line, name, why, dline in bad:
+            print(f'  {sketch_path}:{line}  {name}(...) -- {why}  [def at :{dline}]')
+        print('\nMicroPython raises TypeError at CALL time, so this may not surface '
+              'until\nthe moment it runs -- and the sketch\'s render paths swallow '
+              'exceptions to keep\naudio alive, so it can present as a blank screen '
+              'with no traceback.\nFix it, or pass --no-check if you really mean it.')
+        return False
+    return True
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Deploy a Python file to the AMYboard internal flash and verify it.'
@@ -238,12 +289,17 @@ def parse_args():
     parser.add_argument('--activate', action='store_true',
                         help='After deploy, set launcher_state to this sketch and reset so the board boots into it.')
     parser.add_argument('--no-reset', action='store_true', help='Skip the final board reset.')
+    parser.add_argument('--no-check', action='store_true',
+                        help='Skip the pre-deploy call-site/signature check. You almost '
+                             'never want this -- see preflight().')
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     try:
         args = parse_args()
+        if not args.no_check and not preflight(args.sketch):
+            sys.exit(2)
         port = args.port or detect_port()
         dest = args.dest or (SKETCH_DEST_DIR + '/' + os.path.basename(args.sketch))
         deploy_and_verify(

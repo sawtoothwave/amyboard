@@ -7,6 +7,7 @@
 3. When you complete a task, after you run tests, ask the user if they want you to "perform a code review and see if any cleanup is required now that this task complete to see if there is anything messy or inelegant?" If they say yes, review uncommitted changes.
 4. Update this document to keep it in parallel with requests the user makes of your behavior.
 5. Whenever a change affects live CC assignments or control behavior in `sketches/01_polysynth.py`, update `docs/CC_MAPPING.md` in the same task.
+6. **Verify before you deploy, and prefer the offline tools to the board.** `deploy_auto.py` refuses to upload a sketch whose call sites don't match their signatures (it gates on `tools/arity_check.py`) — treat a failure as a real bug, never as something to get past. For polysynth menu/grid work also run `tools/grid_sim.py` (drives the real `SketchMenu` against stubbed board modules) and `tools/grid_preview.py` (renders the display at true 128×128 with the board's own font). Iterating on a picture costs seconds; a deploy costs ~20s and your attention. See `tools/README.md` for what each is and is not honest about.
 
 ## User Guidance
 
@@ -28,6 +29,7 @@
 - Do not use destructive git commands.
 - **NEVER EVER commit with `--no-verify`.**
 - **NEVER EVER push with `--no-verify`.**
+- **NEVER deploy with `--no-check`** to get around a failing arity check. MicroPython raises `TypeError` at *call* time, so a mismatched call site runs fine until the moment it fires — and the sketch's render paths swallow exceptions to keep audio alive, so it surfaces as a blank screen with no traceback. That bug has already cost a debug round on hardware. `py_compile` cannot see it; neither can `grid_preview` (it supplies its own call sites).
 - Do not delete files unless explicitly instructed.
 - Prefer to use `--3way` style analysis for merge conflicts
 - Never commit secrets.

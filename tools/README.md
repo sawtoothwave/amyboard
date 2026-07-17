@@ -6,12 +6,18 @@ host-side checks and a display harness. (Deploy scripts live at the repo root:
 
 ## `arity_check.py` — catch call-site/signature mismatches
 
+**This runs automatically.** `deploy_auto.py` imports `check_file()` and refuses to
+upload a sketch that fails, before it opens the serial port — so a bad sketch never
+reaches the board. `--no-check` skips the gate; don't (see `docs/AGENTS.md`).
+
+Run it by hand any time:
+
 ```sh
 python3 tools/arity_check.py                       # defaults to sketches/01_polysynth.py
 python3 tools/arity_check.py wrapper_sketch.py
 ```
 
-Exits non-zero on a mismatch. **Run it before every deploy.**
+Exits non-zero on a mismatch.
 
 It exists because of a real bug: `_draw_grid_header(d, disp)` grew a `group`
 argument and its two call sites were left behind. Every grid render raised
@@ -24,8 +30,11 @@ just went blank. Nothing else catches this class:
 - The board itself is the only other detector, and (before `_render_fault`) it
   reported the failure as a blank screen.
 
-Handles defaults, `*args`, `**kwargs`, and keyword arguments. Module-level
-functions only — methods are not checked.
+Handles defaults, `*args`, `**kwargs`, and keyword arguments, and skips call sites
+that splat (`*a` / `**kw`) since their arity isn't knowable statically. **Scope:
+module-level functions called by bare name** — methods, attribute calls, and anything
+reached through a variable are not checked; resolving those needs real type inference.
+So it is a floor, not a guarantee.
 
 ## `grid_preview.py` — render the knob grid offline at 128×128
 
