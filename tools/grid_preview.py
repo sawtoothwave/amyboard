@@ -83,9 +83,12 @@ class FakeFB:
 
 
 class P:
-    def __init__(s, label, cc, group, section, bipolar, default):
+    # Mirrors the sketch's _Param closely enough for _grid_layout. If _Param grows a
+    # field that _grid_layout reads, add it here too -- the parser below is regex, not
+    # an import, so a new field fails loudly rather than defaulting.
+    def __init__(s, label, cc, group, section, bipolar, default, newrow):
         s.label, s.cc, s.group, s.section = label, cc, group, section
-        s.bipolar, s.default = bipolar, default
+        s.bipolar, s.default, s.newrow = bipolar, default, newrow
 
 
 body = src[src.index('PARAMS = ['):]
@@ -97,12 +100,16 @@ for m in re.finditer(r"_Param\(\s*'([^']*)'\s*,\s*(CC_[A-Z0-9_]+)\s*,\s*(\d+)(.*
     g = re.search(r"group='([^']*)'", tail)
     sec = re.search(r"section='([^']*)'", tail)
     params.append(P(m.group(1), m.group(2), g.group(1) if g else '',
-                    sec.group(1) if sec else '', 'bipolar=True' in tail, int(m.group(3))))
+                    sec.group(1) if sec else '', 'bipolar=True' in tail, int(m.group(3)),
+                    'newrow=True' in tail))
 
 gl = src[src.index('GRID_LABELS = {'):]
 gl = gl[:gl.index('\n}')]
 LABELS = dict(re.findall(r"(CC_[A-Z0-9_]+):\s*'([^']*)'", gl))
-FOCUS_VALUE = {'Osc': 'Unison', 'VCF': '127', 'LFO': '0', 'VCA': '0', 'FX': '0.0dB'}
+# What the top-right readout shows for each group's first (focused) param, i.e. what
+# that param's fmt would produce at its default. Hand-kept: the preview parses PARAMS
+# with regexes and cannot call the sketch's fmt_* functions.
+FOCUS_VALUE = {'Osc': 'Unison', 'VCF': '127', 'LFO': '0.20 Hz', 'VCA': '0', 'FX': '0.0dB'}
 
 
 def render(group, cursor=0, editing_idx=None, page=0):
