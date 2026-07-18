@@ -91,9 +91,10 @@ POLYSYNTH
   wrap-around). Lists longer than one screen are **paginated** (`MENU_VISIBLE`
   items per page) rather than continuously scrolled: the cursor moves within a
   fixed page, and the window advances a whole page only when the cursor crosses a
-  page boundary. A row of small squares at the bottom-right — one per page, the
-  current page filled and the rest hollow — shows where you are. This
-  keeps navigation snappy — moving within a page repaints only two rows, and the
+  page boundary. A **bottom-centre page indicator** — one mark per page, a bright
+  dash for the current page and a dim dot for each other — shows where you are;
+  it is the same indicator the knob grid uses, so the two surfaces read alike.
+  This keeps navigation snappy — moving within a page repaints only two rows, and the
   costlier full-page repaint fires once per page instead of on every step past a
   sliding edge.
 - **Idle timeout:** after `MENU_IDLE_MS` (15 s) with no encoder input the menu

@@ -32,7 +32,8 @@ ns['clamp'] = lambda v, lo, hi: lo if v < lo else (hi if v > hi else v)
 for fname, end in (('_grid_layout', '\ndef _draw_grid_section'),
                    ('_draw_grid_section', '\ndef _grid_disp'),
                    ('_draw_grid_cell', '\ndef _draw_grid_header'),
-                   ('_draw_grid_header', '\ndef _draw_grid_pages'),
+                   ('_draw_grid_header', '\ndef _draw_page_dots'),
+                   ('_draw_page_dots', '\ndef _draw_grid_pages'),
                    ('_draw_grid_pages', '\nclass _GridLevel')):
     blk = src[src.index('def %s(' % fname):]
     blk = blk[:blk.index(end)]

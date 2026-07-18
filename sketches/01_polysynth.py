@@ -1240,9 +1240,18 @@ def _init_preset_entry():
             'cc': {str(p.cc): int(p.default) for p in PARAMS}}
 
 
+def _sorted_presets():
+    # Saved presets in display order: alphabetical, case-insensitive (so 'arp' and
+    # 'Bass' sort naturally), stable within equal keys. ONE definition of the order
+    # so the Load and Delete lists agree. Storage order in the JSON is left
+    # untouched -- this sorts only what the menus show.
+    return sorted(_presets, key=lambda p: p.get('name', '').lower())
+
+
 def _load_list():
-    # Presets offered by the Load menu: the virtual INIT first, then saved ones.
-    return [_init_preset_entry()] + _presets
+    # Presets offered by the Load menu: the virtual INIT first (a fixed home row,
+    # never sorted into the names), then the saved ones alphabetically.
+    return [_init_preset_entry()] + _sorted_presets()
 
 
 def _restore_current_preset():
@@ -2090,24 +2099,6 @@ PARAM_GROUPS = ('Osc', 'VCF', 'LFO', 'VCA', 'FX')
 # Last raw 0-127 value seen per editable CC, seeded with each param's default.
 param_values = {p.cc: p.default for p in PARAMS}
 
-# Header (full-name) overrides for params whose _Param.label is a poor standalone
-# name once flattened out of their sub-menu -- the ADSR envelopes (label 'A'/'D'/
-# 'S'/'R') and the two env-shape params (label 'Shape'). We embed the VCF/VCA
-# context here since the grid header no longer shows a separate group tag. Kept
-# <=12 chars so "<name>: <value>" fits the 16-char header. Others use p.label.
-# UNUSED as of the value-only top band: nothing reads this now that the grid no longer
-# prints a param NAME anywhere. Kept rather than deleted because it is the only record
-# of the disambiguated names (an ADSR cell says just "ATK"; this is what said "Filt
-# Attack"), and restoring a name row would want it back verbatim. Delete it if the
-# value-only header sticks.
-GRID_HEADER_NAMES = {
-    CC_VCF_ATK: 'Filt Attack', CC_VCF_DEC: 'Filt Decay',
-    CC_VCF_SUS: 'Filt Sustain', CC_VCF_REL: 'Filt Release',
-    CC_VCA_ATK: 'Amp Attack', CC_VCA_DEC: 'Amp Decay',
-    CC_VCA_SUS: 'Amp Sustain', CC_VCA_REL: 'Amp Release',
-    CC_FLT_ENV_SHAPE: 'Filt EnvShp', CC_AMP_ENV_SHAPE: 'Amp EnvShp',
-}
-
 
 # ---------------------------------------------------------------------------
 # On-device menu (encoder-driven). Reachable by a short CLICK while playing and
@@ -2126,13 +2117,10 @@ MENU_TOP_Y = 18
 # sets the page size shown by the "pg/total" marker. 8 fills the screen well (last
 # row ends at y=114). Short menus (<=8 items) are a single page with no marker.
 MENU_VISIBLE = 8
-MENU_PAGE_Y = 116        # bottom row (128 - MENU_LINE_H) for the page marker; the
-                         # last item row ends at y=114, leaving this row free
-# Page marker = one small square per page, right-justified on MENU_PAGE_Y; the
-# current page is a filled block, the others hollow outlines.
-PAGE_SQ = 7              # square side (px)
-PAGE_SQ_GAP = 3          # gap between squares
-PAGE_SQ_MARGIN = 2       # right margin from the panel edge
+MENU_PAGE_Y = 116        # bottom row (128 - MENU_LINE_H) for the page indicator; the
+                         # last item row ends at y=114, leaving this row free. The
+                         # marks themselves are the shared grid style -- a bright dash
+                         # for the current page, dim dots for the rest (_draw_page_dots).
 MENU_LABEL_MAX = 18
 MENU_IDLE_MS = 15000     # auto-close the menu to the display mode after this idle
 TOAST_MS = 1200          # how long a confirmation toast (e.g. "PRESET SAVED!") shows
@@ -2170,7 +2158,7 @@ def _accel(delta):
 
 
 def _draw_menu_row(d, y, kind, payload):
-    # One diffable list row: 't' = title line, 'q' = page squares, else an item.
+    # One diffable list row: 't' = title line, 'q' = page indicator, else an item.
     d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
     if kind == 't':
         # Title row: left-aligned header text, plus an optional right-aligned
@@ -2180,16 +2168,11 @@ def _draw_menu_row(d, y, kind, payload):
         if right:
             d.text(right, DISPLAY_WIDTH - len(right) * CHAR_W, y, 255)
     elif kind == 'q':
-        # Page squares: one per page, right-justified; current page filled.
+        # Page indicator -- the SAME dash/dots marks the knob grid uses
+        # (_draw_page_dots), vertically centred in this row so the two surfaces
+        # read consistently.
         total, cur = payload
-        pitch = PAGE_SQ + PAGE_SQ_GAP
-        x = DISPLAY_WIDTH - PAGE_SQ_MARGIN - (total * pitch - PAGE_SQ_GAP)
-        sy = y + (MENU_LINE_H - PAGE_SQ) // 2
-        for i in range(total):
-            d.fill_rect(x, sy, PAGE_SQ, PAGE_SQ, 255)
-            if i != cur:                 # hollow outline for non-current pages
-                d.fill_rect(x + 1, sy + 1, PAGE_SQ - 2, PAGE_SQ - 2, 0)
-            x += pitch
+        _draw_page_dots(d, y + (MENU_LINE_H - 2) // 2, cur, total)
     else:
         sel, label = payload
         if sel:
@@ -2557,8 +2540,6 @@ GRID_C_SECT     = 200   # section header text (e.g. "OSC A")
 GRID_C_SECT_RUL = 70    # section header trailing rule
 GRID_C_HDR_NAME = 210   # top-band group name ("OSC"), dimmer than its live value
 GRID_C_HDR_VAL  = 255   # header value
-GRID_C_RULE     = 70    # UNUSED since the top band's underline rule was removed for
-                        # colliding with the first row of cells (see GRID_HDR_H).
 GRID_C_PAGE_OFF = 20    # inactive page-indicator mark. The panel is 4-bit (top
                         # nibble), so this is level 1 -- the dimmest still-visible
                         # step (below ~16 is fully off, which would hide the 2nd-page
@@ -2761,28 +2742,35 @@ def _draw_grid_header(d, group, disp):
         d.text(group[:avail], 0, 1, GRID_C_HDR_NAME)
 
 
-def _draw_grid_pages(d, page, npages):
-    # Page indicator: one mark per page, in a row centred in the reserved bottom band
-    # (GRID_PAGE_H). It sat stacked in a 2px RIGHT margin when the grid was 3 columns
-    # of 42px (=126, leaving x>=126 spare); at 4 columns of 32px the cells own the
-    # full width and there is no such margin, so it moved down here. _grid_layout
-    # keeps this band clear, so -- as before -- no cell ever draws over it and it
-    # survives incremental cell redraws without being repainted.
-    # Current page = a bright full-width DASH; every other page = a dim 2x2 DOT, so the
-    # count of pages and your position in it are both readable at a glance. The dot has
-    # to stay visible: it is the only cue that another page exists at all.
-    if npages < 2:
-        return
+def _draw_page_dots(d, y, page, npages):
+    # THE page indicator, shared by the knob grid and the paginated list menus so
+    # the two read identically. Current page = a bright full-width DASH; every
+    # other page = a dim 2x2 DOT, centred as a row at `y`. The count of pages and
+    # your position in it are both readable at a glance; the dot has to stay
+    # visible (GRID_C_PAGE_OFF is the dimmest still-visible 4-bit step) since it is
+    # the only cue that another page exists at all. Callers guard npages < 2.
     w, h, gap = 5, 2, 4
     off_w = 2               # inactive: a dot, not a short dash
-    total = npages * w + (npages - 1) * gap
-    x = (DISPLAY_WIDTH - total) // 2
+    span = npages * w + (npages - 1) * gap
+    x = (DISPLAY_WIDTH - span) // 2
     for i in range(npages):
         if i == page:
-            d.fill_rect(x, GRID_PAGE_Y, w, h, GRID_C_HDR_VAL)
+            d.fill_rect(x, y, w, h, GRID_C_HDR_VAL)
         else:
-            d.fill_rect(x + (w - off_w) // 2, GRID_PAGE_Y, off_w, h, GRID_C_PAGE_OFF)
+            d.fill_rect(x + (w - off_w) // 2, y, off_w, h, GRID_C_PAGE_OFF)
         x += w + gap
+
+
+def _draw_grid_pages(d, page, npages):
+    # Knob-grid page indicator, in the reserved bottom band (GRID_PAGE_H). It sat
+    # stacked in a 2px RIGHT margin when the grid was 3 columns of 42px (=126,
+    # leaving x>=126 spare); at 4 columns of 32px the cells own the full width and
+    # there is no such margin, so it moved down here. _grid_layout keeps this band
+    # clear, so no cell ever draws over it and it survives incremental cell redraws
+    # without being repainted.
+    if npages < 2:
+        return
+    _draw_page_dots(d, GRID_PAGE_Y, page, npages)
 
 
 GRID_EXT_MAX = 2        # Max externally-changed (MIDI/CC) cells repainted per tick;
@@ -3230,14 +3218,14 @@ class SketchMenu:
         self._repaint()
 
     def _delete_menu(self):
-        # The delete list, rebuilt each time so it always reflects the current set
-        # (indices shift as presets are removed). Items delete by NAME, not index,
-        # so a stale closure can never remove the wrong preset.
+        # The delete list, rebuilt each time so it always reflects the current set.
+        # Shown alphabetically (same order as Load, via _sorted_presets). Items
+        # delete by NAME, not index, so reordering can never remove the wrong one.
         if not _presets:
             return _MenuLevel('DELETE PRESET', [('(none saved)', None)])
-        items = [(_presets[i].get('name', '?')[:MENU_LABEL_MAX],
-                  (lambda nm=_presets[i].get('name', '?'): self._confirm_delete(nm)))
-                 for i in range(len(_presets))]
+        items = [(p.get('name', '?')[:MENU_LABEL_MAX],
+                  (lambda nm=p.get('name', '?'): self._confirm_delete(nm)))
+                 for p in _sorted_presets()]
         return _MenuLevel('DELETE PRESET', items)
 
     def _open_delete(self):
