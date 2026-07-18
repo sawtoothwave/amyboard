@@ -225,7 +225,25 @@ def main():
     check(not lvl.ext, 'the queue fully drains (took %d ticks, ~%d ms at 69ms/tick)'
           % (ticks, ticks * 69))
 
-    # 6. worst-case frame cost, from the MEASURED per-push figures
+    # 6. every PARAMS row must drive its whole pipeline: map the CC, store the
+    # value, send to AMY. This exists because the table calls to_val/update
+    # through variables, which arity_check.py cannot see (it only checks bare-name
+    # calls) -- a signature typo in a row's functions would otherwise surface as
+    # a TypeError swallowed by the render path on the board. Run BEFORE the frame
+    # cost check below floods param_values anyway, so state stays comparable.
+    pipe_fail = []
+    for p in ns['PARAMS']:
+        try:
+            ns['handle_cc'](p.cc, 64)   # runs the row's to_val, store AND update
+        except Exception as e:
+            pipe_fail.append('%s: %r' % (p.label, e))
+            continue
+        if ns['param_values'][p.cc] != 64:
+            pipe_fail.append('%s: raw value not recorded' % p.label)
+    check(not pipe_fail, 'every PARAMS row maps, stores and sends (%d params)%s'
+          % (len(ns['PARAMS']), (': ' + '; '.join(pipe_fail)) if pipe_fail else ''))
+
+    # 7. worst-case frame cost, from the MEASURED per-push figures
     PUSHES.clear()
     lvl.idx = 0
     lvl.prev_idx = 3
