@@ -2169,6 +2169,50 @@ def _accel(delta):
     return delta * min(a, ENC_ACCEL_CAP)  # faster spins step quadratically further
 
 
+def _draw_menu_row(d, y, kind, payload):
+    # One diffable list row: 't' = title line, 'q' = page squares, else an item.
+    d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
+    if kind == 't':
+        # Title row: left-aligned header text, plus an optional right-aligned
+        # marker.
+        left, right = payload
+        d.text(left, 0, y, 255)
+        if right:
+            d.text(right, DISPLAY_WIDTH - len(right) * CHAR_W, y, 255)
+    elif kind == 'q':
+        # Page squares: one per page, right-justified; current page filled.
+        total, cur = payload
+        pitch = PAGE_SQ + PAGE_SQ_GAP
+        x = DISPLAY_WIDTH - PAGE_SQ_MARGIN - (total * pitch - PAGE_SQ_GAP)
+        sy = y + (MENU_LINE_H - PAGE_SQ) // 2
+        for i in range(total):
+            d.fill_rect(x, sy, PAGE_SQ, PAGE_SQ, 255)
+            if i != cur:                 # hollow outline for non-current pages
+                d.fill_rect(x + 1, sy + 1, PAGE_SQ - 2, PAGE_SQ - 2, 0)
+            x += pitch
+    else:
+        sel, label = payload
+        if sel:
+            d.text('>', 0, y, 255)
+            d.text(label[:MENU_LABEL_MAX], 12, y, 255)
+        else:
+            d.text(label[:MENU_LABEL_MAX], 12, y, 110)
+
+
+# ---------------------------------------------------------------------------
+# Menu levels. The stack (owned by SketchMenu) holds one of three level types;
+# each type owns its OWN input handling and rendering, so everything about a
+# screen -- its state, what a turn/click/hold does there, and how it draws --
+# lives in one class. SketchMenu keeps only what is genuinely shared: the
+# stack + lifecycle (open/close/suspend/resume), the toast, the panel/flush
+# bookkeeping, and the menu tree + preset workflows (the CONTENT of the
+# levels). Adding a screen type = writing a level class with handle()/render()
+# -- no dispatcher to extend.
+#
+# handle(menu, delta, click, back) and render(menu) receive the owning
+# SketchMenu for that shared state (menu.dirty, menu._needs_clear, the flush
+# extents, the deferred-click clock).
+# ---------------------------------------------------------------------------
 class _MenuLevel:
     __slots__ = ('title', 'items', 'idx', 'start')
 
@@ -2179,6 +2223,119 @@ class _MenuLevel:
         self.idx = 0
         self.start = 0    # index of the top visible item = current page origin
                           # (page-aligned; recomputed from idx in render)
+
+    def handle(self, menu, delta, click, back):
+        if back:                 # hold: pop one level (may close the menu)
+            menu._pop()
+            return
+        if delta:
+            # List scroll is 1:1 with detents (no acceleration -- that's only for
+            # the value editor) and clamps at the ends instead of wrapping.
+            self.idx = clamp(self.idx + delta, 0, len(self.items) - 1)
+            menu.dirty = True
+        if click:
+            _, cb = self.items[self.idx]
+            if cb:
+                cb()
+                menu.dirty = True
+
+    def render(self, menu):
+        if not menu.dirty:
+            return
+        menu.dirty = False
+        try:
+            d = amyboard.display
+            n = len(self.items)
+            # Pagination: the visible window is a fixed PAGE of MENU_VISIBLE items
+            # aligned to page boundaries (page = idx // MENU_VISIBLE). Moving the
+            # cursor WITHIN a page leaves the window fixed, so a step repaints only
+            # the two selection rows (fast, no freeze); the whole-page repaint fires
+            # only when the cursor crosses into a new page -- once every MENU_VISIBLE
+            # items, not on every step past a sliding edge (the old edge-scroll,
+            # which re-flushed the full window each step and made long lists feel
+            # laggy). A row of page squares at the bottom-right (its own row below
+            # the list) keeps you oriented across pages without crowding the header.
+            if n <= MENU_VISIBLE:
+                start = 0
+                total_pages = 1
+            else:
+                start = (self.idx // MENU_VISIBLE) * MENU_VISIBLE
+                total_pages = (n + MENU_VISIBLE - 1) // MENU_VISIBLE
+            cur_page = start // MENU_VISIBLE     # 0-based index of the shown page
+            self.start = start
+            # Current frame = title row(s) + visible item rows, as diffable tuples.
+            # A title may hold newlines (used by confirm prompts) -> up to three 1x
+            # header lines; items begin below them (a trailing '' line leaves a blank
+            # gap). A plain single-line title behaves exactly as before.
+            frame = []
+            ty = 0
+            for tline in self.title.split('\n')[:3]:
+                frame.append((ty, 't', (tline, '')))
+                ty += 9
+            y = max(MENU_TOP_Y, ty)
+            i = start
+            while i < n and i < start + MENU_VISIBLE:
+                frame.append((y, 'i', (i == self.idx, self.items[i][0])))
+                y += MENU_LINE_H
+                i += 1
+            # Page marker on its own row at the bottom-right (multi-page lists only),
+            # so the header stays uncrowded. It sits below the last item row and is
+            # diffed like any other row: unchanged while paging within a page (so a
+            # cursor move is still a 2-row push), redrawn on a page cross.
+            if total_pages > 1:
+                frame.append((MENU_PAGE_Y, 'q', (total_pages, cur_page)))
+            # Full repaint on open / level change (clears whatever was on screen
+            # before), pushed progressively in bands so audio isn't stalled.
+            # Otherwise push ONLY the rows that changed -- a cursor move touches
+            # just two rows -- so navigating never holds the I2C bus for long.
+            if menu._needs_clear or menu._prev is None or len(menu._prev) != len(frame):
+                d.fill(0)
+                extent = 0
+                for (ry, kind, payload) in frame:
+                    _draw_menu_row(d, ry, kind, payload)
+                    h = MENU_LINE_H if kind == 'i' else 9
+                    if ry + h > extent:
+                        extent = ry + h
+                if total_pages > 1:          # the bottom page row clears a full band
+                    extent = max(extent, MENU_PAGE_Y + MENU_LINE_H)
+                # Flush only the occupied rows -- but at least as far as the panel
+                # was last painted, so a taller predecessor screen's leftover rows
+                # (a longer list, or a full-screen editor/toast/display mode) are
+                # still cleared. Short menus (root, Presets, confirm) thus repaint
+                # in far fewer bands than a blind 0..127 flush.
+                flush_to = min(127, max(extent, menu._panel_dirty_to) - 1)
+                _begin_flush(0, flush_to)
+                menu._panel_dirty_to = extent
+                menu._needs_clear = False
+            else:
+                changed = [j for j in range(len(frame))
+                           if frame[j] != menu._prev[j]]
+                if len(changed) <= 2:
+                    # Cursor move within a static window: only the two selection
+                    # rows changed -- push them now (responsive, ~2 short bands).
+                    for j in changed:
+                        ry, kind, payload = frame[j]
+                        _draw_menu_row(d, ry, kind, payload)
+                        if not _push_rows(ry, ry + MENU_LINE_H - 1):
+                            amyboard.display_refresh()
+                else:
+                    # Window scrolled (only at an edge now, thanks to edge-scroll):
+                    # every visible row shifted, so ~9 rows changed -- 9 * MENU_LINE_H
+                    # = ~108 pixel-rows. Interpolating the measured blits (12 rows =
+                    # 19ms, the full 128 = 240ms) that is ~170-200ms of I2C in one
+                    # loop -- an earlier "~150ms" here understated it -- which starves
+                    # AMY's audio render and makes the LFO/vibrato stutter. Draw
+                    # them, then blit PROGRESSIVELY over just the changed span (one
+                    # band per loop) so no single loop holds the bus for long.
+                    ys = []
+                    for j in changed:
+                        ry, kind, payload = frame[j]
+                        _draw_menu_row(d, ry, kind, payload)
+                        ys.append(ry)
+                    _begin_flush(min(ys), max(ys) + MENU_LINE_H - 1)
+            menu._prev = frame
+        except Exception as e:
+            _render_fault('_MenuLevel.render', e)
 
 
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
@@ -2220,6 +2377,83 @@ class _NameLevel:
         self.sel = 0
         self.dirty = True
         self.full = True
+
+    def handle(self, menu, delta, click, back):
+        # Turn scrolls the ring candidate, click commits it (append char /
+        # backspace / confirm), hold cancels the whole name.
+        if back:
+            menu._pop()
+            return
+        if delta:
+            # Clamp (no wrap) so a fast spin zips straight to OK at the end
+            # (or 'a' at the start); acceleration lets a quick flick get there.
+            self.sel = clamp(self.sel + _accel(delta), 0, len(_NAME_RING) - 1)
+            self.dirty = True
+        if click:
+            item = _NAME_RING[self.sel]
+            if item == 'OK':
+                menu._commit_name(self)
+            elif item == 'DEL':
+                if self.name:
+                    self.name = self.name[:-1]
+                self.dirty = True
+            elif len(self.name) < PRESET_NAME_MAX:
+                self.name += item
+                # Keep the candidate on the same letter for the next slot
+                # (handy for double letters / similar chars).
+                self.dirty = True
+
+    def _draw_line(self, d):
+        # One row: the committed name, then the active append slot rendered IN
+        # PLACE at the end, knocked out (black on a white block). The candidate
+        # scrolls in that slot; DEL/OK show as a back-arrow / check glyph so they
+        # occupy a single cell just like a letter. A space is a blank white block
+        # -- itself the "a space goes here" cue.
+        y = NAME_ROW_Y
+        d.fill_rect(0, y, DISPLAY_WIDTH, CHAR_H, 0)
+        name = self.name
+        maxc = DISPLAY_WIDTH // CHAR_W
+        if len(name) + 1 > maxc:               # keep the active slot on-screen
+            name = name[-(maxc - 1):]
+        item = _NAME_RING[self.sel]
+        total = (len(name) + 1) * CHAR_W        # committed chars + active slot
+        sx = clamp((DISPLAY_WIDTH - total) // 2, 0, max(0, DISPLAY_WIDTH - total))
+        if name:
+            d.text(name, sx, y, 255)            # committed chars, normal
+        ax = sx + len(name) * CHAR_W            # active slot origin
+        d.fill_rect(ax, y, CHAR_W, CHAR_H, 255)  # knockout background (white)
+        if item == 'DEL':
+            _glyph_del(d, ax, y, 0)
+        elif item == 'OK':
+            _glyph_ok(d, ax, y, 0)
+        elif item != ' ':
+            d.text(item, ax, y, 0)              # candidate letter/digit, black
+
+    def render(self, menu):
+        # Preset-name entry, drawn 1x. On open/resume do a full clear; on a
+        # turn/click just repaint the single word row (word + inline active slot),
+        # so scrolling the ring stays snappy.
+        if not (menu.dirty or self.dirty):
+            return
+        menu.dirty = False
+        self.dirty = False
+        full = self.full or menu._needs_clear
+        try:
+            d = amyboard.display
+            if full:
+                d.fill(0)
+                d.text('NAME PRESET', 0, EDIT_TITLE_Y, 255)
+                self._draw_line(d)
+                self.full = False
+                menu._needs_clear = False
+                menu._panel_dirty_to = 128   # name entry owned the full screen
+                _begin_flush(0, 127)
+                return
+            self._draw_line(d)
+            if not _push_rows(NAME_ROW_Y, NAME_ROW_Y + CHAR_H - 1):
+                amyboard.display_refresh()
+        except Exception as e:
+            _render_fault('_NameLevel.render', e)
 
 
 # ---------------------------------------------------------------------------
@@ -2598,6 +2832,153 @@ class _GridLevel:
         self.prev_page = 0
         self.prev_hdisp = None   # last header string drawn; None = never drawn
 
+    def note_cc(self, cc):
+        # An external CC moved a param: mark its cell stale for the next render.
+        # Records state only (never draws) -- see SketchMenu.note_external_cc.
+        i = self.cc_idx.get(cc)
+        if i is not None:
+            self.ext.add(i)
+            self.dirty = True
+
+    def commit_pending_click(self):
+        # A deferred editor single-click's window passed with no second click:
+        # commit (keep the value) and drop back to the cursor.
+        if self.editing:
+            self.editing = False
+            self.dirty = True
+
+    def handle(self, menu, delta, click, back):
+        # SELECTED (editing): turn adjusts live; single click commits (keeps value,
+        # back to cursor -- deferred so a 2nd click can arrive); DOUBLE click resets
+        # to the param default (stays editing); HOLD reverts to the entry value and
+        # exits. CURSOR: turn moves cell-to-cell; click selects (snapshots the value
+        # for revert); hold pops back to the group chooser.
+        if self.editing:
+            p = self.params[self.idx]
+            if back:                             # hold: revert + exit editing
+                menu._click_pending_at = 0
+                handle_cc(p.cc, self.entry_value)
+                self.editing = False
+                self.dirty = True
+                return
+            if delta:                            # turn cancels a pending click
+                menu._click_pending_at = 0
+                v = int(param_values.get(p.cc, p.default))
+                if p.steps:                      # bucketed: one detent = one bucket
+                    v = _bucket_advance(p.steps, v, delta)
+                else:
+                    v = clamp(v + _accel(delta), 0, 127)
+                handle_cc(p.cc, v)               # applies live + records param_values
+                self.dirty = True
+            if click:
+                now = time.ticks_ms()
+                if menu._click_pending_at and \
+                        time.ticks_diff(now, menu._click_pending_at) <= EDIT_DBLCLICK_MS:
+                    # double click: reset to the param default, stay editing.
+                    menu._click_pending_at = 0
+                    handle_cc(p.cc, p.default)
+                    self.dirty = True
+                else:
+                    # first click: defer commit-and-exit so a 2nd click can arrive
+                    # (fired by service_pending once the window passes).
+                    menu._click_pending_at = now
+            return
+        if back:
+            menu._pop()
+            return
+        if delta:
+            self.idx = clamp(self.idx + delta, 0, len(self.params) - 1)
+            self.dirty = True
+        if click:
+            p = self.params[self.idx]
+            self.entry_value = int(param_values.get(p.cc, p.default))  # for hold-revert
+            self.editing = True
+            self.dirty = True
+
+    def render(self, menu):
+        # Full draw on open / resume / page-change (flushed progressively);
+        # otherwise redraw only the changed cell(s) + header. The value is applied
+        # live in handle(), so sound tracks every detent even when a redraw is
+        # throttled to the next frame.
+        if not (menu.dirty or self.dirty):
+            return
+        now = time.ticks_ms()
+        page = self.cells[self.idx][0]
+        full = self.full or menu._needs_clear or (page != self.prev_page)
+        if not full and time.ticks_diff(now, menu._edit_last_render) < EDIT_REFRESH_MS:
+            return
+        menu.dirty = False
+        self.dirty = False
+        menu._edit_last_render = now
+        try:
+            d = amyboard.display
+            fp = self.params[self.idx]                   # focused param
+            fv = int(param_values.get(fp.cc, fp.default))
+            hdisp = _grid_disp(fp, fv)
+            if full:
+                d.fill(0)
+                _draw_grid_header(d, self.group.upper(), hdisp)
+                for hpage, hy, htext in self.heads:
+                    if hpage == page:
+                        _draw_grid_section(d, hy, htext)
+                for gi, p in enumerate(self.params):
+                    cpage, cx, cy = self.cells[gi]
+                    if cpage != page:
+                        continue
+                    st = ('selected' if self.editing else 'cursor') if gi == self.idx else 'none'
+                    v = int(param_values.get(p.cc, p.default))
+                    _draw_grid_cell(d, cx, cy, p.grid,
+                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
+                _draw_grid_pages(d, page, self.npages)
+                self.full = False
+                menu._needs_clear = False
+                menu._panel_dirty_to = 128
+                self.prev_idx = self.idx
+                self.prev_page = page
+                self.prev_hdisp = hdisp
+                self.ext.clear()         # every cell was just drawn from param_values
+                _begin_flush(0, 127)
+                return
+            # Incremental: the header (only if its text actually changed) + the cells
+            # that moved -- the two cursor cells, plus any a CC moved out from under us.
+            if hdisp != self.prev_hdisp:
+                # Guarded because this band costs 19.5 ms MEASURED -- as much as two
+                # cells -- and the value is unchanged on most frames (a cursor move to
+                # a param that reads the same, or a CC on a cell we are not focused on).
+                # Redrawing it unconditionally spent half the frame's budget restating
+                # a fact.
+                _draw_grid_header(d, self.group.upper(), hdisp)
+                if not _push_rows(0, GRID_HDR_H - 1):
+                    amyboard.display_refresh()
+                self.prev_hdisp = hdisp
+            todo = {self.prev_idx, self.idx}             # dedup (same cell when editing)
+            if self.ext:
+                # Externally-changed cells. Drop any not on this page -- switching page
+                # is a full repaint, which draws them from param_values anyway.
+                self.ext = set(i for i in self.ext if self.cells[i][0] == page)
+                spare = [i for i in self.ext if i not in todo]
+                todo |= set(spare[:GRID_EXT_MAX])        # bounded: see GRID_EXT_MAX
+                self.ext.difference_update(todo)
+                if self.ext:
+                    self.dirty = True                    # more to drain next tick
+            for gi in todo:
+                cpage, cx, cy = self.cells[gi]
+                if cpage == page:                        # the other cell may be off-page
+                    p = self.params[gi]
+                    st = ('selected' if self.editing else 'cursor') if gi == self.idx else 'none'
+                    v = int(param_values.get(p.cc, p.default))
+                    _draw_grid_cell(d, cx, cy, p.grid,
+                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
+                    # Push exactly the cell we redrew -- its rect comes from the layout,
+                    # so section headers above it shift the window automatically and
+                    # never get repainted (they can't change without a full redraw).
+                    if not _push_window(cx, cx + GRID_CELL_W - 1, cy, cy + GRID_CELL_H - 1):
+                        amyboard.display_refresh()
+            self.prev_idx = self.idx
+            self.prev_page = page
+        except Exception as e:
+            _render_fault('_GridLevel.render', e)
+
 
 class SketchMenu:
     def __init__(self):
@@ -2638,8 +3019,7 @@ class SketchMenu:
 
     def open(self):
         self.stack = [self._root()]
-        self.dirty = True
-        self._needs_clear = True
+        self._repaint()
         self._panel_dirty_to = 128    # the display mode was full-screen behind us
 
     def close(self):
@@ -2657,8 +3037,7 @@ class SketchMenu:
         # Wake a suspended editor back to exactly where it was, re-syncing from
         # the live value (which MIDI may have moved while we were idle).
         self.suspended = False
-        self.dirty = True
-        self._needs_clear = True
+        self._repaint()
         self._edit_last_render = 0
         self._panel_dirty_to = 128    # the display mode was full-screen while idle
 
@@ -2680,10 +3059,7 @@ class SketchMenu:
             return
         cur = self.cur
         if isinstance(cur, _GridLevel):
-            i = cur.cc_idx.get(cc)
-            if i is not None:
-                cur.ext.add(i)
-                cur.dirty = True
+            cur.note_cc(cc)
 
     def service_pending(self, now):
         # Fire a deferred editor single-click (commit + exit to the list) once the
@@ -2693,12 +3069,25 @@ class SketchMenu:
         if time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
             return
         self._click_pending_at = 0
-        if not self.stack:
-            return
-        cur = self.cur
-        if isinstance(cur, _GridLevel) and cur.editing:
-            cur.editing = False       # commit: keep value, back to the cursor
-            cur.dirty = True
+        if self.stack and isinstance(self.cur, _GridLevel):
+            self.cur.commit_pending_click()
+
+    def _repaint(self):
+        # Schedule a full clear + redraw of the current level on the next render
+        # (vs. just `dirty`, which lets the level diff/redraw incrementally).
+        self.dirty = True
+        self._needs_clear = True
+
+    def _push_level(self, lvl):
+        self.stack.append(lvl)
+        self._repaint()
+
+    def _pop(self):
+        if self.stack:
+            self.stack.pop()
+        self._repaint()
+
+    # -- The menu tree + preset workflows (the CONTENT of the levels) ---------
 
     def _root(self):
         # Preset actions live directly on the root now (no "Presets" submenu).
@@ -2718,17 +3107,13 @@ class SketchMenu:
         # multi-page scroll.
         items = [(name, (lambda g=name: self._open_param_group(g)))
                  for name in PARAM_GROUPS]
-        self.stack.append(_MenuLevel('PARAM CONTROL', items))
-        self.dirty = True
-        self._needs_clear = True
+        self._push_level(_MenuLevel('PARAM CONTROL', items))
 
     def _open_param_group(self, group):
-        # A category: shown as the 3x4 knob grid (_GridLevel). All of the group's
+        # A category: shown as the 4-column knob grid (_GridLevel). All of the group's
         # params become cells, grouped into labelled sections by _Param.section.
         # Cursor navigates; click selects to edit.
-        self.stack.append(_GridLevel(group))
-        self.dirty = True
-        self._needs_clear = True
+        self._push_level(_GridLevel(group))
 
     def _start_save(self):
         # If a preset is "current" (last loaded or saved this session and still
@@ -2740,33 +3125,27 @@ class SketchMenu:
             # Header: "Current preset:" / <name> / blank line, then the actions --
             # the blank row separates the header from Overwrite for readability.
             # (INIT is write-protected, so it never reaches the Overwrite chooser.)
-            self.stack.append(_MenuLevel('Current preset:\n%s\n' % name[:MENU_LABEL_MAX], [
+            self._push_level(_MenuLevel('Current preset:\n%s\n' % name[:MENU_LABEL_MAX], [
                 ('Overwrite', (lambda n=name: self._confirm_overwrite(n))),
                 ('Save as new', self._start_name_entry),
                 ('Cancel', self._pop),
             ]))
-            self.dirty = True
-            self._needs_clear = True
         else:
             self._start_name_entry()
 
     def _start_name_entry(self):
         # Open the name-entry screen; committing it saves the live patch under a
         # new (or typed-over) name.
-        self.stack.append(_NameLevel())
-        self.dirty = True
-        self._needs_clear = True
+        self._push_level(_NameLevel())
 
     def _confirm_overwrite(self, name):
         # Y/N confirm before replacing an existing preset in place. The full name is
         # shown in the header (fits: <=12 chars + quotes + '?'), then a blank line
         # before Yes/No for readability. No or hold pops back to the Save chooser.
-        self.stack.append(_MenuLevel('OVERWRITE\n"%s"?\n' % name[:MENU_LABEL_MAX], [
+        self._push_level(_MenuLevel('OVERWRITE\n"%s"?\n' % name[:MENU_LABEL_MAX], [
             ('Yes', (lambda n=name: self._do_save(n))),
             ('No', self._pop),
         ]))
-        self.dirty = True
-        self._needs_clear = True
 
     def _commit_name(self, lvl):
         # Called when the user clicks OK. Empty names are ignored (stay editing).
@@ -2778,27 +3157,23 @@ class SketchMenu:
             return
         if name.upper() == INIT_PRESET_NAME:
             # "INIT" is reserved for the built-in write-protected preset.
-            self.stack.append(_MenuLevel('NAME RESERVED', [
+            self._push_level(_MenuLevel('NAME RESERVED', [
                 ('"%s" is built-in' % INIT_PRESET_NAME, None),
                 ('Back', self._pop),
             ]))
-            self.dirty = True
-            self._needs_clear = True
             return
         exists = _find_preset(name) >= 0
         if not exists and len(_presets) >= MAX_PRESETS:
-            self.stack.append(_MenuLevel('PRESETS FULL', [
+            self._push_level(_MenuLevel('PRESETS FULL', [
                 ('Max %d reached' % MAX_PRESETS, None),
                 ('Back', self._pop),
             ]))
         else:
             head = 'OVERWRITE\n"%s"?' if exists else 'SAVE\n"%s"?'
-            self.stack.append(_MenuLevel(head % name[:MENU_LABEL_MAX], [
+            self._push_level(_MenuLevel(head % name[:MENU_LABEL_MAX], [
                 ('Yes', (lambda n=name: self._do_save(n))),
                 ('No', self._pop),
             ]))
-        self.dirty = True
-        self._needs_clear = True
 
     def _do_save(self, name):
         # Persist, flash a "PRESET SAVED!" toast, and drop to the main polysynth
@@ -2811,8 +3186,7 @@ class SketchMenu:
             _set_setting('current_preset', name)   # resume it after a reset
         self.stack = [self._root()]
         self._show_toast('PRESET SAVED!' if ok else 'SAVE FAILED')
-        self.dirty = True
-        self._needs_clear = True
+        self._repaint()
 
     def _show_toast(self, msg):
         self._toast_msg = msg
@@ -2827,9 +3201,7 @@ class SketchMenu:
         items = [(lst[i].get('name', '?')[:MENU_LABEL_MAX],
                   (lambda i=i: self._load_preset(i)))
                  for i in range(len(lst))]
-        self.stack.append(_MenuLevel('LOAD PRESET', items))
-        self.dirty = True
-        self._needs_clear = True
+        self._push_level(_MenuLevel('LOAD PRESET', items))
 
     def _load_preset(self, i):
         # `i` indexes _load_list() (INIT at 0, saved after). Apply it live and
@@ -2855,8 +3227,7 @@ class SketchMenu:
         self.stack = [self._root()]
         self._show_toast('PRESET LOADED!')
         self._close_after_toast = True
-        self.dirty = True
-        self._needs_clear = True
+        self._repaint()
 
     def _delete_menu(self):
         # The delete list, rebuilt each time so it always reflects the current set
@@ -2870,21 +3241,17 @@ class SketchMenu:
         return _MenuLevel('DELETE PRESET', items)
 
     def _open_delete(self):
-        self.stack.append(self._delete_menu())
-        self.dirty = True
-        self._needs_clear = True
+        self._push_level(self._delete_menu())
 
     def _confirm_delete(self, name):
         # Destructive: the name is in the two-line header ("Delete preset\n<name>?")
         # and only Yes/No are selectable. No or hold pops back to the delete list.
         # A 12-char-max name + '?' always fits the 16-char header line. The trailing
         # newline leaves a blank line between the name and the Yes/No options.
-        self.stack.append(_MenuLevel('Delete preset\n%s?\n' % name, [
+        self._push_level(_MenuLevel('Delete preset\n%s?\n' % name, [
             ('Yes', (lambda n=name: self._do_delete(n))),
             ('No', self._pop),
         ]))
-        self.dirty = True
-        self._needs_clear = True
 
     def _do_delete(self, name):
         global _current_preset_name
@@ -2903,20 +3270,11 @@ class SketchMenu:
         if _presets:
             self.stack.append(self._delete_menu())
         self._show_toast('DELETED!')
-        self.dirty = True
-        self._needs_clear = True
-
-    def _pop(self):
-        if self.stack:
-            self.stack.pop()
-        self.dirty = True
-        self._needs_clear = True
+        self._repaint()
 
     def _open_display(self):
         items = [(m.name, (lambda m=m: self._pick_mode(m))) for m in DISPLAY_MODES]
-        self.stack.append(_MenuLevel('DISPLAY MODE', items))
-        self.dirty = True
-        self._needs_clear = True
+        self._push_level(_MenuLevel('DISPLAY MODE', items))
 
     def _pick_mode(self, mode):
         set_display_mode(mode)
@@ -2935,246 +3293,12 @@ class SketchMenu:
                     self.close()
                     launcher.repaint = True
                 else:
-                    self.dirty = True
-                    self._needs_clear = True
+                    self._repaint()
             return
         if not self.is_open:
             return
-        lvl = self.cur
-        if isinstance(lvl, _GridLevel):
-            self._handle_grid(lvl, delta, click, back)
-            return
-        if isinstance(lvl, _NameLevel):
-            # Name entry: turn scrolls the ring candidate, click commits it (append
-            # char / backspace / confirm), hold cancels the whole name.
-            if back:
-                self.stack.pop()
-                self.dirty = True
-                self._needs_clear = True
-                return
-            if delta:
-                # Clamp (no wrap) so a fast spin zips straight to OK at the end
-                # (or 'a' at the start); acceleration lets a quick flick get there.
-                lvl.sel = clamp(lvl.sel + _accel(delta), 0, len(_NAME_RING) - 1)
-                lvl.dirty = True
-            if click:
-                item = _NAME_RING[lvl.sel]
-                if item == 'OK':
-                    self._commit_name(lvl)
-                elif item == 'DEL':
-                    if lvl.name:
-                        lvl.name = lvl.name[:-1]
-                    lvl.dirty = True
-                elif len(lvl.name) < PRESET_NAME_MAX:
-                    lvl.name += item
-                    # Keep the candidate on the same letter for the next slot
-                    # (handy for double letters / similar chars).
-                    lvl.dirty = True
-            return
-        if back:                 # hold: pop one level (may close the menu)
-            self.stack.pop()
-            self.dirty = True
-            self._needs_clear = True
-            return
-        if delta:
-            # List scroll is 1:1 with detents (no acceleration -- that's only for
-            # the value editor) and clamps at the ends instead of wrapping.
-            n = len(lvl.items)
-            lvl.idx = clamp(lvl.idx + delta, 0, n - 1)
-            self.dirty = True
-        if click:
-            _, cb = lvl.items[lvl.idx]
-            if cb:
-                cb()
-                self.dirty = True
-
-    def _handle_grid(self, lvl, delta, click, back):
-        # SELECTED (editing): turn adjusts live; single click commits (keeps value,
-        # back to cursor -- deferred so a 2nd click can arrive); DOUBLE click resets
-        # to the param default (stays editing); HOLD reverts to the entry value and
-        # exits. CURSOR: turn moves cell-to-cell; click selects (snapshots the value
-        # for revert); hold pops back to the group chooser.
-        if lvl.editing:
-            p = lvl.params[lvl.idx]
-            if back:                             # hold: revert + exit editing
-                self._click_pending_at = 0
-                handle_cc(p.cc, lvl.entry_value)
-                lvl.editing = False
-                lvl.dirty = True
-                return
-            if delta:                            # turn cancels a pending click
-                self._click_pending_at = 0
-                v = int(param_values.get(p.cc, p.default))
-                if p.steps:                      # bucketed: one detent = one bucket
-                    v = _bucket_advance(p.steps, v, delta)
-                else:
-                    v = clamp(v + _accel(delta), 0, 127)
-                handle_cc(p.cc, v)               # applies live + records param_values
-                lvl.dirty = True
-            if click:
-                now = time.ticks_ms()
-                if self._click_pending_at and \
-                        time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
-                    # double click: reset to the param default, stay editing.
-                    self._click_pending_at = 0
-                    handle_cc(p.cc, p.default)
-                    lvl.dirty = True
-                else:
-                    # first click: defer commit-and-exit so a 2nd click can arrive
-                    # (fired by service_pending once the window passes).
-                    self._click_pending_at = now
-            return
-        if back:
-            self.stack.pop()
-            self.dirty = True
-            self._needs_clear = True
-            return
-        if delta:
-            lvl.idx = clamp(lvl.idx + delta, 0, len(lvl.params) - 1)
-            lvl.dirty = True
-        if click:
-            p = lvl.params[lvl.idx]
-            lvl.entry_value = int(param_values.get(p.cc, p.default))  # for hold-revert
-            lvl.editing = True
-            lvl.dirty = True
-
-    def _draw_row(self, d, y, kind, payload):
-        d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
-        if kind == 't':
-            # Title row: left-aligned header text, plus an optional right-aligned
-            # marker.
-            left, right = payload
-            d.text(left, 0, y, 255)
-            if right:
-                d.text(right, DISPLAY_WIDTH - len(right) * CHAR_W, y, 255)
-        elif kind == 'q':
-            # Page squares: one per page, right-justified; current page filled.
-            total, cur = payload
-            pitch = PAGE_SQ + PAGE_SQ_GAP
-            x = DISPLAY_WIDTH - PAGE_SQ_MARGIN - (total * pitch - PAGE_SQ_GAP)
-            sy = y + (MENU_LINE_H - PAGE_SQ) // 2
-            for i in range(total):
-                d.fill_rect(x, sy, PAGE_SQ, PAGE_SQ, 255)
-                if i != cur:                 # hollow outline for non-current pages
-                    d.fill_rect(x + 1, sy + 1, PAGE_SQ - 2, PAGE_SQ - 2, 0)
-                x += pitch
-        else:
-            sel, label = payload
-            if sel:
-                d.text('>', 0, y, 255)
-                d.text(label[:MENU_LABEL_MAX], 12, y, 255)
-            else:
-                d.text(label[:MENU_LABEL_MAX], 12, y, 110)
-
-    def _render_grid(self, cur):
-        # Full draw on open / resume / page-change (flushed progressively);
-        # otherwise redraw only the changed cell(s) + header. The value is applied
-        # live in _handle_grid, so sound tracks every detent even when a redraw is
-        # throttled to the next frame.
-        if not (self.dirty or cur.dirty):
-            return
-        now = time.ticks_ms()
-        page = cur.cells[cur.idx][0]
-        full = cur.full or self._needs_clear or (page != cur.prev_page)
-        if not full and time.ticks_diff(now, self._edit_last_render) < EDIT_REFRESH_MS:
-            return
-        self.dirty = False
-        cur.dirty = False
-        self._edit_last_render = now
-        try:
-            d = amyboard.display
-            fp = cur.params[cur.idx]                     # focused param
-            fv = int(param_values.get(fp.cc, fp.default))
-            hdisp = _grid_disp(fp, fv)
-            if full:
-                d.fill(0)
-                _draw_grid_header(d, cur.group.upper(), hdisp)
-                for hpage, hy, htext in cur.heads:
-                    if hpage == page:
-                        _draw_grid_section(d, hy, htext)
-                for gi, p in enumerate(cur.params):
-                    cpage, cx, cy = cur.cells[gi]
-                    if cpage != page:
-                        continue
-                    st = ('selected' if cur.editing else 'cursor') if gi == cur.idx else 'none'
-                    v = int(param_values.get(p.cc, p.default))
-                    _draw_grid_cell(d, cx, cy, p.grid,
-                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
-                _draw_grid_pages(d, page, cur.npages)
-                cur.full = False
-                self._needs_clear = False
-                self._panel_dirty_to = 128
-                cur.prev_idx = cur.idx
-                cur.prev_page = page
-                cur.prev_hdisp = hdisp
-                cur.ext.clear()          # every cell was just drawn from param_values
-                _begin_flush(0, 127)
-                return
-            # Incremental: the header (only if its text actually changed) + the cells
-            # that moved -- the two cursor cells, plus any a CC moved out from under us.
-            if hdisp != cur.prev_hdisp:
-                # Guarded because this band costs 19.5 ms MEASURED -- as much as two
-                # cells -- and the value is unchanged on most frames (a cursor move to
-                # a param that reads the same, or a CC on a cell we are not focused on).
-                # Redrawing it unconditionally spent half the frame's budget restating
-                # a fact.
-                _draw_grid_header(d, cur.group.upper(), hdisp)
-                if not _push_rows(0, GRID_HDR_H - 1):
-                    amyboard.display_refresh()
-                cur.prev_hdisp = hdisp
-            todo = {cur.prev_idx, cur.idx}               # dedup (same cell when editing)
-            if cur.ext:
-                # Externally-changed cells. Drop any not on this page -- switching page
-                # is a full repaint, which draws them from param_values anyway.
-                cur.ext = set(i for i in cur.ext if cur.cells[i][0] == page)
-                spare = [i for i in cur.ext if i not in todo]
-                todo |= set(spare[:GRID_EXT_MAX])        # bounded: see GRID_EXT_MAX
-                cur.ext.difference_update(todo)
-                if cur.ext:
-                    cur.dirty = True                     # more to drain next tick
-            for gi in todo:
-                cpage, cx, cy = cur.cells[gi]
-                if cpage == page:                        # the other cell may be off-page
-                    p = cur.params[gi]
-                    st = ('selected' if cur.editing else 'cursor') if gi == cur.idx else 'none'
-                    v = int(param_values.get(p.cc, p.default))
-                    _draw_grid_cell(d, cx, cy, p.grid,
-                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
-                    # Push exactly the cell we redrew -- its rect comes from the layout,
-                    # so section headers above it shift the window automatically and
-                    # never get repainted (they can't change without a full redraw).
-                    if not _push_window(cx, cx + GRID_CELL_W - 1, cy, cy + GRID_CELL_H - 1):
-                        amyboard.display_refresh()
-            cur.prev_idx = cur.idx
-            cur.prev_page = page
-        except Exception as e:
-            _render_fault('_render_grid', e)
-
-    def _draw_name_line(self, d, cur):
-        # One row: the committed name, then the active append slot rendered IN
-        # PLACE at the end, knocked out (black on a white block). The candidate
-        # scrolls in that slot; DEL/OK show as a back-arrow / check glyph so they
-        # occupy a single cell just like a letter. A space is a blank white block
-        # -- itself the "a space goes here" cue.
-        y = NAME_ROW_Y
-        d.fill_rect(0, y, DISPLAY_WIDTH, CHAR_H, 0)
-        name = cur.name
-        maxc = DISPLAY_WIDTH // CHAR_W
-        if len(name) + 1 > maxc:               # keep the active slot on-screen
-            name = name[-(maxc - 1):]
-        item = _NAME_RING[cur.sel]
-        total = (len(name) + 1) * CHAR_W        # committed chars + active slot
-        sx = clamp((DISPLAY_WIDTH - total) // 2, 0, max(0, DISPLAY_WIDTH - total))
-        if name:
-            d.text(name, sx, y, 255)            # committed chars, normal
-        ax = sx + len(name) * CHAR_W            # active slot origin
-        d.fill_rect(ax, y, CHAR_W, CHAR_H, 255)  # knockout background (white)
-        if item == 'DEL':
-            _glyph_del(d, ax, y, 0)
-        elif item == 'OK':
-            _glyph_ok(d, ax, y, 0)
-        elif item != ' ':
-            d.text(item, ax, y, 0)              # candidate letter/digit, black
+        # Each level type owns its own input semantics -- see the level classes.
+        self.cur.handle(self, delta, click, back)
 
     def _draw_toast(self, msg):
         # Full-screen centered confirmation (1x), pushed progressively.
@@ -3188,32 +3312,6 @@ class SketchMenu:
             _begin_flush(0, 127)
         except Exception as e:
             _render_fault('_draw_toast', e)
-
-    def _render_name(self, cur):
-        # Preset-name entry, drawn 1x. On open/resume do a full clear; on a
-        # turn/click just repaint the single word row (word + inline active slot),
-        # so scrolling the ring stays snappy.
-        if not (self.dirty or cur.dirty):
-            return
-        self.dirty = False
-        cur.dirty = False
-        full = cur.full or self._needs_clear
-        try:
-            d = amyboard.display
-            if full:
-                d.fill(0)
-                d.text('NAME PRESET', 0, EDIT_TITLE_Y, 255)
-                self._draw_name_line(d, cur)
-                cur.full = False
-                self._needs_clear = False
-                self._panel_dirty_to = 128   # name entry owned the full screen
-                _begin_flush(0, 127)
-                return
-            self._draw_name_line(d, cur)
-            if not _push_rows(NAME_ROW_Y, NAME_ROW_Y + CHAR_H - 1):
-                amyboard.display_refresh()
-        except Exception as e:
-            _render_fault('_render_name', e)
 
     def render(self):
         # If a progressive full-repaint flush is in flight, keep pushing bands
@@ -3236,114 +3334,11 @@ class SketchMenu:
                 self.close()
                 launcher.repaint = True   # let the display mode redraw over us
                 return
-            self.dirty = True
-            self._needs_clear = True
+            self._repaint()
         if not self.is_open:
             return
-        cur = self.cur
-        if isinstance(cur, _GridLevel):
-            self._render_grid(cur)
-            return
-        if isinstance(cur, _NameLevel):
-            self._render_name(cur)
-            return
-        if not self.dirty:
-            return
-        self.dirty = False
-        try:
-            d = amyboard.display
-            lvl = self.cur
-            n = len(lvl.items)
-            # Pagination: the visible window is a fixed PAGE of MENU_VISIBLE items
-            # aligned to page boundaries (page = idx // MENU_VISIBLE). Moving the
-            # cursor WITHIN a page leaves the window fixed, so a step repaints only
-            # the two selection rows (fast, no freeze); the whole-page repaint fires
-            # only when the cursor crosses into a new page -- once every MENU_VISIBLE
-            # items, not on every step past a sliding edge (the old edge-scroll,
-            # which re-flushed the full window each step and made long lists feel
-            # laggy). A row of page squares at the bottom-right (its own row below
-            # the list) keeps you oriented across pages without crowding the header.
-            if n <= MENU_VISIBLE:
-                start = 0
-                total_pages = 1
-            else:
-                start = (lvl.idx // MENU_VISIBLE) * MENU_VISIBLE
-                total_pages = (n + MENU_VISIBLE - 1) // MENU_VISIBLE
-            cur_page = start // MENU_VISIBLE     # 0-based index of the shown page
-            lvl.start = start
-            # Current frame = title row(s) + visible item rows, as diffable tuples.
-            # A title may hold newlines (used by confirm prompts) -> up to three 1x
-            # header lines; items begin below them (a trailing '' line leaves a blank
-            # gap). A plain single-line title behaves exactly as before.
-            frame = []
-            ty = 0
-            for tline in lvl.title.split('\n')[:3]:
-                frame.append((ty, 't', (tline, '')))
-                ty += 9
-            y = max(MENU_TOP_Y, ty)
-            i = start
-            while i < n and i < start + MENU_VISIBLE:
-                frame.append((y, 'i', (i == lvl.idx, lvl.items[i][0])))
-                y += MENU_LINE_H
-                i += 1
-            # Page marker on its own row at the bottom-right (multi-page lists only),
-            # so the header stays uncrowded. It sits below the last item row and is
-            # diffed like any other row: unchanged while paging within a page (so a
-            # cursor move is still a 2-row push), redrawn on a page cross.
-            if total_pages > 1:
-                frame.append((MENU_PAGE_Y, 'q', (total_pages, cur_page)))
-            # Full repaint on open / level change (clears whatever was on screen
-            # before), pushed progressively in bands so audio isn't stalled.
-            # Otherwise push ONLY the rows that changed -- a cursor move touches
-            # just two rows -- so navigating never holds the I2C bus for long.
-            if self._needs_clear or self._prev is None or len(self._prev) != len(frame):
-                d.fill(0)
-                extent = 0
-                for (ry, kind, payload) in frame:
-                    self._draw_row(d, ry, kind, payload)
-                    h = MENU_LINE_H if kind == 'i' else 9
-                    if ry + h > extent:
-                        extent = ry + h
-                if total_pages > 1:          # the bottom page row clears a full band
-                    extent = max(extent, MENU_PAGE_Y + MENU_LINE_H)
-                # Flush only the occupied rows -- but at least as far as the panel
-                # was last painted, so a taller predecessor screen's leftover rows
-                # (a longer list, or a full-screen editor/toast/display mode) are
-                # still cleared. Short menus (root, Presets, confirm) thus repaint
-                # in far fewer bands than a blind 0..127 flush.
-                flush_to = min(127, max(extent, self._panel_dirty_to) - 1)
-                _begin_flush(0, flush_to)
-                self._panel_dirty_to = extent
-                self._needs_clear = False
-            else:
-                changed = [j for j in range(len(frame))
-                           if frame[j] != self._prev[j]]
-                if len(changed) <= 2:
-                    # Cursor move within a static window: only the two selection
-                    # rows changed -- push them now (responsive, ~2 short bands).
-                    for j in changed:
-                        ry, kind, payload = frame[j]
-                        self._draw_row(d, ry, kind, payload)
-                        if not _push_rows(ry, ry + MENU_LINE_H - 1):
-                            amyboard.display_refresh()
-                else:
-                    # Window scrolled (only at an edge now, thanks to edge-scroll):
-                    # every visible row shifted, so ~9 rows changed -- 9 * MENU_LINE_H
-                    # = ~108 pixel-rows. Interpolating the measured blits (12 rows =
-                    # 19ms, the full 128 = 240ms) that is ~170-200ms of I2C in one
-                    # loop -- an earlier "~150ms" here understated it -- which starves
-                    # AMY's audio render and makes the LFO/vibrato stutter. Draw
-                    # them, then blit PROGRESSIVELY over just the changed span (one
-                    # band per loop) so no single loop holds the bus for long.
-                    ys = []
-                    for j in changed:
-                        ry, kind, payload = frame[j]
-                        self._draw_row(d, ry, kind, payload)
-                        ys.append(ry)
-                    _begin_flush(min(ys), max(ys) + MENU_LINE_H - 1)
-            self._prev = frame
-        except Exception as e:
-            _render_fault('render', e)
+        # Each level type owns its own drawing -- see the level classes.
+        self.cur.render(self)
 
 
 menu = SketchMenu()
