@@ -48,13 +48,19 @@ infrastructure enforces:
 ### CC Monitor (`'CC Monitor'`) — default
 
 A live monitor of incoming MIDI Control Changes on the active channel. Each
-touched CC appears on its own row: `<cc>  <short label>  <raw 0-127>` (e.g.
-`74  CUTOFF  92`). Labels come from `CC_LABELS` in `sketches/01_polysynth.py`
-(mirrors [CC_MAPPING.md](CC_MAPPING.md)); unmapped CCs show `CC`.
+touched CC appears as a two-line group — the parameter's name on top, then
+`CC <n>` with its value below (e.g. `Cutoff` / `CC 74            92`). The name
+and value are derived from the one `PARAMS` table (via `_mon_name` and the
+grid's value formatter), so every parameter — effects included — is labelled
+and nothing can drift; the value is the friendly, formatted reading the editor
+shows (`+5th`, `Saw Up`, `-2 dB`, `2.0 Hz`) when the parameter has one, else
+the raw 0-127. An unmapped CC (e.g. the raw mod wheel, CC 1) shows its number.
 
-- Newest at the bottom; survivors shift up as rows expire.
-- A single knob sweep updates that CC's row in place (repaints one row).
-- Up to `DISPLAY_MAX_LINES` (6) rows; oldest drops off the top.
+- Newest at the bottom; survivors shift up as groups expire.
+- A single knob sweep updates that CC's value line in place (repaints one row).
+- Up to `DISPLAY_MAX_ENTRIES` (4) groups; oldest drops off the top. Each group
+  is two 12px text lines (24px), and the leftover 32px is spread across the 3
+  gaps between them (~10-11px each), flush to the top and bottom edges.
 - Auto-expiry `CC_EXPIRE_MS` (6 s) after last touch, so the screen settles to
   empty when you stop playing.
 - Read-only: reflects controller activity, never changes the patch.
