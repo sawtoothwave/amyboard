@@ -1,10 +1,11 @@
 # AMYboard Sketch
 # DESCRIPTION: 6-slot one-shot sample trigger box. Each slot holds a WAV loaded
 #   from /sd/samples (browsed folder-by-folder on the encoder) into PSRAM, and
-#   fires on a MIDI channel 10 note-on at its assigned pitch (C3 + slot by
-#   default). Built for short IDM-style percussion -- zaps, blips, clicks --
-#   so samples are capped at 3 seconds and retriggering a slot chokes and
-#   restarts it. No sequencer, no patterns: notes in, samples out.
+#   fires on a MIDI channel 10 note-on at its assigned pitch (MIDI note 48,
+#   shown as C2, + slot by default). Built for short IDM-style percussion --
+#   zaps, blips, clicks -- so samples are capped at 3 seconds and retriggering
+#   a slot chokes and restarts it. No sequencer, no patterns: notes in, samples
+#   out.
 #
 #   SD CARD: put your WAVs in a /samples folder at the root of a microSD card
 #   (it appears to the board as /sd/samples) and drop the card in. Subfolders
@@ -214,8 +215,8 @@ PRESET_BASE = 1024       # slot i -> preset 1024 + i
 # guaranteed rather than incidental.
 NATIVE_NOTE = 60
 
-# Base MIDI note = slot 0. Default 48 = C3 in the convention where middle C
-# (60) is C4; slots then run C3, C#3, D3, D#3, E3, F3. Controllers disagree
+# Base MIDI note = slot 0. Default 48 = C2 in the convention where middle C
+# (60) is C3; slots then run C2, C#2, D2, D#2, E2, F2. Controllers disagree
 # about octave numbering, so this is menu-selectable -- if the box appears dead
 # but MIDI is arriving, this is the first thing to check.
 DEFAULT_BASE_NOTE = 48
@@ -225,9 +226,11 @@ NOTE_NAMES = ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B')
 
 
 def note_name(n):
-    # MIDI note number -> name, using the middle-C-is-C4 convention that matches
-    # DEFAULT_BASE_NOTE above.
-    return '%s%d' % (NOTE_NAMES[n % 12], (n // 12) - 1)
+    # MIDI note number -> name, using the middle-C-is-C3 convention (60 = C3)
+    # that Ableton, Logic and Roland gear use -- so what the box displays matches
+    # what the controller driving it calls the same note. Labels only: the slot
+    # mapping is by MIDI note number and is unaffected by this.
+    return '%s%d' % (NOTE_NAMES[n % 12], (n // 12) - 2)
 
 
 # ---------------------------------------------------------------------------
