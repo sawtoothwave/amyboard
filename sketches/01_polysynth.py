@@ -3110,7 +3110,7 @@ class SketchMenu:
         self._push_level(_MenuLevel('PARAM CONTROL', items))
 
     def _open_param_group(self, group):
-        # A category: shown as the 3x4 knob grid (_GridLevel). All of the group's
+        # A category: shown as the 4-column knob grid (_GridLevel). All of the group's
         # params become cells, grouped into labelled sections by _Param.section.
         # Cursor navigates; click selects to edit.
         self._push_level(_GridLevel(group))
