@@ -294,8 +294,12 @@ CC_REV_XOVER   = 103
 # reflects in Param Control and is captured by presets).
 CC_MODWHEEL    = 1
 
-# Filter type buckets for CC 31 (4 even bands across 0-127).
-FILTER_TYPES = [amy.FILTER_LPF24, amy.FILTER_LPF, amy.FILTER_BPF, amy.FILTER_HPF]
+# Filter type buckets for CC 31 (4 even bands across 0-127). FILTER_TYPE_NAMES
+# holds the display label per bucket, same order -- cc_to_filter_type() and
+# fmt_filter_type() index both with the same cc_bucket() call, so the type the
+# synth applies and the name on screen can never disagree.
+FILTER_TYPES      = [amy.FILTER_LPF24, amy.FILTER_LPF, amy.FILTER_BPF, amy.FILTER_HPF]
+FILTER_TYPE_NAMES = ('LP 24', 'LP', 'BP', 'HP')
 
 # Envelope shapes for CC 45/46 (4 even buckets across 0-127). AMY's eg_type values
 # are 0=NORMAL, 1=LINEAR, 2=DX7, 3=TRUE_EXPONENTIAL; we present them ordered
@@ -549,6 +553,36 @@ def cc_unit(cc):
     return clamp(int(cc), 0, 127) / 127.0
 
 
+def cc_bucket(cc, n):
+    # Even n-way split of 0..127 -> bucket index. Shared by every mapper/formatter
+    # pair that picks from a discrete list (filter types, envelope shapes), so the
+    # value the synth applies and the label on screen use the SAME boundaries.
+    return min((clamp(int(cc), 0, 127) * n) // 128, n - 1)
+
+
+# The six core analog waves: (highest CC of the bucket, AMY wave, display name).
+# ONE table drives both cc_to_wave() and fmt_wave(), so the wave the synth picks
+# and the name on the screen can never drift apart. The buckets are hand-set
+# (~equal width) and FROZEN: moving a boundary would re-voice any preset whose
+# raw wave CC sits on it.
+WAVE_BUCKETS = (
+    (20,  amy.SINE,     'Sine'),
+    (41,  amy.PULSE,    'Pulse'),
+    (63,  amy.SAW_DOWN, 'Saw Dn'),
+    (84,  amy.SAW_UP,   'Saw Up'),
+    (105, amy.TRIANGLE, 'Triangle'),
+    (127, amy.NOISE,    'Noise'),
+)
+
+
+def _wave_bucket(cc):
+    cc = clamp(int(cc), 0, 127)
+    for top, wave, name in WAVE_BUCKETS:
+        if cc <= top:
+            return wave, name
+    return WAVE_BUCKETS[-1][1], WAVE_BUCKETS[-1][2]
+
+
 def cc_to_detune_cents(cc):
     # Stepped musical tuning map (docs/CC_MAPPING.md): center dead zone, fine
     # detune wings, then fixed perfect fifths and octaves out to two octaves.
@@ -574,19 +608,7 @@ def cc_to_detune_cents(cc):
 
 
 def cc_to_wave(cc):
-    # Equal-width buckets across the six core analog waves.
-    cc = clamp(int(cc), 0, 127)
-    if cc <= 20:
-        return amy.SINE
-    if cc <= 41:
-        return amy.PULSE
-    if cc <= 63:
-        return amy.SAW_DOWN
-    if cc <= 84:
-        return amy.SAW_UP
-    if cc <= 105:
-        return amy.TRIANGLE
-    return amy.NOISE
+    return _wave_bucket(cc)[0]
 
 
 def cc_to_duty(cc):
@@ -617,16 +639,12 @@ def cc_to_flt_env_amt(cc):
 
 
 def cc_to_filter_type(cc):
-    cc = clamp(int(cc), 0, 127)
-    idx = (cc * len(FILTER_TYPES)) // 128
-    return FILTER_TYPES[min(idx, len(FILTER_TYPES) - 1)]
+    return FILTER_TYPES[cc_bucket(cc, len(FILTER_TYPES))]
 
 
 def cc_to_eg_type(cc):
     # 4 even buckets -> the AMY eg_type value for that bucket (ENV_SHAPES order).
-    cc = clamp(int(cc), 0, 127)
-    idx = (cc * len(ENV_SHAPES)) // 128
-    return ENV_SHAPES[min(idx, len(ENV_SHAPES) - 1)]
+    return ENV_SHAPES[cc_bucket(cc, len(ENV_SHAPES))]
 
 
 def cc_to_time_ms(cc):
@@ -869,6 +887,51 @@ def keep_filter_head_alive():
     amy.send(synth=SYNTH, osc=FILT_OSC, amp=HEAD_AMP)
 
 
+# --- Single-parameter senders (the `update` column of PARAMS) ----------------
+def update_osc_a_freq():
+    amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
+
+
+def update_osc_b_freq():
+    amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
+
+
+def update_osc_a_wave():
+    amy.send(synth=SYNTH, osc=OSC_A, wave=a_wave)
+
+
+def update_osc_b_wave():
+    amy.send(synth=SYNTH, osc=OSC_B, wave=b_wave)
+
+
+def update_osc_a_duty():
+    amy.send(synth=SYNTH, osc=OSC_A, duty=osc_duty(a_duty))
+
+
+def update_osc_b_duty():
+    amy.send(synth=SYNTH, osc=OSC_B, duty=osc_duty(b_duty))
+
+
+def update_osc_a_level():
+    # The level lives in the same amp coef set as the tremolo depth, so re-send
+    # the whole set; then make sure the (possibly reaped) filter head wakes too.
+    update_lfo_amp_a()
+    keep_filter_head_alive()
+
+
+def update_osc_b_level():
+    update_lfo_amp_b()
+    keep_filter_head_alive()
+
+
+def update_resonance():
+    amy.send(synth=SYNTH, osc=FILT_OSC, resonance=flt_res)
+
+
+def update_filter_type():
+    amy.send(synth=SYNTH, osc=FILT_OSC, filter_type=flt_type)
+
+
 def update_lfo():
     amy.send(synth=SYNTH, osc=LFO_OSC, wave=lfo_wave, freq=lfo_freq)
 
@@ -953,8 +1016,8 @@ def service_drift():
     # smooth even though AMY applies freq const changes immediately (no ramp).
     if abs(new_cents - _drift_cents) >= 1.0:
         _drift_cents = new_cents
-        amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
-        amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
+        update_osc_a_freq()
+        update_osc_b_freq()
 
 
 def update_drift_depth():
@@ -963,8 +1026,8 @@ def update_drift_depth():
     global _drift_cents
     if drift_depth_cents <= 0.0 and _drift_cents != 0.0:
         _drift_cents = 0.0
-        amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
-        amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
+        update_osc_a_freq()
+        update_osc_b_freq()
 
 
 # --- Master FX senders -------------------------------------------------------
@@ -1210,13 +1273,13 @@ def _restore_current_preset():
 # held notes are never cut off).
 # ---------------------------------------------------------------------------
 def handle_cc(cc, val):
-    global a_cents, a_wave, a_duty, a_level
-    global b_cents, b_wave, b_duty, b_level
-    global flt_cutoff, flt_res, flt_type, flt_env_amt, key_scale, vel_filt_depth
-    global lfo_freq, lfo_wave, lfo_pitch_depth, lfo_pwm_depth, lfo_filt_depth
-    global lfo_amp_a_depth, lfo_amp_b_depth, master_vol, vel_sens
-    global amp_eg_type, flt_eg_type
-    global drift_depth_cents, drift_rate_hz
+    # ONE table-driven path for every control change, whether it came from a
+    # hardware knob, the on-device editor, or a preset replay: look the CC up in
+    # PARAMS, record the raw 0-127 value for the editor, map it to its engine
+    # value, store that where the engine reads it, and re-send the affected
+    # slice of the AMY graph. What each parameter DOES lives in its PARAMS row
+    # (defined later in the file; this only runs after boot, so the table
+    # exists), not here.
 
     # The mod wheel is the standard vibrato controller: treat it as the LFO->pitch
     # depth so a performer's wheel works out of the box and shares that one param
@@ -1224,160 +1287,18 @@ def handle_cc(cc, val):
     if cc == CC_MODWHEEL:
         cc = CC_LFO_PITCH
 
-    # Remember the raw value for any CC the Param Control editor can edit, so it
-    # opens on the current value whether it was last set by a knob or the editor.
-    if cc in param_values:
-        param_values[cc] = clamp(int(val), 0, 127)
+    p = PARAM_BY_CC.get(cc)
+    if p is None:
+        return
 
-    if cc == CC_OSC_A_PITCH:
-        a_cents = cc_to_detune_cents(val)
-        amy.send(synth=SYNTH, osc=OSC_A, freq=osc_freq(a_cents))
-    elif cc == CC_OSC_A_WAVE:
-        a_wave = cc_to_wave(val)
-        amy.send(synth=SYNTH, osc=OSC_A, wave=a_wave)
-    elif cc == CC_OSC_A_DUTY:
-        a_duty = cc_to_duty(val)
-        amy.send(synth=SYNTH, osc=OSC_A, duty=osc_duty(a_duty))
-    elif cc == CC_OSC_A_LEVEL:
-        a_level = cc_unit(val)
-        amy.send(synth=SYNTH, osc=OSC_A, amp=osc_amp(a_level, lfo_amp_a_depth))
-        keep_filter_head_alive()
-    elif cc == CC_OSC_B_PITCH:
-        b_cents = cc_to_detune_cents(val)
-        amy.send(synth=SYNTH, osc=OSC_B, freq=osc_freq(b_cents))
-    elif cc == CC_OSC_B_WAVE:
-        b_wave = cc_to_wave(val)
-        amy.send(synth=SYNTH, osc=OSC_B, wave=b_wave)
-    elif cc == CC_OSC_B_DUTY:
-        b_duty = cc_to_duty(val)
-        amy.send(synth=SYNTH, osc=OSC_B, duty=osc_duty(b_duty))
-    elif cc == CC_OSC_B_LEVEL:
-        b_level = cc_unit(val)
-        amy.send(synth=SYNTH, osc=OSC_B, amp=osc_amp(b_level, lfo_amp_b_depth))
-        keep_filter_head_alive()
-    elif cc == CC_FLT_CUTOFF:
-        flt_cutoff = cc_to_cutoff(val)
-        update_filter_freq()
-    elif cc == CC_FLT_RES:
-        flt_res = cc_to_res(val)
-        amy.send(synth=SYNTH, osc=FILT_OSC, resonance=flt_res)
-    elif cc == CC_FLT_ENV_AMT:
-        flt_env_amt = cc_to_flt_env_amt(val)
-        update_filter_freq()
-    elif cc == CC_FLT_TYPE:
-        flt_type = cc_to_filter_type(val)
-        amy.send(synth=SYNTH, osc=FILT_OSC, filter_type=flt_type)
-    elif cc == CC_KEY_SCALE:
-        key_scale = cc_unit(val)
-        update_filter_freq()
-    elif cc == CC_VEL_FILT:
-        vel_filt_depth = cc_to_vel_filt(val)
-        update_filter_freq()
-    elif cc == CC_VCF_ATK:
-        vcf_env['a'] = cc_to_time_ms(val)
-        update_vcf()
-    elif cc == CC_VCF_DEC:
-        vcf_env['d'] = cc_to_time_ms(val)
-        update_vcf()
-    elif cc == CC_VCF_SUS:
-        vcf_env['s'] = cc_unit(val)
-        update_vcf()
-    elif cc == CC_VCF_REL:
-        vcf_env['r'] = cc_to_time_ms(val)
-        update_vcf()
-    elif cc == CC_VCA_ATK:
-        vca_env['a'] = cc_to_time_ms(val)
-        update_vca()
-    elif cc == CC_VCA_DEC:
-        vca_env['d'] = cc_to_time_ms(val)
-        update_vca()
-    elif cc == CC_VCA_SUS:
-        vca_env['s'] = cc_unit(val)
-        update_vca()
-    elif cc == CC_VCA_REL:
-        vca_env['r'] = cc_to_time_ms(val)
-        update_vca()
-    elif cc == CC_VEL_SENS:
-        vel_sens = cc_unit(val)
-        update_vel_sens()
-    elif cc == CC_FLT_ENV_SHAPE:
-        flt_eg_type = cc_to_eg_type(val)
-        update_vcf_shape()
-    elif cc == CC_AMP_ENV_SHAPE:
-        amp_eg_type = cc_to_eg_type(val)
-        update_vca_shape()
-    elif cc == CC_LFO_FREQ:
-        lfo_freq = cc_to_lfo_freq(val)
-        update_lfo()
-    elif cc == CC_LFO_PITCH:
-        lfo_pitch_depth = cc_to_lfo_pitch(val)
-        update_lfo_pitch()
-    elif cc == CC_LFO_WAVE:
-        lfo_wave = cc_to_wave(val)
-        update_lfo()
-    elif cc == CC_LFO_PWM:
-        lfo_pwm_depth = cc_to_lfo_pwm(val)
-        update_lfo_pwm()
-    elif cc == CC_LFO_FILT:
-        lfo_filt_depth = cc_to_lfo_filt(val)
-        update_filter_freq()
-    elif cc == CC_LFO_AMP_A:
-        lfo_amp_a_depth = cc_to_lfo_amp(val)
-        update_lfo_amp_a()
-    elif cc == CC_LFO_AMP_B:
-        lfo_amp_b_depth = cc_to_lfo_amp(val)
-        update_lfo_amp_b()
-    elif cc == CC_DRIFT_DEPTH:
-        drift_depth_cents = cc_to_drift_depth(val)
-        update_drift_depth()   # snaps pitch back to base if this turned drift OFF
-    elif cc == CC_DRIFT_RATE:
-        drift_rate_hz = cc_to_drift_rate(val)   # takes effect on the next segment
-    # --- Master output + FX: update global state, then re-send --------------
-    elif cc == CC_MASTER_VOL:
-        master_vol = cc_to_master_vol(val)
-        update_master_vol()
-    elif cc == CC_EQ_LOW:
-        fx['eq_l'] = cc_to_eq_db(val)   # dB on the wire; AMY converts to gain
-        update_eq()
-    elif cc == CC_EQ_MID:
-        fx['eq_m'] = cc_to_eq_db(val)
-        update_eq()
-    elif cc == CC_EQ_HIGH:
-        fx['eq_h'] = cc_to_eq_db(val)
-        update_eq()
-    elif cc == CC_CHO_LEVEL:
-        fx['cho_level'] = cc_unit(val)
-        update_chorus()
-    elif cc == CC_CHO_DEPTH:
-        fx['cho_depth'] = cc_unit(val)
-        update_chorus()
-    elif cc == CC_CHO_RATE:
-        fx['cho_rate'] = cc_to_chorus_rate(val)
-        update_chorus()
-    elif cc == CC_ECHO_LEVEL:
-        fx['echo_level'] = cc_unit(val)
-        update_echo()
-    elif cc == CC_ECHO_TIME:
-        fx['echo_time'] = cc_to_echo_time(val)
-        update_echo()
-    elif cc == CC_ECHO_FBK:
-        fx['echo_fbk'] = cc_to_echo_fbk(val)
-        update_echo()
-    elif cc == CC_ECHO_TONE:
-        fx['echo_tone'] = cc_to_echo_tone(val)
-        update_echo()
-    elif cc == CC_REV_LEVEL:
-        fx['rev_level'] = cc_unit(val)
-        update_reverb()
-    elif cc == CC_REV_DECAY:
-        fx['rev_decay'] = cc_unit(val)
-        update_reverb()
-    elif cc == CC_REV_DAMP:
-        fx['rev_damp'] = cc_unit(val)
-        update_reverb()
-    elif cc == CC_REV_XOVER:
-        fx['rev_xover'] = cc_to_rev_xover(val)
-        update_reverb()
+    # Remember the raw value so the editor opens on the current value whether it
+    # was last set by a knob or the editor.
+    param_values[cc] = clamp(int(val), 0, 127)
+
+    target, key = p.store
+    target[key] = p.to_val(val)
+    if p.update:
+        p.update()
 # ---------------------------------------------------------------------------
 # MIDI: AMY auto-routes notes to the synth matching their channel (= SYNTH, the
 # selected channel), so this callback only needs to handle Control Change
@@ -1855,15 +1776,16 @@ def service_display():
 
 
 # ---------------------------------------------------------------------------
-# Editable parameters (Param Control menu). Each descriptor pairs a human label
-# with the CC that already drives that parameter, so the on-device editor reuses
-# the exact same handle_cc() path a hardware knob does -- all value->sound
-# mapping is shared, and exposing another parameter is a one-line addition to
-# PARAMS. `fmt` (optional) turns a raw 0-127 value into a friendly label for
-# parameters whose range is really discrete regions (pitch intervals, wave
-# shapes, filter types). param_values tracks the last raw 0-127 value per CC
-# (updated by BOTH incoming MIDI CCs and the editor) so the editor opens on the
-# current value.
+# Editable parameters (Param Control menu). Each PARAMS row IS the parameter --
+# CC, engine mapping, storage slot, AMY sender, and display -- so the on-device
+# editor reuses the exact same handle_cc() path a hardware knob does; all
+# value->sound mapping is shared, and exposing another parameter is a one-line
+# addition to PARAMS. The fmt_* functions below turn a raw 0-127 value into a
+# friendly label for parameters whose range is really discrete regions (pitch
+# intervals, wave shapes, filter types); each reuses its parameter's cc_to_*
+# map so label and sound cannot disagree. param_values tracks the last raw
+# 0-127 value per CC (updated by BOTH incoming MIDI CCs and the editor) so the
+# editor opens on the current value.
 # ---------------------------------------------------------------------------
 def fmt_osc_pitch(v):
     # Osc pitch CC maps to stepped intervals plus two fine-detune wings; name the
@@ -1880,33 +1802,19 @@ def fmt_osc_pitch(v):
 
 
 def fmt_wave(v):
-    # Name the six core waves, bucketed exactly like cc_to_wave() so the label
-    # always matches the wave the synth actually selects.
-    v = clamp(int(v), 0, 127)
-    if v <= 20:
-        return 'Sine'
-    if v <= 41:
-        return 'Pulse'
-    if v <= 63:
-        return 'Saw Dn'
-    if v <= 84:
-        return 'Saw Up'
-    if v <= 105:
-        return 'Triangle'
-    return 'Noise'
+    # Names the wave from the SAME WAVE_BUCKETS row cc_to_wave() picks from, so
+    # the label always matches the wave the synth actually selects.
+    return _wave_bucket(v)[1]
 
 
 def fmt_filter_type(v):
-    # Four filter types, bucketed like cc_to_filter_type() (FILTER_TYPES order).
-    names = ('LP 24', 'LP', 'BP', 'HP')
-    idx = (clamp(int(v), 0, 127) * len(names)) // 128
-    return names[min(idx, len(names) - 1)]
+    # Same cc_bucket() index as cc_to_filter_type(), FILTER_TYPE_NAMES order.
+    return FILTER_TYPE_NAMES[cc_bucket(v, len(FILTER_TYPES))]
 
 
 def fmt_env_shape(v):
-    # Four envelope curve types, bucketed like cc_to_eg_type() (ENV_SHAPE_NAMES).
-    idx = (clamp(int(v), 0, 127) * len(ENV_SHAPE_NAMES)) // 128
-    return ENV_SHAPE_NAMES[min(idx, len(ENV_SHAPE_NAMES) - 1)]
+    # Same cc_bucket() index as cc_to_eg_type(), ENV_SHAPE_NAMES order.
+    return ENV_SHAPE_NAMES[cc_bucket(v, len(ENV_SHAPES))]
 
 
 def fmt_flt_env(v):
@@ -2012,14 +1920,26 @@ def _bucket_advance(steps, value, delta):
 
 
 class _Param:
-    __slots__ = ('label', 'cc', 'default', 'fmt', 'bipolar', 'steps', 'group',
-                 'section', 'newrow')
+    __slots__ = ('label', 'cc', 'default', 'grid', 'to_val', 'store', 'update',
+                 'fmt', 'bipolar', 'steps', 'group', 'section', 'newrow')
 
-    def __init__(self, label, cc, default, fmt=None, bipolar=False, stepped=False,
-                 group='', section='', newrow=False):
+    def __init__(self, label, cc, default, grid, to_val, store, update,
+                 fmt=None, bipolar=False, stepped=False, group='', section='',
+                 newrow=False):
         self.label = label
         self.cc = cc
         self.default = default   # raw 0-127 value used until a CC/editor sets one
+        self.grid = grid         # ultra-short knob-grid cell label; see the HARD
+                                 # LIMIT note above PARAMS before changing one
+        self.to_val = to_val     # raw 0-127 -> engine value (a cc_to_* map)
+        # `store` says where the mapped value lives so the AMY senders can read
+        # it: a bare string names a module global ('flt_cutoff'); a (dict, key)
+        # tuple names a slot in one of the state dicts (vcf_env / vca_env / fx).
+        # Normalized to (dict, key) here so handle_cc does one uniform store.
+        self.store = (globals(), store) if isinstance(store, str) else store
+        self.update = update     # zero-arg sender pushing the change into the
+                                 # AMY graph; None = picked up later (Drift Rate
+                                 # reads on the next wander segment)
         self.fmt = fmt           # optional value(0-127) -> friendly label
         self.bipolar = bipolar   # editor readout shows a signed scale (0 = center)
         self.group = group       # Param Control category (see PARAM_GROUPS)
@@ -2039,78 +1959,102 @@ class _Param:
         self.steps = _bucket_centers(fmt) if (stepped and fmt) else None
 
 
-# The editable-parameter list. Adding a row here is all it takes to expose another
-# parameter in the editor -- its `group` slots it under the right Param Control
-# category automatically (see PARAM_GROUPS / _open_params). `default` is the raw
-# 0-127 value that reproduces the patch's initial default (the double-click reset
-# target); the fine ADSR-time defaults are the CCs closest to the initial ms.
-# Labels are kept short enough that "NN. label" clears 128px in the per-category
-# lists (numbering restarts at 1 per category, so counts stay single/low-double).
-# A few are shortened from the requested names -- Filt Type, Kbd Track, the ADSR
-# Atk/Dec/Sus/Rel forms, the space-free Lfo>X routing, and the FX Cho/Rev prefixes.
+# THE parameter table. One row per editable parameter is the WHOLE definition:
+# everything the synth knows about a parameter -- its MIDI CC, engine mapping,
+# where the mapped value lives, which AMY sender pushes it, and how the editor
+# displays it -- lives in that one row. Adding a parameter is adding a row (plus
+# its cc_to_*/update_* functions if no existing ones fit) and documenting the CC
+# in docs/CC_MAPPING.md. handle_cc, the editor, the knob grid, presets, and the
+# INIT patch all drive themselves from this table.
+#
+# Columns (positional): label, cc, default, grid, to_val, store, update; then
+# keyword flags fmt / bipolar / stepped / group / section / newrow.
+#   label    editor list name. Kept short enough that "NN. label" clears 128px
+#            in the per-category lists (numbering restarts at 1 per category).
+#   default  raw 0-127 value reproducing the patch's initial default (the
+#            double-click reset target); the fine ADSR-time defaults are the
+#            CCs closest to the initial ms.
+#   grid     ultra-short knob-grid cell label. HARD LIMIT 4 CHARS: the 8px font
+#            x 4 = 32px is exactly one grid cell (see "WHY 4 COLUMNS IS TIGHT"
+#            at GRID_COLS); a 5-char label doesn't error, it silently spills
+#            into the neighbouring cell. PREFER 3: 4-char labels ink to within
+#            2px of the next cell and fuse into a wall ("EQLOEQMDEQHICHLV" --
+#            measured with the board's own font, not guessed); 3 chars leave
+#            ~4px of air. Section headers make 3 affordable by carrying the
+#            group context (which oscillator, which effect), so labels repeat
+#            freely across sections (PIT/ATK/LEV/SHP...) BY DESIGN -- the
+#            header above the cell disambiguates. Only LFO is still on 4.
+#   to_val   raw 0-127 -> engine value (shared cc_to_* maps).
+#   store    where that value lives: a module-global name, or (dict, key).
+#   update   zero-arg AMY sender that makes the stored value heard.
+# `group` slots the param under its Param Control category (see PARAM_GROUPS);
+# `section`/`newrow` shape the knob grid (see _Param). A few labels are
+# shortened from the requested names -- Filt Type, Kbd Track, the ADSR
+# Atk/Dec/Sus/Rel forms, the space-free Lfo>X routing, and the FX Cho/Rev
+# prefixes.
 PARAMS = [
     # Osc: two sectioned rows of 4 (an OSC A row, an OSC B row), then Drift. The
     # section headers are what let these cells drop to 3-char labels (PIT/WAV/DTY/LVL,
     # repeated per section) -- the header carries the A/B context that used to be
     # crammed into APIT/AWAV/... Keep each section's params contiguous and in this
     # order: they ARE the row.
-    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, fmt_osc_pitch, bipolar=True, stepped=True, group='Osc', section='Osc A'),
-    _Param('Osc A Shape', CC_OSC_A_WAVE,   52, fmt_wave, stepped=True, group='Osc', section='Osc A'),
-    _Param('Osc A Duty',  CC_OSC_A_DUTY,   64, group='Osc', section='Osc A'),
-    _Param('Osc A Level', CC_OSC_A_LEVEL, 127, group='Osc', section='Osc A'),
-    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, fmt_osc_pitch, bipolar=True, stepped=True, group='Osc', section='Osc B'),
-    _Param('Osc B Shape', CC_OSC_B_WAVE,    0, fmt_wave, stepped=True, group='Osc', section='Osc B'),
-    _Param('Osc B Duty',  CC_OSC_B_DUTY,   64, group='Osc', section='Osc B'),
-    _Param('Osc B Level', CC_OSC_B_LEVEL,   0, group='Osc', section='Osc B'),
+    _Param('Osc A Pitch', CC_OSC_A_PITCH,  64, 'PIT', cc_to_detune_cents, 'a_cents', update_osc_a_freq, fmt=fmt_osc_pitch, bipolar=True, stepped=True, group='Osc', section='Osc A'),
+    _Param('Osc A Shape', CC_OSC_A_WAVE,   52, 'WAV', cc_to_wave, 'a_wave', update_osc_a_wave, fmt=fmt_wave, stepped=True, group='Osc', section='Osc A'),
+    _Param('Osc A Duty',  CC_OSC_A_DUTY,   64, 'DTY', cc_to_duty, 'a_duty', update_osc_a_duty, group='Osc', section='Osc A'),
+    _Param('Osc A Level', CC_OSC_A_LEVEL, 127, 'LVL', cc_unit, 'a_level', update_osc_a_level, group='Osc', section='Osc A'),
+    _Param('Osc B Pitch', CC_OSC_B_PITCH,  64, 'PIT', cc_to_detune_cents, 'b_cents', update_osc_b_freq, fmt=fmt_osc_pitch, bipolar=True, stepped=True, group='Osc', section='Osc B'),
+    _Param('Osc B Shape', CC_OSC_B_WAVE,    0, 'WAV', cc_to_wave, 'b_wave', update_osc_b_wave, fmt=fmt_wave, stepped=True, group='Osc', section='Osc B'),
+    _Param('Osc B Duty',  CC_OSC_B_DUTY,   64, 'DTY', cc_to_duty, 'b_duty', update_osc_b_duty, group='Osc', section='Osc B'),
+    _Param('Osc B Level', CC_OSC_B_LEVEL,   0, 'LVL', cc_unit, 'b_level', update_osc_b_level, group='Osc', section='Osc B'),
     # Analog drift: a control-rate smooth-random pitch wander (tape wow/warble). It
     # lives on the Osc page because it IS a pitch control -- it rides on top of each
     # osc's tuning via osc_freq(). It sat on the LFO page next to the LFO's own Rate
     # and read as a second LFO, which it is not: the audio LFO is an AMY oscillator,
     # drift is Python (see service_drift). Amt default 0 = off (patches unchanged);
     # Rate default raw 48 ~ 0.3 Hz, a gentle wander for when Amt is dialed up.
-    _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, fmt_drift_depth, group='Osc', section='Drift'),
-    _Param('Drift Rate',  CC_DRIFT_RATE,   48, fmt_drift_rate, group='Osc', section='Drift'),
+    _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, 'AMT', cc_to_drift_depth, 'drift_depth_cents', update_drift_depth, fmt=fmt_drift_depth, group='Osc', section='Drift'),
+    _Param('Drift Rate',  CC_DRIFT_RATE,   48, 'HZ',  cc_to_drift_rate, 'drift_rate_hz', None, fmt=fmt_drift_rate, group='Osc', section='Drift'),
     # VCF: filter controls. Order is chosen for the ROW-MAJOR 4-wide grid (see
     # GRID_COLS) -- these 11 land as three read-across rows: the filter proper
     # (Cutoff, Res, env Amount, Type), then the whole filter envelope (ADSR + curve
     # Shape; Shape default raw 48 = the 'Normal' bucket, stepped one detent per curve
     # type), then the two modulation depths. Reordering these MOVES CELLS on screen,
     # so keep the rows-of-4 grouping intact if you add a param.
-    _Param('Cutoff',      CC_FLT_CUTOFF,  127, group='VCF', section='Filter'),
-    _Param('Resonance',   CC_FLT_RES,       0, group='VCF', section='Filter'),
-    _Param('Filter Env',  CC_FLT_ENV_AMT,  64, fmt_flt_env, bipolar=True, group='VCF', section='Filter'),
-    _Param('Filt Type',   CC_FLT_TYPE,     48, fmt_filter_type, stepped=True, group='VCF', section='Filter'),
-    _Param('A',          CC_VCF_ATK,       0, group='VCF', section='ADSR'),
-    _Param('D',          CC_VCF_DEC,      34, group='VCF', section='ADSR'),
-    _Param('S',          CC_VCF_SUS,      25, group='VCF', section='ADSR'),
-    _Param('R',          CC_VCF_REL,      31, group='VCF', section='ADSR'),
-    _Param('Shape',      CC_FLT_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCF', section='Etc'),
-    _Param('Kbd Track',   CC_KEY_SCALE,     0, group='VCF', section='Etc'),
-    _Param('Vel>Filter',  CC_VEL_FILT,      0, fmt_vel_filt, group='VCF', section='Etc'),
+    _Param('Cutoff',      CC_FLT_CUTOFF,  127, 'CUT', cc_to_cutoff, 'flt_cutoff', update_filter_freq, group='VCF', section='Filter'),
+    _Param('Resonance',   CC_FLT_RES,       0, 'RES', cc_to_res, 'flt_res', update_resonance, group='VCF', section='Filter'),
+    _Param('Filter Env',  CC_FLT_ENV_AMT,  64, 'ENV', cc_to_flt_env_amt, 'flt_env_amt', update_filter_freq, fmt=fmt_flt_env, bipolar=True, group='VCF', section='Filter'),
+    _Param('Filt Type',   CC_FLT_TYPE,     48, 'TYP', cc_to_filter_type, 'flt_type', update_filter_type, fmt=fmt_filter_type, stepped=True, group='VCF', section='Filter'),
+    _Param('A',          CC_VCF_ATK,       0, 'ATK', cc_to_time_ms, (vcf_env, 'a'), update_vcf, group='VCF', section='ADSR'),
+    _Param('D',          CC_VCF_DEC,      34, 'DEC', cc_to_time_ms, (vcf_env, 'd'), update_vcf, group='VCF', section='ADSR'),
+    _Param('S',          CC_VCF_SUS,      25, 'SUS', cc_unit, (vcf_env, 's'), update_vcf, group='VCF', section='ADSR'),
+    _Param('R',          CC_VCF_REL,      31, 'REL', cc_to_time_ms, (vcf_env, 'r'), update_vcf, group='VCF', section='ADSR'),
+    _Param('Shape',      CC_FLT_ENV_SHAPE, 48, 'SHP', cc_to_eg_type, 'flt_eg_type', update_vcf_shape, fmt=fmt_env_shape, stepped=True, group='VCF', section='Etc'),
+    _Param('Kbd Track',   CC_KEY_SCALE,     0, 'KBD', cc_unit, 'key_scale', update_filter_freq, group='VCF', section='Etc'),
+    _Param('Vel>Filter',  CC_VEL_FILT,      0, 'VEL', cc_to_vel_filt, 'vel_filt_depth', update_filter_freq, fmt=fmt_vel_filt, group='VCF', section='Etc'),
     # LFO: the oscillator itself (rate + shape), then where it goes. One LFO drives
     # every destination -- AMY allows one mod_source per oscillator, so the depths
     # below are all fed from this single LFO at independent strengths; they are not
     # separate LFOs and cannot have their own rates.
-    _Param('Lfo Freq',    CC_LFO_FREQ,      0, fmt_lfo_freq, group='LFO', section='Wave'),
-    _Param('Lfo Shape',   CC_LFO_WAVE,      0, fmt_wave, stepped=True, group='LFO', section='Wave'),
+    _Param('Lfo Freq',    CC_LFO_FREQ,      0, 'HZ',  cc_to_lfo_freq, 'lfo_freq', update_lfo, fmt=fmt_lfo_freq, group='LFO', section='Wave'),
+    _Param('Lfo Shape',   CC_LFO_WAVE,      0, 'SHP', cc_to_wave, 'lfo_wave', update_lfo, fmt=fmt_wave, stepped=True, group='LFO', section='Wave'),
     # Destinations. Five, deliberately split 3 + 2 (newrow on Amp A) rather than left
     # to wrap 4 + 1: the first row is the shared depths (both oscs move together), the
     # second is the per-oscillator tremolos.
-    _Param('Lfo>Pitch',   CC_LFO_PITCH,     0, group='LFO', section='Dest'),
-    _Param('Lfo>Pwm',     CC_LFO_PWM,       0, group='LFO', section='Dest'),
-    _Param('Lfo>Filter',  CC_LFO_FILT,      0, group='LFO', section='Dest'),
-    _Param('Lfo>Amp A',   CC_LFO_AMP_A,     0, group='LFO', section='Dest', newrow=True),
-    _Param('Lfo>Amp B',   CC_LFO_AMP_B,     0, group='LFO', section='Dest'),
+    _Param('Lfo>Pitch',   CC_LFO_PITCH,     0, 'VIB', cc_to_lfo_pitch, 'lfo_pitch_depth', update_lfo_pitch, group='LFO', section='Dest'),
+    _Param('Lfo>Pwm',     CC_LFO_PWM,       0, 'PWM', cc_to_lfo_pwm, 'lfo_pwm_depth', update_lfo_pwm, group='LFO', section='Dest'),
+    _Param('Lfo>Filter',  CC_LFO_FILT,      0, 'FLT', cc_to_lfo_filt, 'lfo_filt_depth', update_filter_freq, group='LFO', section='Dest'),
+    _Param('Lfo>Amp A',   CC_LFO_AMP_A,     0, 'LVA', cc_to_lfo_amp, 'lfo_amp_a_depth', update_lfo_amp_a, group='LFO', section='Dest', newrow=True),
+    _Param('Lfo>Amp B',   CC_LFO_AMP_B,     0, 'LVB', cc_to_lfo_amp, 'lfo_amp_b_depth', update_lfo_amp_b, group='LFO', section='Dest'),
     # VCA: amp controls. The amp envelope (ADSR + curve Shape) as one section, then
     # velocity->amp sensitivity and the master output Level (renamed from the old
     # 'Output'; per-patch master volume, default +12 dB).
-    _Param('A',          CC_VCA_ATK,       0, group='VCA', section='ADSR'),
-    _Param('D',          CC_VCA_DEC,      25, group='VCA', section='ADSR'),
-    _Param('S',          CC_VCA_SUS,     127, group='VCA', section='ADSR'),
-    _Param('R',          CC_VCA_REL,      34, group='VCA', section='ADSR'),
-    _Param('Shape',      CC_AMP_ENV_SHAPE, 48, fmt_env_shape, stepped=True, group='VCA', section='Etc'),
-    _Param('Vel>Amp',    CC_VEL_SENS,   38, fmt_pct, group='VCA', section='Etc'),
-    _Param('Level',      CC_MASTER_VOL, 84, fmt_master_vol, stepped=True, group='VCA', section='Etc'),
+    _Param('A',          CC_VCA_ATK,       0, 'ATK', cc_to_time_ms, (vca_env, 'a'), update_vca, group='VCA', section='ADSR'),
+    _Param('D',          CC_VCA_DEC,      25, 'DEC', cc_to_time_ms, (vca_env, 'd'), update_vca, group='VCA', section='ADSR'),
+    _Param('S',          CC_VCA_SUS,     127, 'SUS', cc_unit, (vca_env, 's'), update_vca, group='VCA', section='ADSR'),
+    _Param('R',          CC_VCA_REL,      34, 'REL', cc_to_time_ms, (vca_env, 'r'), update_vca, group='VCA', section='ADSR'),
+    _Param('Shape',      CC_AMP_ENV_SHAPE, 48, 'SHP', cc_to_eg_type, 'amp_eg_type', update_vca_shape, fmt=fmt_env_shape, stepped=True, group='VCA', section='Etc'),
+    _Param('Vel>Amp',    CC_VEL_SENS,   38, 'VEL', cc_unit, 'vel_sens', update_vel_sens, fmt=fmt_pct, group='VCA', section='Etc'),
+    _Param('Level',      CC_MASTER_VOL, 84, 'LVL', cc_to_master_vol, 'master_vol', update_master_vol, fmt=fmt_master_vol, stepped=True, group='VCA', section='Etc'),
     # Master FX (global effects). Defaults leave every effect OFF: EQ flat (64),
     # chorus/echo/reverb level 0. Chorus depth/rate and reverb decay/damp/xover
     # carry musical defaults so raising just their Level lands on a usable sound.
@@ -2119,21 +2063,24 @@ PARAMS = [
     # the next distinct value instead of clicking through dead steps (like the
     # wave/filter-type buckets). The near-continuous knobs (levels/depth/times, one
     # display value per detent already) stay smooth so fast sweeps keep their accel.
-    _Param('EQ Low',     CC_EQ_LOW,     64, fmt_eq_db, bipolar=True, stepped=True, group='FX', section='EQ'),
-    _Param('EQ Mid',     CC_EQ_MID,     64, fmt_eq_db, bipolar=True, stepped=True, group='FX', section='EQ'),
-    _Param('EQ High',    CC_EQ_HIGH,    64, fmt_eq_db, bipolar=True, stepped=True, group='FX', section='EQ'),
-    _Param('Cho Level',  CC_CHO_LEVEL,   0, fmt_pct, group='FX', section='Chorus'),
-    _Param('Cho Depth',  CC_CHO_DEPTH,  64, fmt_pct, group='FX', section='Chorus'),
-    _Param('Cho Rate',   CC_CHO_RATE,   44, fmt_chorus_rate, stepped=True, group='FX', section='Chorus'),
-    _Param('Echo Level', CC_ECHO_LEVEL,  0, fmt_pct, group='FX', section='Echo'),
-    _Param('Echo Time',  CC_ECHO_TIME,  43, fmt_echo_time, group='FX', section='Echo'),
-    _Param('Echo Fbk',   CC_ECHO_FBK,   40, fmt_echo_fbk, group='FX', section='Echo'),
-    _Param('Echo Tone',  CC_ECHO_TONE,   0, fmt_echo_tone, group='FX', section='Echo'),
-    _Param('Rev Level',  CC_REV_LEVEL,   0, fmt_pct, group='FX', section='Reverb'),
-    _Param('Rev Decay',  CC_REV_DECAY, 108, fmt_pct, group='FX', section='Reverb'),
-    _Param('Rev Damp',   CC_REV_DAMP,   64, fmt_pct, group='FX', section='Reverb'),
-    _Param('Rev Xover',  CC_REV_XOVER,  99, fmt_hz_khz, stepped=True, group='FX', section='Reverb'),
+    _Param('EQ Low',     CC_EQ_LOW,     64, 'LO',  cc_to_eq_db, (fx, 'eq_l'), update_eq, fmt=fmt_eq_db, bipolar=True, stepped=True, group='FX', section='EQ'),
+    _Param('EQ Mid',     CC_EQ_MID,     64, 'MID', cc_to_eq_db, (fx, 'eq_m'), update_eq, fmt=fmt_eq_db, bipolar=True, stepped=True, group='FX', section='EQ'),
+    _Param('EQ High',    CC_EQ_HIGH,    64, 'HI',  cc_to_eq_db, (fx, 'eq_h'), update_eq, fmt=fmt_eq_db, bipolar=True, stepped=True, group='FX', section='EQ'),
+    _Param('Cho Level',  CC_CHO_LEVEL,   0, 'LEV', cc_unit, (fx, 'cho_level'), update_chorus, fmt=fmt_pct, group='FX', section='Chorus'),
+    _Param('Cho Depth',  CC_CHO_DEPTH,  64, 'DEP', cc_unit, (fx, 'cho_depth'), update_chorus, fmt=fmt_pct, group='FX', section='Chorus'),
+    _Param('Cho Rate',   CC_CHO_RATE,   44, 'HZ',  cc_to_chorus_rate, (fx, 'cho_rate'), update_chorus, fmt=fmt_chorus_rate, stepped=True, group='FX', section='Chorus'),
+    _Param('Echo Level', CC_ECHO_LEVEL,  0, 'LEV', cc_unit, (fx, 'echo_level'), update_echo, fmt=fmt_pct, group='FX', section='Echo'),
+    _Param('Echo Time',  CC_ECHO_TIME,  43, 'TIM', cc_to_echo_time, (fx, 'echo_time'), update_echo, fmt=fmt_echo_time, group='FX', section='Echo'),
+    _Param('Echo Fbk',   CC_ECHO_FBK,   40, 'FBK', cc_to_echo_fbk, (fx, 'echo_fbk'), update_echo, fmt=fmt_echo_fbk, group='FX', section='Echo'),
+    _Param('Echo Tone',  CC_ECHO_TONE,   0, 'TON', cc_to_echo_tone, (fx, 'echo_tone'), update_echo, fmt=fmt_echo_tone, group='FX', section='Echo'),
+    _Param('Rev Level',  CC_REV_LEVEL,   0, 'LEV', cc_unit, (fx, 'rev_level'), update_reverb, fmt=fmt_pct, group='FX', section='Reverb'),
+    _Param('Rev Decay',  CC_REV_DECAY, 108, 'DEC', cc_unit, (fx, 'rev_decay'), update_reverb, fmt=fmt_pct, group='FX', section='Reverb'),
+    _Param('Rev Damp',   CC_REV_DAMP,   64, 'DMP', cc_unit, (fx, 'rev_damp'), update_reverb, fmt=fmt_pct, group='FX', section='Reverb'),
+    _Param('Rev Xover',  CC_REV_XOVER,  99, 'XVR', cc_to_rev_xover, (fx, 'rev_xover'), update_reverb, fmt=fmt_hz_khz, stepped=True, group='FX', section='Reverb'),
 ]
+
+# CC -> row lookup for handle_cc, derived from the table so it can't drift.
+PARAM_BY_CC = {p.cc: p for p in PARAMS}
 
 # Param Control categories, in display order. Each opens that group's knob grid;
 # a param's `group` (above) decides where it lands, so the two never drift, and its
@@ -2142,46 +2089,6 @@ PARAM_GROUPS = ('Osc', 'VCF', 'LFO', 'VCA', 'FX')
 
 # Last raw 0-127 value seen per editable CC, seeded with each param's default.
 param_values = {p.cc: p.default for p in PARAMS}
-
-# Ultra-short labels for the Param Control knob grid cells. The header shows each
-# param's FULL label; the cells use these tight abbreviations. One dict (vs. touching
-# every _Param) keeps it in one place.
-# HARD LIMIT 4 CHARS: the 8px font x 4 = 32px is exactly one 32px cell (see "WHY 4
-# COLUMNS IS TIGHT" at GRID_COLS). A 5-char label does not error -- it silently spills
-# into the neighbouring cell.
-# PREFER 3: at 4 chars the glyphs ink x0+1..x0+30 of a 32px cell, so neighbouring
-# labels end up 2px apart and fuse into a wall ("EQLOEQMDEQHICHLV" -- measured, not
-# guessed: rendered with the board's own font at 128x128). 3 chars ink 24px and leave
-# ~4px of air each side, which reads. Section headers are what make 3 affordable, by
-# carrying the group prefix the label would otherwise need. Only LFO is still on 4.
-# Labels repeat freely (ATK/LEV/VEL/SHP...) -- that is BY DESIGN, not a collision: the
-# section header above the cell says which ADSR / which effect's level it is.
-GRID_LABELS = {
-    # Osc A/B deliberately share labels -- the section header (see _Param.section)
-    # says which oscillator, so the cell doesn't have to, and 3 chars reads where the
-    # old 4-char APIT/AWAV/... did not.
-    CC_OSC_A_PITCH: 'PIT', CC_OSC_A_WAVE: 'WAV', CC_OSC_A_DUTY: 'DTY', CC_OSC_A_LEVEL: 'LVL',
-    CC_OSC_B_PITCH: 'PIT', CC_OSC_B_WAVE: 'WAV', CC_OSC_B_DUTY: 'DTY', CC_OSC_B_LEVEL: 'LVL',
-    CC_FLT_CUTOFF: 'CUT', CC_FLT_RES: 'RES', CC_FLT_ENV_AMT: 'ENV', CC_FLT_TYPE: 'TYP',
-    CC_VCF_ATK: 'ATK', CC_VCF_DEC: 'DEC', CC_VCF_SUS: 'SUS', CC_VCF_REL: 'REL',
-    CC_FLT_ENV_SHAPE: 'SHP', CC_KEY_SCALE: 'KBD', CC_VEL_FILT: 'VEL',
-    # LFO: the group prefixes are gone (LHZ/LWAV/LFLT -> HZ/SHP/FLT) now that the
-    # WAV and DEST headers carry the context. HZ repeats on the Osc page under DRIFT
-    # and SHP repeats under VCF/VCA ADSR -- different pages, and the header says which.
-    CC_LFO_FREQ: 'HZ', CC_LFO_WAVE: 'SHP',
-    CC_LFO_PITCH: 'VIB', CC_LFO_PWM: 'PWM', CC_LFO_FILT: 'FLT',
-    CC_LFO_AMP_A: 'LVA', CC_LFO_AMP_B: 'LVB',
-    CC_DRIFT_DEPTH: 'AMT', CC_DRIFT_RATE: 'HZ',
-    CC_VCA_ATK: 'ATK', CC_VCA_DEC: 'DEC', CC_VCA_SUS: 'SUS', CC_VCA_REL: 'REL',
-    CC_AMP_ENV_SHAPE: 'SHP', CC_VEL_SENS: 'VEL', CC_MASTER_VOL: 'LVL',
-    # FX: every label drops its group prefix because the section header now carries it
-    # -- EQLO/EQMD/EQHI become LO/MID/HI, etc. LEV appears in three sections (and twice
-    # on FX page 1, under CHORUS and ECHO); that is the point, not a collision.
-    CC_EQ_LOW: 'LO', CC_EQ_MID: 'MID', CC_EQ_HIGH: 'HI',
-    CC_CHO_LEVEL: 'LEV', CC_CHO_DEPTH: 'DEP', CC_CHO_RATE: 'HZ',
-    CC_ECHO_LEVEL: 'LEV', CC_ECHO_TIME: 'TIM', CC_ECHO_FBK: 'FBK', CC_ECHO_TONE: 'TON',
-    CC_REV_LEVEL: 'LEV', CC_REV_DECAY: 'DEC', CC_REV_DAMP: 'DMP', CC_REV_XOVER: 'XVR',
-}
 
 # Header (full-name) overrides for params whose _Param.label is a poor standalone
 # name once flattened out of their sub-menu -- the ADSR envelopes (label 'A'/'D'/
@@ -3191,7 +3098,7 @@ class SketchMenu:
                         continue
                     st = ('selected' if cur.editing else 'cursor') if gi == cur.idx else 'none'
                     v = int(param_values.get(p.cc, p.default))
-                    _draw_grid_cell(d, cx, cy, GRID_LABELS.get(p.cc, p.label[:4].upper()),
+                    _draw_grid_cell(d, cx, cy, p.grid,
                                     clamp(v, 0, 127) / 127.0, p.bipolar, st)
                 _draw_grid_pages(d, page, cur.npages)
                 cur.full = False
@@ -3231,7 +3138,7 @@ class SketchMenu:
                     p = cur.params[gi]
                     st = ('selected' if cur.editing else 'cursor') if gi == cur.idx else 'none'
                     v = int(param_values.get(p.cc, p.default))
-                    _draw_grid_cell(d, cx, cy, GRID_LABELS.get(p.cc, p.label[:4].upper()),
+                    _draw_grid_cell(d, cx, cy, p.grid,
                                     clamp(v, 0, 127) / 127.0, p.bipolar, st)
                     # Push exactly the cell we redrew -- its rect comes from the layout,
                     # so section headers above it shift the window automatically and

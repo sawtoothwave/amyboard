@@ -86,26 +86,33 @@ class P:
     # Mirrors the sketch's _Param closely enough for _grid_layout. If _Param grows a
     # field that _grid_layout reads, add it here too -- the parser below is regex, not
     # an import, so a new field fails loudly rather than defaulting.
-    def __init__(s, label, cc, group, section, bipolar, default, newrow):
+    def __init__(s, label, cc, group, section, bipolar, default, newrow, grid):
         s.label, s.cc, s.group, s.section = label, cc, group, section
-        s.bipolar, s.default, s.newrow = bipolar, default, newrow
+        s.bipolar, s.default, s.newrow, s.grid = bipolar, default, newrow, grid
 
 
 body = src[src.index('PARAMS = ['):]
 body = body[:body.index('\n]')]
 params = []
-for m in re.finditer(r"_Param\(\s*'([^']*)'\s*,\s*(CC_[A-Z0-9_]+)\s*,\s*(\d+)(.*?)\),\s*$",
+# Positional columns: label, cc, default, grid (then to_val/store/update, which the
+# preview doesn't need -- they land in the keyword tail and are ignored).
+for m in re.finditer(r"_Param\(\s*'([^']*)'\s*,\s*(CC_[A-Z0-9_]+)\s*,\s*(\d+)\s*,"
+                     r"\s*'([^']*)'(.*?)\),\s*$",
                      body, re.M):
-    tail = m.group(4)
+    tail = m.group(5)
     g = re.search(r"group='([^']*)'", tail)
     sec = re.search(r"section='([^']*)'", tail)
     params.append(P(m.group(1), m.group(2), g.group(1) if g else '',
                     sec.group(1) if sec else '', 'bipolar=True' in tail, int(m.group(3)),
-                    'newrow=True' in tail))
+                    'newrow=True' in tail, m.group(4)))
 
-gl = src[src.index('GRID_LABELS = {'):]
-gl = gl[:gl.index('\n}')]
-LABELS = dict(re.findall(r"(CC_[A-Z0-9_]+):\s*'([^']*)'", gl))
+# A row the regex fails to match would silently VANISH from the preview (that is how
+# regex parsing fails); refuse to render from a partial table instead.
+n_rows = body.count('_Param(')
+if len(params) != n_rows:
+    sys.exit('grid_preview: parsed %d of %d _Param rows -- the PARAMS regex no '
+             'longer matches the row shape; fix the parser before trusting a PNG'
+             % (len(params), n_rows))
 # What the top-right readout shows for each group's first (focused) param, i.e. what
 # that param's fmt would produce at its default. Hand-kept: the preview parses PARAMS
 # with regexes and cannot call the sketch's fmt_* functions.
@@ -130,7 +137,7 @@ def render(group, cursor=0, editing_idx=None, page=0):
             st = 'cursor'
         if editing_idx is not None and i == editing_idx:
             st = 'selected'
-        ns['_draw_grid_cell'](fb, cx, cy, LABELS.get(p.cc, p.label[:4].upper()),
+        ns['_draw_grid_cell'](fb, cx, cy, p.grid,
                               p.default / 127.0, p.bipolar, st)
     ns['_draw_grid_pages'](fb, page, npages)
     return fb.image(), npages

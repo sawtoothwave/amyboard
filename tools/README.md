@@ -70,9 +70,11 @@ already caught a spacing bug that a clean-looking calculation missed.
 - **NOT faithful:** the caller. It reimplements `_render_grid`'s drawing sequence,
   so it cannot catch bugs in `_render_grid` itself. That is `arity_check.py`'s job.
 
-It parses `PARAMS` and `GRID_LABELS` out of the source with regexes rather than
-importing the sketch (which needs `amy`/`amyboard`). If a `_Param(...)` line grows a
-new shape, the parser may need a nudge.
+It parses the `PARAMS` table out of the source with regexes rather than importing
+the sketch (which needs `amy`/`amyboard`); the grid label is the 4th positional
+column of each `_Param(...)` row. If a row grows a new shape, the parser may need
+a nudge — it refuses to run (rather than silently dropping rows) when the regex
+matches fewer rows than the table holds.
 
 ## `grid_sim.py` — run the real menu code on the host
 
@@ -92,7 +94,10 @@ reasoning alone.
 Currently checks that an external CC marks the right cell stale, that the cell is
 actually pushed, that the 19.5ms header band is skipped when the value has not
 changed, that a CC flood is bounded per tick and drains rather than being dropped,
-and that the worst-case frame stays inside the ~69ms `loop()` tick.
+that every `PARAMS` row drives its full map→store→send pipeline through `handle_cc`
+without raising (the table calls `to_val`/`update` through variables, which
+`arity_check.py` cannot see — this is the arity net for those), and that the
+worst-case frame stays inside the ~69ms `loop()` tick.
 
 - **Proves:** state-machine behaviour — which cells go stale, what gets pushed, on
   which tick.
