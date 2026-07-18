@@ -134,7 +134,7 @@ def tick(menu, lvl):
     """
     menu._edit_last_render = 0
     menu.dirty = True
-    menu._render_grid(lvl)
+    lvl.render(menu)
 
 
 def cells_pushed():

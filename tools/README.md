@@ -21,7 +21,7 @@ Exits non-zero on a mismatch.
 
 It exists because of a real bug: `_draw_grid_header(d, disp)` grew a `group`
 argument and its two call sites were left behind. Every grid render raised
-`TypeError`, which `_render_grid`'s `except Exception` swallowed, so the screen
+`TypeError`, which the grid render's `except Exception` swallowed, so the screen
 just went blank. Nothing else catches this class:
 
 - `py_compile` passes — a wrong-arity call is valid *syntax*.
@@ -67,8 +67,9 @@ already caught a spacing bug that a clean-looking calculation missed.
   `GRID_C_SECT_RUL` at level 4/16, `GRID_C_PAGE_OFF` at level 1/16 — will look
   more marginal in the mock than it is. Don't brighten a constant because the PNG
   looks faint; check the panel.
-- **NOT faithful:** the caller. It reimplements `_render_grid`'s drawing sequence,
-  so it cannot catch bugs in `_render_grid` itself. That is `arity_check.py`'s job.
+- **NOT faithful:** the caller. It reimplements `_GridLevel.render`'s drawing
+  sequence, so it cannot catch bugs in `_GridLevel.render` itself. That is
+  `grid_sim.py`'s / `arity_check.py`'s job.
 
 It parses the `PARAMS` table out of the source with regexes rather than importing
 the sketch (which needs `amy`/`amyboard`); the grid label is the 4th positional
