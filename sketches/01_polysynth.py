@@ -423,41 +423,34 @@ REV_XOVER_MAX_HZ    = 8000   #                               at CC 127 (log curv
 #       12-row band ~19ms. DISPLAY_MAX_ROWS_PER_REFRESH caps rows-per-refresh so
 #       a busy screen can never hold the bus long enough to delay a note-off.
 # ---------------------------------------------------------------------------
-DISPLAY_MAX_LINES   = 6       # rows of CCs shown at once (newest at bottom)
+DISPLAY_MAX_ENTRIES = 4       # parameters shown at once. Each is a 2-line group
+                              # (name / CC + value) with a spacer, so this is params,
+                              # not text rows -- see the geometry below.
 DISPLAY_REFRESH_MS  = 100     # min gap between refreshes. This is a CEILING of ~10 fps,
                               # not the rate you get: loop() only runs every ~69 ms
                               # (measured), so the gate passes every 2nd tick and the
                               # real refresh rate is ~139 ms / ~7 fps. Any value in
                               # 0..69 would be inert (the gate could never fire).
-DISPLAY_MAX_ROWS_PER_REFRESH = 2  # cap rows blitted per refresh so a busy screen
+DISPLAY_MAX_ROWS_PER_REFRESH = 2  # cap TEXT rows blitted per refresh so a busy screen
                                   # can't hold the I2C bus long enough to delay
                                   # note-offs; extra changed rows wait for the
                                   # next refresh (catches up within a few frames)
 CC_EXPIRE_MS        = 6000    # drop a CC from the list this long after last touch
 BOOT_CLEAR_MS       = 3000    # show the firmware boot banner this long, then wipe
-DISPLAY_LINE_H      = 16      # vertical pixels per row
-DISPLAY_TOP_Y       = 4       # y of the first row
+# CC Monitor geometry. Each parameter is a GROUP of two 8px text lines at a 12px
+# pitch (name, then CC + value). The groups are spread down the 128px panel: their
+# text is 4 * 24 = 96px, and the leftover 32px is divided as evenly as integer
+# pixels allow across the 3 gaps BETWEEN them (flush to the top and bottom edges,
+# no outer margin -> gaps of 10/11/11 px). DISPLAY_ENTRY_Y holds each group's top
+# y; slots are FIXED (not reflowed by how many CCs are active), so entries fill
+# from the top and a new/expiring CC never shifts the others sideways in the diff.
+DISPLAY_LINE_H      = 12      # vertical pixels per TEXT line (8px glyph + 4px lead)
+DISPLAY_ENTRY_H     = 24      # a parameter group's two 12px text lines (gap is added between)
+DISPLAY_ENTRY_Y     = tuple(i * (128 - DISPLAY_ENTRY_H) // (DISPLAY_MAX_ENTRIES - 1)
+                            for i in range(DISPLAY_MAX_ENTRIES))   # (0, 34, 69, 104)
 DISPLAY_TEXT_COLOR  = 255     # full-brightness grayscale
 DISPLAY_WIDTH       = 128     # panel width in pixels
-
-# Short labels (<=7 chars) for the frozen CC map; unknown CCs fall back to "CC".
-# Used by the CC Monitor display mode.
-CC_LABELS = {
-    CC_OSC_A_PITCH: 'A PIT',  CC_OSC_A_WAVE: 'A WAV',
-    CC_OSC_A_DUTY:  'A DTY',  CC_OSC_A_LEVEL: 'A LVL',
-    CC_OSC_B_PITCH: 'B PIT',  CC_OSC_B_WAVE: 'B WAV',
-    CC_OSC_B_DUTY:  'B DTY',  CC_OSC_B_LEVEL: 'B LVL',
-    CC_FLT_ENV_AMT: 'F ENV',  CC_FLT_TYPE: 'F TYP',  CC_KEY_SCALE: 'KEY',
-    CC_VCF_ATK: 'VCF A',  CC_VCF_DEC: 'VCF D',
-    CC_VCF_SUS: 'VCF S',  CC_VCF_REL: 'VCF R',
-    CC_VCA_ATK: 'VCA A',  CC_VCA_DEC: 'VCA D',
-    CC_VCA_SUS: 'VCA S',  CC_VCA_REL: 'VCA R',
-    CC_FLT_RES: 'RES',    CC_FLT_CUTOFF: 'CUTOFF',
-    CC_LFO_FREQ: 'LFO HZ',  CC_LFO_PITCH: 'VIB',   CC_MODWHEEL: 'MOD WH',
-    CC_LFO_WAVE: 'LFO WV',  CC_LFO_PWM: 'LFO PW',  CC_LFO_FILT: 'LFO FL',
-    CC_LFO_AMP_A: 'A TREM', CC_LFO_AMP_B: 'B TREM',
-    CC_DRIFT_DEPTH: 'DRIFT', CC_DRIFT_RATE: 'DRF HZ',
-}
+DISPLAY_CHAR_W      = 8       # font cell width, for right-aligning the value column
 
 # Shared display state (owned by the display dispatcher, not by any one mode).
 DISPLAY_OK = False
@@ -1543,10 +1536,28 @@ class DisplayMode:
         pass
 
 
+# Group tag for a parameter's readable monitor name. VCF/VCA read nicer as
+# Filt/Amp; other groups already appear in the label itself.
+_MON_GROUP = {'VCF': 'Filt', 'VCA': 'Amp'}
+
+
+def _mon_name(p):
+    # The parameter's readable name for the flat CC monitor, from its PARAMS row.
+    # Usually just the editor label; but the short section-relative ones (the ADSR
+    # A/D/S/R, Shape, Level) would be ambiguous without the grid's section header,
+    # so they get a group prefix -- label 'A' in group VCF -> 'Filt A'.
+    if len(p.label) > 5:
+        return p.label
+    return '%s %s' % (_MON_GROUP.get(p.group, p.group), p.label)
+
+
 class CCMonitorMode(DisplayMode):
-    # Live CC monitor: shows the most-recently-touched CCs and their raw 0-127
-    # values, newest at the bottom, each expiring CC_EXPIRE_MS after its last
-    # touch.
+    # Live CC monitor: the most-recently-touched CCs, newest at the bottom, each
+    # expiring CC_EXPIRE_MS after its last touch. Each is a two-line group -- the
+    # parameter's name, then "CC <n>" with its value (the friendly, formatted value
+    # the editor shows when the parameter has one, else the raw 0-127) -- drawn from
+    # the one PARAMS table, so effects and everything else are labelled and nothing
+    # can drift. An unmapped CC (e.g. the raw mod wheel, CC 1) shows its number.
     name = 'CC Monitor'
 
     def __init__(self):
@@ -1576,12 +1587,9 @@ class CCMonitorMode(DisplayMode):
         self.blanked = True
         _display_last_render = time.ticks_ms()
 
-    def _label(self, cc):
-        return CC_LABELS.get(cc, 'CC')
-
-    def _active_lines(self, now):
+    def _active_entries(self, now):
         # Expire stale entries (preserving order), drop the oldest from the top
-        # if we exceed the row budget, and return (cc, value) pairs oldest-first
+        # if we exceed the group budget, and return (cc, value) pairs oldest-first
         # so the newest sits at the bottom and survivors shift up as items above
         # them fade.
         i = 0
@@ -1590,54 +1598,91 @@ class CCMonitorMode(DisplayMode):
                 self.entries.pop(i)
             else:
                 i += 1
-        while len(self.entries) > DISPLAY_MAX_LINES:
+        while len(self.entries) > DISPLAY_MAX_ENTRIES:
             self.entries.pop(0)
         return [(e[0], e[1]) for e in self.entries]
 
+    def _frame(self, entries):
+        # The target TEXT rows for the active entries -- two per group, positioned
+        # by the geometry (group top at DISPLAY_ENTRY_Y[i], its two lines at
+        # +0 / +DISPLAY_LINE_H). Each row is a self-describing tuple so a frame can
+        # be diffed row-by-row against the last one:
+        #   ('n', y, name)             -- the parameter name line
+        #   ('v', y, cc_str, value)    -- the "CC <n>" (left) + value (right) line
+        # Content comes from the PARAMS table via PARAM_BY_CC; an unmapped CC falls
+        # back to its number with the raw value.
+        rows = []
+        for i, (cc, v) in enumerate(entries):
+            ey = DISPLAY_ENTRY_Y[i]
+            p = PARAM_BY_CC.get(cc)
+            if p is None:
+                rows.append(('n', ey, 'CC %d' % cc))
+                rows.append(('v', ey + DISPLAY_LINE_H, '', str(v)))
+            else:
+                rows.append(('n', ey, _mon_name(p)))
+                rows.append(('v', ey + DISPLAY_LINE_H, 'CC %d' % cc, _grid_disp(p, v)))
+        return rows
+
+    def _draw_row(self, d, row):
+        # Clear the row's 12px band, then draw it: a name line left-aligned, or a
+        # value line with "CC <n>" left and the value right-aligned to the edge.
+        y = row[1]
+        d.fill_rect(0, y, DISPLAY_WIDTH, DISPLAY_LINE_H, 0)
+        if row[0] == 'n':
+            d.text(row[2], 0, y, DISPLAY_TEXT_COLOR)
+        else:
+            left, right = row[2], row[3]
+            d.text(left, 0, y, DISPLAY_TEXT_COLOR)
+            d.text(right, DISPLAY_WIDTH - len(right) * DISPLAY_CHAR_W, y,
+                   DISPLAY_TEXT_COLOR)
+
     def render(self, now):
-        # Repaint only the rows that differ from the last frame, capped at
+        # Repaint only the TEXT rows that differ from the last frame, capped at
         # DISPLAY_MAX_ROWS_PER_REFRESH per call, so the I2C bus (and thus the
-        # audio) is held as briefly as possible.
+        # audio) is held as briefly as possible. The common case -- re-touching a
+        # CC already listed -- changes only that group's value line, so one row
+        # pushes; a fresh CC or an expiry shift redraws more, bounded and drained
+        # over the next few refreshes.
         d = amyboard.display
-        lines = self._active_lines(now)
+        frame = self._frame(self._active_entries(now))
 
         # Idle: no active CCs -> clear just the rows we were using, once.
-        if not lines:
+        if not frame:
             if self.blanked:
                 return
             if self.prev:
-                span = DISPLAY_TOP_Y + len(self.prev) * DISPLAY_LINE_H
-                d.fill_rect(0, DISPLAY_TOP_Y, DISPLAY_WIDTH,
-                            len(self.prev) * DISPLAY_LINE_H, 0)
-                if not _push_rows(DISPLAY_TOP_Y, span - 1):
+                top = self.prev[0][1]
+                bot = self.prev[-1][1] + DISPLAY_LINE_H
+                d.fill_rect(0, top, DISPLAY_WIDTH, bot - top, 0)
+                if not _push_rows(top, bot - 1):
                     amyboard.display_refresh()
             self.blanked = True
             self.prev = []
             return
 
         # Nothing visible changed since last frame.
-        if lines == self.prev:
+        if frame == self.prev:
             return
 
-        rows = max(len(lines), len(self.prev))
+        rows = max(len(frame), len(self.prev))
         # Track which rows have been committed so deferred ones retry next call.
         new_prev = list(self.prev)
-        if len(new_prev) < len(lines):
-            new_prev += [None] * (len(lines) - len(new_prev))
+        if len(new_prev) < len(frame):
+            new_prev += [None] * (len(frame) - len(new_prev))
         pushed = 0
         for i in range(rows):
             if pushed >= DISPLAY_MAX_ROWS_PER_REFRESH:
                 break                          # defer the rest to the next refresh
-            new = lines[i] if i < len(lines) else None
+            new = frame[i] if i < len(frame) else None
             old = self.prev[i] if i < len(self.prev) else None
             if new == old:
                 continue
-            y = DISPLAY_TOP_Y + i * DISPLAY_LINE_H
-            d.fill_rect(0, y, DISPLAY_WIDTH, DISPLAY_LINE_H, 0)
             if new is not None:
-                cc, v = new
-                d.text('%-3d %-6s %3d' % (cc, self._label(cc), v),
-                       0, y, DISPLAY_TEXT_COLOR)
+                self._draw_row(d, new)
+                y = new[1]
+            else:
+                y = old[1]                      # a removed row: clear its old band
+                d.fill_rect(0, y, DISPLAY_WIDTH, DISPLAY_LINE_H, 0)
             # Push just this one row, so non-contiguous changes never drag
             # unchanged rows along (the bounding-span trap that let a busy
             # screen blit the whole frame and stall audio/MIDI).
@@ -1646,7 +1691,7 @@ class CCMonitorMode(DisplayMode):
             new_prev[i] = new
             pushed += 1
         # Drop trailing rows that were removed and have now been cleared.
-        while len(new_prev) > len(lines) and new_prev[-1] is None:
+        while len(new_prev) > len(frame) and new_prev[-1] is None:
             new_prev.pop()
         self.prev = new_prev
         self.blanked = False
