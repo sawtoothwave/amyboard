@@ -24,6 +24,14 @@
 
 ## Safety Rules (Workspace Hygiene)
 
+- **NEVER trigger audio on the board without waiting for the user's explicit
+  go-ahead.** Before anything that makes sound — tone/liveness tests, trigger
+  sequences, A/B comparisons, or a "quick diagnostic beep" — describe exactly what
+  will play, then STOP and wait for the user to say go in a **separate message**.
+  Do not announce and fire in the same turn. There is **no exception** for "it's
+  only a diagnostic" or "we're mid-debug"; an active audio-debugging session is
+  when the user's speakers are most live. (Requested 2026-07-18, re-violated and
+  re-affirmed 2026-07-19.)
 - Treat changes you did not author as intentional collaborator work.
 - Do not revert or remove others' changes without explicit user approval.
 - Do not use destructive git commands.
