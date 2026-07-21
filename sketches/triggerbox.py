@@ -253,6 +253,15 @@ _max_heap = 0                  # best-case free MP heap, captured once at boot (
                                #   heap, so this stays ~constant -- it's the ceiling
                                #   on how big a single file can EVER be to load.
 
+# PSRAM sample-space budget. gc.mem_free() reports only the MicroPython heap, never
+# sample RAM, so we can't ask the firmware how much PSRAM is left -- we keep our own
+# running tally (slot_bytes) against this estimate instead. The board is N16R8 (8 MB
+# PSRAM) with ~4 MB free for samples after the fixed 2 MB MP heap; we budget a
+# conservative 3.5 MB so the "wont fit now" warning fires a little EARLY rather than
+# letting a load fail. A slightly-off estimate is safe either way: an over-full load
+# still fails gracefully with a FAILED toast, never a crash.
+PSRAM_SAMPLE_BUDGET = 3_500_000
+
 # Base MIDI note = slot 0. Default 48 = C2 in the convention where middle C
 # (60) is C3; slots then run C2, C#2, D2, D#2, E2, F2. Controllers disagree
 # about octave numbering, so this is menu-selectable -- if the box appears dead
@@ -459,6 +468,18 @@ def est_load_bytes(info):
         return 0
 
 
+def est_psram_bytes(info):
+    # Bytes the sample will occupy in PSRAM once loaded: MONO PCM (AMY keeps only
+    # the left channel), so frames x bytes-per-sample regardless of channel count.
+    # This is the figure the PSRAM budget / '~' warning compares against -- distinct
+    # from est_load_bytes (the full stereo file size that must fit the read heap).
+    try:
+        channels, samplerate, bits, frames = info
+        return frames * (bits // 8)
+    except Exception:
+        return 0
+
+
 def too_big_ever(info):
     # True if this file could NEVER load, even on a freshly booted board with
     # nothing else resident: its raw size needs more MP heap (with the same safety
@@ -580,6 +601,22 @@ def _left_channel(pcm):
 slot_paths = [None] * NUM_SLOTS
 slot_info = [None] * NUM_SLOTS      # cached _wav_info per loaded slot
 slot_hits = [0] * NUM_SLOTS         # ticks_ms of the last trigger (for the flash)
+slot_bytes = [0] * NUM_SLOTS        # PSRAM bytes the loaded sample occupies (mono
+                                    #   PCM). Summed as our own PSRAM tally, since
+                                    #   gc.mem_free() can't see sample RAM.
+
+
+def psram_used():
+    return sum(slot_bytes)
+
+
+def psram_free(exclude_slot=None):
+    # Estimated PSRAM sample space left. exclude_slot credits back a pad we're
+    # about to overwrite (its old sample is unloaded before the new one loads).
+    used = psram_used()
+    if exclude_slot is not None:
+        used -= slot_bytes[exclude_slot]
+    return PSRAM_SAMPLE_BUDGET - used
 
 
 def slot_note(i):
@@ -609,6 +646,7 @@ def unload_slot(i):
         pass
     slot_paths[i] = None
     slot_info[i] = None
+    slot_bytes[i] = 0
 
 
 def load_slot(i, path):
@@ -649,6 +687,14 @@ def load_slot(i, path):
         pcm = _left_channel(pcm)
     data = None                          # free the raw file bytes before the copy
     gc.collect()                         #   to PSRAM; the mono `pcm` is all we need
+    # PSRAM budget guard: the mono PCM is what actually lands in sample RAM. If it
+    # won't fit the remaining budget (crediting back this pad's current sample,
+    # which we're about to unload), refuse with 'FULL' -- the clean version of the
+    # 'ERR' load_sample_bytes would otherwise throw. The browser's '~' marker warns
+    # before you get here; this is the backstop.
+    pcm_len = len(pcm)
+    if pcm_len > psram_free(exclude_slot=i):
+        return 'FULL'
     unload_slot(i)
     try:
         amy.load_sample_bytes(pcm, preset=PRESET_BASE + i,
@@ -658,6 +704,7 @@ def load_slot(i, path):
         return 'ERR'
     slot_paths[i] = path
     slot_info[i] = (channels, sr, bits, frames)
+    slot_bytes[i] = pcm_len
     rebuild_engine()
     return None
 
@@ -991,17 +1038,28 @@ def clamp(value, lo, hi):
     return lo if value < lo else (hi if value > hi else value)
 
 
+# Page-indicator brightness, matching polysynth's shared grid/menu marks so the two
+# sketches read identically. The panel is 4-bit (top nibble): the current page is a
+# full-brightness dash, every other page a level-1 dot -- the dimmest still-visible
+# step (below ~16 is fully off, which would hide the "another page exists" cue).
+GRID_C_HDR_VAL  = 255    # active page: bright dash
+GRID_C_PAGE_OFF = 20     # inactive page: dim 2x2 dot
+
+
 def _draw_page_dots(d, y, page, npages):
-    # Page indicator: a bright dash for the current page, dim dots for the rest.
-    if npages <= 1:
-        return
-    w = npages * 6
-    x = DISPLAY_WIDTH - w
+    # THE page indicator, ported verbatim from polysynth so the two read the same:
+    # current page = a bright full-width DASH, every other page = a dim 2x2 DOT,
+    # laid out as a CENTRED row at `y`. Callers guard npages < 2.
+    w, h, gap = 5, 2, 4
+    off_w = 2               # inactive: a dot, not a short dash
+    span = npages * w + (npages - 1) * gap
+    x = (DISPLAY_WIDTH - span) // 2
     for i in range(npages):
         if i == page:
-            d.fill_rect(x + i * 6, y, 5, 2, 255)
+            d.fill_rect(x, y, w, h, GRID_C_HDR_VAL)
         else:
-            d.fill_rect(x + i * 6 + 2, y, 2, 2, 90)
+            d.fill_rect(x + (w - off_w) // 2, y, off_w, h, GRID_C_PAGE_OFF)
+        x += w + gap
 
 
 def _draw_menu_row(d, y, kind, payload):
@@ -1028,13 +1086,20 @@ class _MenuLevel:
     # A scrollable list of (label, callback). The whole menu -- root, slot list,
     # folder browser, note picker -- is built from this one type; a level's
     # identity is entirely in the items it was constructed with.
-    __slots__ = ('title', 'items', 'idx', 'start')
+    #
+    # _shown_idx / _shown_start remember what this level last PAINTED, so a scroll
+    # within a page can repaint just the two rows whose highlight changed instead
+    # of the whole screen. A full-screen flush is 11 bands (~760 ms at one band per
+    # ~69 ms tick) -- the dominant term in menu lag; a two-row flush is ~2 bands.
+    __slots__ = ('title', 'items', 'idx', 'start', '_shown_idx', '_shown_start')
 
     def __init__(self, title, items):
         self.title = title
         self.items = items if items else [('(empty)', None)]
         self.idx = 0
         self.start = 0
+        self._shown_idx = -1     # nothing painted yet -> first render is full
+        self._shown_start = -1
 
     def handle(self, menu, delta, click, back):
         if back:                 # hold: pop one level (may close the menu)
@@ -1049,6 +1114,17 @@ class _MenuLevel:
             if cb:
                 cb()
                 menu.dirty = True
+
+    def _row_y(self, row):
+        return MENU_TOP_Y + row * MENU_LINE_H
+
+    def _paint_row(self, d, i, start, n):
+        # Draw list row `i` into the framebuffer at its on-screen slot. Clears the
+        # row first so a shorter label can't leave stale pixels behind.
+        y = self._row_y(i - start)
+        d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
+        if i < n:
+            _draw_menu_row(d, y, 'i', (i == self.idx, self.items[i][0]))
 
     def render(self, menu):
         if not menu.dirty:
@@ -1070,6 +1146,22 @@ class _MenuLevel:
                 total_pages = (n + MENU_VISIBLE - 1) // MENU_VISIBLE
             self.start = start
 
+            # Incremental path: same page as last paint and only the cursor moved.
+            # Repaint just the old + new cursor rows and flush that tight band; the
+            # title, page dots and untouched rows already stand in the framebuffer.
+            if (start == self._shown_start and self._shown_idx >= 0
+                    and self._shown_idx != self.idx):
+                y_old = self._row_y(self._shown_idx - start)
+                y_new = self._row_y(self.idx - start)
+                self._paint_row(d, self._shown_idx, start, n)
+                self._paint_row(d, self.idx, start, n)
+                self._shown_idx = self.idx
+                _begin_flush(min(y_old, y_new),
+                             max(y_old, y_new) + MENU_LINE_H - 1)
+                return
+
+            # Full repaint: first paint of this level, a page crossing, or a
+            # non-scroll change (returned from a toast/submenu).
             d.fill(0)
             _draw_menu_row(d, 2, 't', (self.title, ''))
             for row in range(MENU_VISIBLE):
@@ -1081,6 +1173,8 @@ class _MenuLevel:
                 _draw_menu_row(d, y, 'i', (i == self.idx, self.items[i][0]))
             if total_pages > 1:
                 _draw_menu_row(d, MENU_PAGE_Y, 'q', (total_pages, page))
+            self._shown_idx = self.idx
+            self._shown_start = start
             _begin_flush(0, 127)
         except Exception as e:
             _render_fault('_MenuLevel.render', e)
@@ -1175,6 +1269,10 @@ class SketchMenu:
             items.append(('[Clear slot]', self._clear_opener()))
         for name in folders:
             items.append(('/' + name, self._dir_opener(path + '/' + name)))
+        # PSRAM left for THIS slot, crediting back whatever it holds now (loading a
+        # pad unloads its old sample first). Drives the '~' "wont fit right now"
+        # marker below.
+        avail = psram_free(exclude_slot=self._browse_slot)
         for name, info, problem in wavs:
             if problem:
                 # Show WHY it's unusable, TAG FIRST so the reason survives the row's
@@ -1187,6 +1285,12 @@ class SketchMenu:
                 # make it unclickable, but keep it visible so a file that's simply
                 # too big doesn't read as "missing from the card".
                 items.append(('[x] %s' % name, None))
+            elif est_psram_bytes(info) > avail:
+                # Fits on an empty board but not in the PSRAM left RIGHT NOW: mark
+                # '~' as a soft warning. Still CLICKABLE -- freeing a pad may make
+                # room, and if it truly won't fit the load fails cleanly ('FULL').
+                items.append(('~%s %.2fs' % (name, sample_secs(info)),
+                              self._wav_opener(path + '/' + name)))
             else:
                 items.append(('%s %.2fs' % (name, sample_secs(info)),
                               self._wav_opener(path + '/' + name)))
