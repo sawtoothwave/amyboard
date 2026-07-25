@@ -593,6 +593,14 @@ def _left_channel(pcm):
     return b''.join(pcm[k:k + 2] for k in range(0, len(pcm) - 3, 4))
 
 
+def _reverse_pcm(pcm):
+    # Reverse 16-bit mono PCM in place (2 bytes/sample, low-endian preserved). AMY
+    # has no reverse-playback flag, so a reversed slot is baked at load time; that
+    # is why toggling Reverse re-loads the sample rather than updating live. Per-
+    # sample Python loop, but load already blocks, so the extra pass is fine.
+    return b''.join(pcm[k:k + 2] for k in range(len(pcm) - 2, -1, -2))
+
+
 # ---------------------------------------------------------------------------
 # Slots. slot_paths[i] is the sample file loaded into slot i (or None). Loading
 # is the only expensive operation in this sketch, so it is deliberately never
@@ -604,6 +612,128 @@ slot_info = [None] * NUM_SLOTS      # cached _wav_info per loaded slot
 slot_bytes = [0] * NUM_SLOTS        # PSRAM bytes the loaded sample occupies (mono
                                     #   PCM). Summed as our own PSRAM tally, since
                                     #   gc.mem_free() can't see sample RAM.
+
+
+# ---------------------------------------------------------------------------
+# Per-slot parameters. Every slot carries a small dict of playback settings,
+# defaulting to exactly the old fixed behaviour (unity level, native pitch, centre
+# pan, ring-out, forward, one-shot) so an un-touched box sounds identical to
+# before. All are cheap: a few numbers per slot, persisted in the settings JSON
+# and merged against the defaults on load, so a save file written before a param
+# existed still opens (the missing key just takes its default).
+#
+# ONE spec table drives everything (like polysynth's PARAMS): the engine wiring,
+# the editor UI, value clamping, and the on-screen formatting all read from here,
+# so a param is defined in exactly one place. Each entry is
+#   (key, label, default, lo, hi, step, formatter)
+# where bool params (default True/False) are edited as an on/off toggle and lo/hi/
+# step are ignored. `label` is padded to 7 cols in the editor, so keep it short.
+# ---------------------------------------------------------------------------
+def _fmt_pan(v):
+    # -100..+100 stored -> 'C' centre, 'L<n>' / 'R<n>' off to a side.
+    if v == 0:
+        return 'C'
+    return ('R%d' if v > 0 else 'L%d') % abs(v)
+
+
+def _fmt_decay(v):
+    # 0 = ring the whole sample out (no decay); otherwise a fade time.
+    if v <= 0:
+        return 'full'
+    if v >= 1000:
+        return '%.1fs' % (v / 1000.0)
+    return '%dms' % v
+
+
+def _fmt_onoff(v):
+    return 'on' if v else 'off'
+
+
+PARAM_SPEC = (
+    #  key        label      dflt    lo     hi   step  formatter
+    ('level',   'Level',    1.0,   0.0,   2.0, 0.05, lambda v: '%d%%' % round(v * 100)),
+    ('coarse',  'Tune',     0,     -24,   24,  1,    lambda v: '%+d st' % v),
+    ('fine',    'Fine',     0,     -50,   50,  1,    lambda v: '%+d ct' % v),
+    ('pan',     'Pan',      0,     -100,  100, 5,    _fmt_pan),
+    ('decay',   'Decay',    0,     0,     4000, 50,  _fmt_decay),
+    ('reverse', 'Reverse',  False, 0,     1,   1,    _fmt_onoff),
+    ('loop',    'Loop',     False, 0,     1,   1,    _fmt_onoff),
+)
+PARAM_BY_KEY = {spec[0]: spec for spec in PARAM_SPEC}
+PARAM_DEFAULTS = {spec[0]: spec[2] for spec in PARAM_SPEC}
+
+
+def _default_params():
+    return dict(PARAM_DEFAULTS)
+
+
+slot_params = [_default_params() for _ in range(NUM_SLOTS)]
+
+
+def _restore_params():
+    # Merge saved per-slot params over the defaults. Unknown/absent keys keep their
+    # default, so a settings file from an older build (or one missing a param added
+    # later) loads cleanly. Bad entries are skipped, never fatal. Run at boot,
+    # BEFORE any sample loads, since load_slot()/rebuild_engine() read these.
+    try:
+        saved = _settings.get('params') or []
+    except Exception:
+        saved = []
+    for i in range(min(NUM_SLOTS, len(saved))):
+        s = saved[i]
+        if not isinstance(s, dict):
+            continue
+        p = _default_params()
+        for k in PARAM_DEFAULTS:
+            if k in s:
+                p[k] = s[k]
+        slot_params[i] = p
+
+
+_restore_params()
+
+
+def save_slot_params():
+    # Persist all per-slot params. Called only on an edit COMMIT / toggle -- never
+    # per detent -- so flash wear stays a non-issue (see the settings note).
+    _set_setting('params', slot_params)
+
+
+# -- Param -> AMY translation. Kept next to the spec so the mapping is obvious. --
+def _param_level_gain(i):
+    # The note map's velocity scale. GAIN (5.0) is unity; the per-slot level
+    # multiplies it, so level 1.0 reproduces the old fixed gain exactly.
+    return GAIN * slot_params[i]['level']
+
+
+def _param_played_note(i):
+    # The note the mapped osc plays. AMY resamples by the difference from the
+    # sample's declared NATIVE_NOTE, so coarse (semitones) + fine (cents/100)
+    # transpose it; 0/0 plays at exactly native pitch as before.
+    p = slot_params[i]
+    return NATIVE_NOTE + p['coarse'] + p['fine'] / 100.0
+
+
+def _param_pan01(i):
+    # -100..+100 -> AMY's 0.0(L)..1.0(R), 0 -> 0.5 centre.
+    return clamp(0.5 + slot_params[i]['pan'] / 200.0, 0.0, 1.0)
+
+
+def _param_bp0(i):
+    # The osc amp envelope. decay 0 -> sustain at full for the sample's whole
+    # length (ring-out, the old behaviour); decay>0 -> fade to silence over that
+    # many ms. Format is "attack,peak,decay,sustain,release,end" (see AMY ADSR).
+    d = slot_params[i]['decay']
+    if d <= 0:
+        return '0,1.0,0,1.0,0,0.0'
+    return '0,1.0,%d,0.0,0,0.0' % int(d)
+
+
+def _param_feedback(i):
+    # feedback=1 makes a PCM osc loop its sample (the AMY loop mechanism); 0 is a
+    # one-shot. NOTE: under the synth's ring-out flag a loop holds until the pad is
+    # retriggered -- note-off gating is a separate, hardware-de-risked change.
+    return 1 if slot_params[i]['loop'] else 0
 
 
 def psram_used():
@@ -685,6 +815,8 @@ def load_slot(i, path):
         return problem
     if channels == 2:
         pcm = _left_channel(pcm)
+    if slot_params[i]['reverse']:
+        pcm = _reverse_pcm(pcm)          # baked in: AMY has no reverse flag
     data = None                          # free the raw file bytes before the copy
     gc.collect()                         #   to PSRAM; the mono `pcm` is all we need
     # PSRAM budget guard: the mono PCM is what actually lands in sample RAM. If it
@@ -709,14 +841,76 @@ def load_slot(i, path):
     return None
 
 
+def reload_slot(i):
+    # Re-load a slot's current sample from disk. Used after a Reverse toggle, which
+    # bakes into the PCM at load time and so can't update live like the other
+    # params. Blocks + paints a LOADING notice exactly like the first load; no-op on
+    # an empty slot. Returns load_slot's result (None ok, else a reason string).
+    path = slot_paths[i]
+    if not path:
+        return None
+    _blocking_notice('LOADING...', path.rsplit('/', 1)[-1][:14])
+    return load_slot(i, path)
+
+
+def loaded_slots():
+    return [i for i in range(NUM_SLOTS) if slot_paths[i] is not None]
+
+
+def slot_osc(i):
+    # The osc index a loaded slot occupies in the current patch (its position in
+    # the loaded list), or None if the slot is empty. Live param tweaks address the
+    # osc by this index instead of rebuilding the whole engine.
+    loaded = loaded_slots()
+    return loaded.index(i) if i in loaded else None
+
+
+def _map_note(i, k):
+    # Send the note-map entry for one loaded slot: play osc k at the slot's level
+    # (velocity scale) and transposed pitch. Also used for live level/tune edits,
+    # which change only this one line -- no full rebuild.
+    amy.send(synth=SYNTH,
+             midi_note_cmd="%d,0,0,%s,0," % (slot_note(i), _param_level_gain(i)) +
+             amy.message(synth='%i', osc=k,
+                         note=_param_played_note(i), vel='%v'))
+
+
+def _apply_osc(i):
+    # Push a loaded slot's osc-level params (pan, amp envelope, loop) to the live
+    # voice. Cheap enough to call per encoder detent while editing, unlike a full
+    # rebuild_engine(). No-op if the slot is empty.
+    k = slot_osc(i)
+    if k is None:
+        return
+    try:
+        amy.send(synth=SYNTH, osc=k, pan=_param_pan01(i), bp0=_param_bp0(i),
+                 feedback=_param_feedback(i))
+    except Exception:
+        pass
+
+
+def _apply_note(i):
+    # Push a loaded slot's note-map params (level, pitch) to the live voice. Cheap
+    # per-detent counterpart to _apply_osc for the map-side params.
+    k = slot_osc(i)
+    if k is None:
+        return
+    try:
+        _map_note(i, k)
+    except Exception:
+        pass
+
+
 def rebuild_engine():
     # (Re)build the native kit from the current slot assignments. Every LOADED slot
     # becomes one PCM osc in a single-voice user patch; the patch loads on synth 11
     # with grab_midi_notes=1; a full-range note map routes each slot's note to its
-    # osc at unity gain and silences (gain 0) every other note so a stray note-on
-    # can't ring the melodic voice forever under synth_flags=3. All off the trigger
-    # path -- called only after a load / clear / base-note change.
-    loaded = [i for i in range(NUM_SLOTS) if slot_paths[i] is not None]
+    # osc -- at that slot's level/pitch -- and silences (gain 0) every other note so
+    # a stray note-on can't ring the melodic voice forever under synth_flags=3. Each
+    # osc also carries its slot's pan, decay envelope and loop flag. All off the
+    # trigger path -- called after a load / clear / base-note change (live param
+    # edits use the cheaper _apply_osc/_apply_note instead of a full rebuild).
+    loaded = loaded_slots()
     n = len(loaded)
     if n == 0:
         # Empty kit: a zero-voice synth can't allocate a note, so nothing sounds.
@@ -731,19 +925,20 @@ def rebuild_engine():
     bank = amy.message(num_voices=1, oscs_per_voice=n, synth_flags=3)
     osc_of = {}
     for k, i in enumerate(loaded):
-        bank += amy.message(osc=k, wave=amy.PCM, preset=PRESET_BASE + i)
-        osc_of[slot_note(i)] = k
+        bank += amy.message(osc=k, wave=amy.PCM, preset=PRESET_BASE + i,
+                            pan=_param_pan01(i), bp0=_param_bp0(i),
+                            feedback=_param_feedback(i))
+        osc_of[slot_note(i)] = (k, i)
     amy.send(patch=KIT_PATCH, patch_string=bank)
     amy.send(synth=SYNTH, num_voices=1, patch=KIT_PATCH,
              synth_flags=3, grab_midi_notes=1)
 
-    # full-range map: loaded slots -> their osc at unity gain; all else silent.
+    # full-range map: loaded slots -> their osc at the slot's level/pitch; all else
+    # silent (gain 0) so an unmapped note can't strand the voice.
     for note in range(128):
         if note in osc_of:
-            amy.send(synth=SYNTH,
-                     midi_note_cmd="%d,0,0,%s,0," % (note, GAIN) +
-                     amy.message(synth='%i', osc=osc_of[note],
-                                 note=NATIVE_NOTE, vel='%v'))
+            k, i = osc_of[note]
+            _map_note(i, k)
         else:
             amy.send(synth=SYNTH,
                      midi_note_cmd="%d,0,0,0,0," % note +
@@ -1152,6 +1347,172 @@ class _MenuLevel:
             _render_fault('_MenuLevel.render', e)
 
 
+class _SlotEditor:
+    # The per-slot editor -- one screen owning a single slot. Unlike _MenuLevel
+    # (a list of click-actions), its param rows are EDITABLE: click a numeric param
+    # to enter edit mode (turn = adjust the value live, hear it immediately; click
+    # or hold = commit), and click a bool param (Reverse/Loop) to toggle it
+    # outright. Two plain action rows bookend the params: 'Sample:' opens the
+    # browser to (re)load, 'Clear slot' empties it.
+    #
+    # Live edits are cheap and targeted -- _apply_note / _apply_osc re-send only the
+    # one changed slot's map line or osc, never a full rebuild_engine() -- so a
+    # value sweep doesn't flood AMY. Flash is written ONCE on commit (save on
+    # edit-exit / toggle), never per detent, keeping the settings note's "no writes
+    # per frame" promise. Reverse is the exception: it bakes into the PCM, so
+    # toggling it re-loads the sample (blocking) rather than updating live.
+    #
+    # Nine rows fit one screen (title at y2, rows 18..114 < 128), so there is no
+    # pagination; rendering mirrors _MenuLevel's incremental trick -- repaint just
+    # the changed row(s) and flush that band -- with a `full` flag forcing a whole-
+    # screen repaint after anything (a toast, a LOADING notice, a browser) clobbers
+    # the panel.
+    __slots__ = ('slot', 'title', 'rows', 'idx', 'editing', 'full', '_shown_idx')
+
+    def __init__(self, slot):
+        self.slot = slot
+        self.title = 'SLOT %s' % note_name(slot_note(slot))
+        self.rows = ([('sample',)]
+                     + [('param', s[0]) for s in PARAM_SPEC]
+                     + [('clear',)])
+        self.idx = 0
+        self.editing = False
+        self.full = True         # first paint (and after any overlay) is full
+        self._shown_idx = -1
+
+    # -- input --
+    def handle(self, menu, delta, click, back):
+        if self.editing:
+            # Editing a numeric param: turn adjusts live, click/hold commits.
+            if back:
+                self._commit()
+                menu.dirty = True
+                return
+            if delta:
+                self._adjust(delta)
+                menu.dirty = True
+            if click:
+                self._commit()
+                menu.dirty = True
+            return
+        if back:                 # hold: leave the editor (back to the slot list)
+            menu._pop()
+            return
+        if delta:
+            self.idx = clamp(self.idx + delta, 0, len(self.rows) - 1)
+            menu.dirty = True
+        if click:
+            self._activate(menu)
+
+    def _activate(self, menu):
+        tag = self.rows[self.idx][0]
+        if tag == 'sample':
+            menu._open_browser(self.slot)
+        elif tag == 'clear':
+            menu._clear_slot(self.slot)
+            self.full = True             # the CLEARED toast clobbered the screen
+        else:                            # a param row
+            key = self.rows[self.idx][1]
+            if isinstance(PARAM_DEFAULTS[key], bool):
+                self._toggle(key)        # bools toggle on a plain click
+            else:
+                self.editing = True      # numerics open the value editor
+            menu.dirty = True
+
+    def _toggle(self, key):
+        i = self.slot
+        slot_params[i][key] = not slot_params[i][key]
+        if key == 'reverse':
+            # Reverse is baked into the PCM, so re-load the slot to apply it.
+            if slot_paths[i]:
+                reload_slot(i)
+            self.full = True             # the LOADING notice clobbered the screen
+        else:                            # loop -> osc feedback, applied live
+            _apply_osc(i)
+        save_slot_params()
+
+    def _adjust(self, delta):
+        i = self.slot
+        key = self.rows[self.idx][1]
+        _, _lbl, _dflt, lo, hi, step, _fmt = PARAM_BY_KEY[key]
+        val = clamp(slot_params[i][key] + delta * step, lo, hi)
+        if isinstance(step, float) or isinstance(val, float):
+            val = round(val, 2)          # kill float dust (e.g. 0.15000000002)
+        slot_params[i][key] = val
+        if key in ('level', 'coarse', 'fine'):
+            _apply_note(i)               # map-side params: re-send the note line
+        else:                            # pan, decay: osc-side params
+            _apply_osc(i)
+
+    def _commit(self):
+        # Leave edit mode and persist -- the ONLY flash write for a numeric param,
+        # so a value sweep costs one write, not one per detent.
+        self.editing = False
+        save_slot_params()
+
+    # -- render --
+    def _row_text(self, ri):
+        tag = self.rows[ri][0]
+        if tag == 'sample':
+            return 'Sample: ' + slot_label(self.slot)
+        if tag == 'clear':
+            return 'Clear slot'
+        key = self.rows[ri][1]
+        spec = PARAM_BY_KEY[key]
+        return '%-8s%s' % (spec[1], spec[6](slot_params[self.slot][key]))
+
+    def _row_y(self, ri):
+        return MENU_TOP_Y + ri * MENU_LINE_H
+
+    def _paint_row(self, d, ri):
+        y = self._row_y(ri)
+        d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 0)
+        sel = (ri == self.idx)
+        text = self._row_text(ri)[:MENU_LABEL_MAX]
+        if sel and self.editing:
+            # Live-edit: a dim highlight bar makes it obvious the knob now moves a
+            # value, not the cursor.
+            d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 60)
+            d.text('>', 0, y, 255)
+            d.text(text, 12, y, 255)
+        elif sel:
+            d.text('>', 0, y, 255)
+            d.text(text, 12, y, 255)
+        else:
+            d.text(text, 12, y, 110)
+
+    def render(self, menu):
+        if not menu.dirty:
+            return
+        menu.dirty = False
+        try:
+            d = amyboard.display
+            if self.full or self._shown_idx < 0:
+                d.fill(0)
+                _draw_menu_row(d, 2, 't', (self.title, ''))
+                for ri in range(len(self.rows)):
+                    self._paint_row(d, ri)
+                self.full = False
+                self._shown_idx = self.idx
+                _begin_flush(0, 127)
+                return
+            if self._shown_idx != self.idx:
+                # Cursor moved: repaint the two affected rows, flush that band.
+                self._paint_row(d, self._shown_idx)
+                self._paint_row(d, self.idx)
+                y0 = self._row_y(min(self._shown_idx, self.idx))
+                y1 = self._row_y(max(self._shown_idx, self.idx)) + MENU_LINE_H - 1
+                self._shown_idx = self.idx
+                _begin_flush(y0, y1)
+            else:
+                # Same row, value or edit-mode changed: repaint just this row.
+                self._paint_row(d, self.idx)
+                y = self._row_y(self.idx)
+                _begin_flush(y, y + MENU_LINE_H - 1)
+        except Exception as e:
+            _render_fault('_SlotEditor.render', e)
+
+
 class SketchMenu:
     def __init__(self):
         self.stack = []          # empty => closed (playing)
@@ -1216,29 +1577,63 @@ class SketchMenu:
             ('Resume playing', self.close),
         ])
 
-    def _open_slots(self):
+    def _build_slots_level(self):
+        # The SLOTS list: one row per pad, "<note> <sample>". Factored out so it can
+        # be rebuilt in place after a load/clear (see _refresh_slots_list) to show
+        # the new label when you back out of the editor.
         items = []
         for i in range(NUM_SLOTS):
             items.append(('%s %s' % (note_name(slot_note(i)), slot_label(i)),
                           self._slot_opener(i)))
-        self._push_level(_MenuLevel('SLOTS', items))
+        return _MenuLevel('SLOTS', items)
+
+    def _open_slots(self):
+        self._push_level(self._build_slots_level())
 
     def _slot_opener(self, i):
+        # Clicking a slot now opens its EDITOR (params + Load + Clear), not the
+        # browser directly -- the browser is one click deeper, behind 'Sample:'.
         def go():
             self._browse_slot = i
-            self._open_dir(sample_root(), first=True)
+            self._push_level(_SlotEditor(i))
         return go
+
+    def _refresh_slots_list(self):
+        # Rebuild the SLOTS list wherever it sits in the stack (under the editor),
+        # preserving its cursor, so a load/clear is reflected when you back out to
+        # it. Cheap and idempotent; a no-op if the list isn't currently open.
+        for si in range(len(self.stack)):
+            lvl = self.stack[si]
+            if getattr(lvl, 'title', None) == 'SLOTS':
+                keep = lvl.idx
+                new = self._build_slots_level()
+                new.idx = clamp(keep, 0, len(new.items) - 1)
+                self.stack[si] = new
+                break
+
+    def _open_browser(self, i):
+        # Open the sample browser for slot i (from the editor's 'Sample:' row).
+        self._browse_slot = i
+        self._open_dir(sample_root(), first=True)
+
+    def _clear_slot(self, i):
+        # Empty a slot and reset its params to defaults, so a reused pad starts
+        # neutral rather than inheriting the last sample's tuning.
+        unload_slot(i)
+        slot_params[i] = _default_params()
+        rebuild_engine()              # drop the freed osc from the patch + map
+        self._save_slots()
+        save_slot_params()
+        self._refresh_slots_list()    # update the label under the editor
+        self._show_toast('SLOT CLEARED')
 
     def _open_dir(self, path, first=False):
         # Build a browser level for one directory. Folders push a deeper level;
         # WAVs load into the slot being edited. A hold pops back up one folder,
         # which is exactly the launcher's back-out gesture -- nothing special.
+        # Clear lives in the slot editor now, not here.
         folders, wavs = list_dir(path)
         items = []
-        if first:
-            # Only offered at the top of a browse, where "clear this slot" reads
-            # as a slot action rather than a property of some nested folder.
-            items.append(('[Clear slot]', self._clear_opener()))
         for name in folders:
             items.append(('/' + name, self._dir_opener(path + '/' + name)))
         # PSRAM left for THIS slot, crediting back whatever it holds now (loading a
@@ -1266,7 +1661,7 @@ class SketchMenu:
             else:
                 items.append(('%s %.2fs' % (name, sample_secs(info)),
                               self._wav_opener(path + '/' + name)))
-        if len(items) == (1 if first else 0):
+        if not items:
             # Say WHY it's empty. "No samples" on a board whose card silently
             # failed to mount is the single most confusing state this sketch can
             # be in, so name the actual cause instead of leaving the user to
@@ -1294,18 +1689,6 @@ class SketchMenu:
             self._open_dir(path)
         return go
 
-    def _clear_opener(self):
-        def go():
-            i = self._browse_slot
-            unload_slot(i)
-            rebuild_engine()          # drop the freed osc from the patch + map
-            self._save_slots()
-            # Back to the slot list so the cleared slot is visible immediately.
-            self._pop()
-            self._refresh_slots()
-            self._show_toast('SLOT CLEARED')
-        return go
-
     def _wav_opener(self, path):
         def go():
             i = self._browse_slot
@@ -1316,22 +1699,16 @@ class SketchMenu:
             problem = load_slot(i, path)
             self._save_slots()
             # Unwind the browser (however deep in subfolders) back to the slot
-            # list, then rebuild it so the new sample name shows.
-            while len(self.stack) > 2:
+            # EDITOR (root, slots, editor = depth 3), so you land back on the slot
+            # you just filled, ready to tweak it. Refresh the list underneath and
+            # force the editor to fully repaint over the toast.
+            while len(self.stack) > 3:
                 self.stack.pop()
-            self._refresh_slots()
+            self._refresh_slots_list()
+            if isinstance(self.cur, _SlotEditor):
+                self.cur.full = True
             self._show_toast('LOADED' if not problem else 'FAILED: ' + problem)
         return go
-
-    def _refresh_slots(self):
-        # Rebuild the slot list in place, preserving the cursor, so a load or
-        # clear is reflected without bouncing the user back to the root.
-        if len(self.stack) < 2:
-            return
-        keep = self.stack[-1].idx
-        self.stack.pop()
-        self._open_slots()
-        self.cur.idx = clamp(keep, 0, len(self.cur.items) - 1)
 
     def _open_base_note(self):
         # Controllers disagree about octave numbering, so rather than a free
