@@ -593,14 +593,6 @@ def _left_channel(pcm):
     return b''.join(pcm[k:k + 2] for k in range(0, len(pcm) - 3, 4))
 
 
-def _reverse_pcm(pcm):
-    # Reverse 16-bit mono PCM in place (2 bytes/sample, low-endian preserved). AMY
-    # has no reverse-playback flag, so a reversed slot is baked at load time; that
-    # is why toggling Reverse re-loads the sample rather than updating live. Per-
-    # sample Python loop, but load already blocks, so the extra pass is fine.
-    return b''.join(pcm[k:k + 2] for k in range(len(pcm) - 2, -1, -2))
-
-
 # ---------------------------------------------------------------------------
 # Slots. slot_paths[i] is the sample file loaded into slot i (or None). Loading
 # is the only expensive operation in this sketch, so it is deliberately never
@@ -617,17 +609,18 @@ slot_bytes = [0] * NUM_SLOTS        # PSRAM bytes the loaded sample occupies (mo
 # ---------------------------------------------------------------------------
 # Per-slot parameters. Every slot carries a small dict of playback settings,
 # defaulting to exactly the old fixed behaviour (unity level, native pitch, centre
-# pan, ring-out, forward, one-shot) so an un-touched box sounds identical to
-# before. All are cheap: a few numbers per slot, persisted in the settings JSON
-# and merged against the defaults on load, so a save file written before a param
-# existed still opens (the missing key just takes its default).
+# pan) so an un-touched box sounds identical to before. All are cheap: a few
+# numbers per slot, persisted in the settings JSON and merged against the defaults
+# on load, so a save file written before a param existed still opens (the missing
+# key just takes its default) -- and a file that still carries scrubbed params
+# (decay/loop/reverse) just ignores those unknown keys.
 #
 # ONE spec table drives everything (like polysynth's PARAMS): the engine wiring,
 # the editor UI, value clamping, and the on-screen formatting all read from here,
 # so a param is defined in exactly one place. Each entry is
 #   (key, label, default, lo, hi, step, formatter)
-# where bool params (default True/False) are edited as an on/off toggle and lo/hi/
-# step are ignored. `label` is padded to 7 cols in the editor, so keep it short.
+# and every param is a numeric knob. `label` is padded to 7 cols in the editor, so
+# keep it short.
 # ---------------------------------------------------------------------------
 def _fmt_pan(v):
     # -100..+100 stored -> 'C' centre, 'L<n>' / 'R<n>' off to a side.
@@ -636,28 +629,20 @@ def _fmt_pan(v):
     return ('R%d' if v > 0 else 'L%d') % abs(v)
 
 
-def _fmt_decay(v):
-    # 0 = ring the whole sample out (no decay); otherwise a fade time.
-    if v <= 0:
-        return 'full'
-    if v >= 1000:
-        return '%.1fs' % (v / 1000.0)
-    return '%dms' % v
-
-
-def _fmt_onoff(v):
-    return 'on' if v else 'off'
-
-
+# Parked for a later pass, not shipped half-working:
+#   - Reverse: baking reversed PCM in wouldn't take on the board (still played
+#     forward even loaded into a fresh preset).
+#   - Decay / Loop: both need AMY's note-off behaviour for PCM pinned down (does a
+#     note-off fade via the release envelope or hard-stop the osc?), which we
+#     couldn't settle by ear. Without them, samples are plain one-shots on a ring-
+#     out synth -- they ignore note-off and play to their end, the original solid
+#     behaviour.
 PARAM_SPEC = (
     #  key        label      dflt    lo     hi   step  formatter
     ('level',   'Level',    1.0,   0.0,   2.0, 0.05, lambda v: '%d%%' % round(v * 100)),
     ('coarse',  'Tune',     0,     -24,   24,  1,    lambda v: '%+d st' % v),
     ('fine',    'Fine',     0,     -50,   50,  1,    lambda v: '%+d ct' % v),
     ('pan',     'Pan',      0,     -100,  100, 5,    _fmt_pan),
-    ('decay',   'Decay',    0,     0,     4000, 50,  _fmt_decay),
-    ('reverse', 'Reverse',  False, 0,     1,   1,    _fmt_onoff),
-    ('loop',    'Loop',     False, 0,     1,   1,    _fmt_onoff),
 )
 PARAM_BY_KEY = {spec[0]: spec for spec in PARAM_SPEC}
 PARAM_DEFAULTS = {spec[0]: spec[2] for spec in PARAM_SPEC}
@@ -694,8 +679,8 @@ _restore_params()
 
 
 def save_slot_params():
-    # Persist all per-slot params. Called only on an edit COMMIT / toggle -- never
-    # per detent -- so flash wear stays a non-issue (see the settings note).
+    # Persist all per-slot params. Called only on an edit COMMIT -- never per
+    # detent -- so flash wear stays a non-issue (see the settings note).
     _set_setting('params', slot_params)
 
 
@@ -715,25 +700,10 @@ def _param_played_note(i):
 
 
 def _param_pan01(i):
-    # -100..+100 -> AMY's 0.0(L)..1.0(R), 0 -> 0.5 centre.
-    return clamp(0.5 + slot_params[i]['pan'] / 200.0, 0.0, 1.0)
-
-
-def _param_bp0(i):
-    # The osc amp envelope. decay 0 -> sustain at full for the sample's whole
-    # length (ring-out, the old behaviour); decay>0 -> fade to silence over that
-    # many ms. Format is "attack,peak,decay,sustain,release,end" (see AMY ADSR).
-    d = slot_params[i]['decay']
-    if d <= 0:
-        return '0,1.0,0,1.0,0,0.0'
-    return '0,1.0,%d,0.0,0,0.0' % int(d)
-
-
-def _param_feedback(i):
-    # feedback=1 makes a PCM osc loop its sample (the AMY loop mechanism); 0 is a
-    # one-shot. NOTE: under the synth's ring-out flag a loop holds until the pad is
-    # retriggered -- note-off gating is a separate, hardware-de-risked change.
-    return 1 if slot_params[i]['loop'] else 0
+    # -100(L)..+100(R) -> AMY pan, 0 -> 0.5 centre. AMY's pan runs 1.0=left..
+    # 0.0=right (verified on hardware -- the opposite of the intuitive reading), so
+    # a positive (right) setting maps DOWN toward 0.0.
+    return clamp(0.5 - slot_params[i]['pan'] / 200.0, 0.0, 1.0)
 
 
 def psram_used():
@@ -815,8 +785,6 @@ def load_slot(i, path):
         return problem
     if channels == 2:
         pcm = _left_channel(pcm)
-    if slot_params[i]['reverse']:
-        pcm = _reverse_pcm(pcm)          # baked in: AMY has no reverse flag
     data = None                          # free the raw file bytes before the copy
     gc.collect()                         #   to PSRAM; the mono `pcm` is all we need
     # PSRAM budget guard: the mono PCM is what actually lands in sample RAM. If it
@@ -839,18 +807,6 @@ def load_slot(i, path):
     slot_bytes[i] = pcm_len
     rebuild_engine()
     return None
-
-
-def reload_slot(i):
-    # Re-load a slot's current sample from disk. Used after a Reverse toggle, which
-    # bakes into the PCM at load time and so can't update live like the other
-    # params. Blocks + paints a LOADING notice exactly like the first load; no-op on
-    # an empty slot. Returns load_slot's result (None ok, else a reason string).
-    path = slot_paths[i]
-    if not path:
-        return None
-    _blocking_notice('LOADING...', path.rsplit('/', 1)[-1][:14])
-    return load_slot(i, path)
 
 
 def loaded_slots():
@@ -876,15 +832,14 @@ def _map_note(i, k):
 
 
 def _apply_osc(i):
-    # Push a loaded slot's osc-level params (pan, amp envelope, loop) to the live
-    # voice. Cheap enough to call per encoder detent while editing, unlike a full
+    # Push a loaded slot's osc-level params (currently just pan) to the live voice.
+    # Cheap enough to call per encoder detent while editing, unlike a full
     # rebuild_engine(). No-op if the slot is empty.
     k = slot_osc(i)
     if k is None:
         return
     try:
-        amy.send(synth=SYNTH, osc=k, pan=_param_pan01(i), bp0=_param_bp0(i),
-                 feedback=_param_feedback(i))
+        amy.send(synth=SYNTH, osc=k, pan=_param_pan01(i))
     except Exception:
         pass
 
@@ -905,11 +860,10 @@ def rebuild_engine():
     # (Re)build the native kit from the current slot assignments. Every LOADED slot
     # becomes one PCM osc in a single-voice user patch; the patch loads on synth 11
     # with grab_midi_notes=1; a full-range note map routes each slot's note to its
-    # osc -- at that slot's level/pitch -- and silences (gain 0) every other note so
-    # a stray note-on can't ring the melodic voice forever under synth_flags=3. Each
-    # osc also carries its slot's pan, decay envelope and loop flag. All off the
-    # trigger path -- called after a load / clear / base-note change (live param
-    # edits use the cheaper _apply_osc/_apply_note instead of a full rebuild).
+    # osc -- at that slot's level/pitch/pan -- and silences (gain 0) every other note
+    # so a stray note-on can't strand the voice. All off the trigger path -- called
+    # after a load / clear / base-note change (live param edits use the cheaper
+    # _apply_osc/_apply_note instead of a full rebuild).
     loaded = loaded_slots()
     n = len(loaded)
     if n == 0:
@@ -920,14 +874,14 @@ def rebuild_engine():
             pass
         return
 
-    # one PCM osc per loaded slot in one voice; synth_flags=3 = notes-via-MIDI +
-    # ring-out (ignore note-offs, so one-shots play to their end).
+    # One PCM osc per loaded slot in one voice. synth_flags=3 = notes-via-MIDI map +
+    # ring-out (ignore note-offs), so a one-shot plays to its end regardless of when
+    # the controller sends note-off.
     bank = amy.message(num_voices=1, oscs_per_voice=n, synth_flags=3)
     osc_of = {}
     for k, i in enumerate(loaded):
         bank += amy.message(osc=k, wave=amy.PCM, preset=PRESET_BASE + i,
-                            pan=_param_pan01(i), bp0=_param_bp0(i),
-                            feedback=_param_feedback(i))
+                            pan=_param_pan01(i))
         osc_of[slot_note(i)] = (k, i)
     amy.send(patch=KIT_PATCH, patch_string=bank)
     amy.send(synth=SYNTH, num_voices=1, patch=KIT_PATCH,
@@ -1268,6 +1222,14 @@ class _MenuLevel:
         self._shown_idx = -1     # nothing painted yet -> first render is full
         self._shown_start = -1
 
+    def invalidate(self):
+        # Force the next render to repaint the WHOLE screen (fill + all rows), not
+        # an incremental band. Used when something outside this level owned the
+        # panel meanwhile -- the idle monitor -- so a wake doesn't leave half the
+        # monitor showing under the menu.
+        self._shown_idx = -1
+        self._shown_start = -1
+
     def handle(self, menu, delta, click, back):
         if back:                 # hold: pop one level (may close the menu)
             menu._pop()
@@ -1349,20 +1311,17 @@ class _MenuLevel:
 
 class _SlotEditor:
     # The per-slot editor -- one screen owning a single slot. Unlike _MenuLevel
-    # (a list of click-actions), its param rows are EDITABLE: click a numeric param
-    # to enter edit mode (turn = adjust the value live, hear it immediately; click
-    # or hold = commit), and click a bool param (Reverse/Loop) to toggle it
-    # outright. Two plain action rows bookend the params: 'Sample:' opens the
-    # browser to (re)load, 'Clear slot' empties it.
+    # (a list of click-actions), its param rows are EDITABLE: click a param to enter
+    # edit mode (turn = adjust the value live, hear it immediately; click or hold =
+    # commit). Two plain action rows bookend the params: 'Sample:' opens the browser
+    # to (re)load, 'Clear slot' empties it.
     #
     # Live edits are cheap and targeted -- _apply_note / _apply_osc re-send only the
     # one changed slot's map line or osc, never a full rebuild_engine() -- so a
-    # value sweep doesn't flood AMY. Flash is written ONCE on commit (save on
-    # edit-exit / toggle), never per detent, keeping the settings note's "no writes
-    # per frame" promise. Reverse is the exception: it bakes into the PCM, so
-    # toggling it re-loads the sample (blocking) rather than updating live.
+    # value sweep doesn't flood AMY. Flash is written ONCE on commit, never per
+    # detent, keeping the settings note's "no writes per frame" promise.
     #
-    # Nine rows fit one screen (title at y2, rows 18..114 < 128), so there is no
+    # The rows fit one screen (title at y2, rows 18..114 < 128), so there is no
     # pagination; rendering mirrors _MenuLevel's incremental trick -- repaint just
     # the changed row(s) and flush that band -- with a `full` flag forcing a whole-
     # screen repaint after anything (a toast, a LOADING notice, a browser) clobbers
@@ -1378,6 +1337,13 @@ class _SlotEditor:
         self.idx = 0
         self.editing = False
         self.full = True         # first paint (and after any overlay) is full
+        self._shown_idx = -1
+
+    def invalidate(self):
+        # Force a full-screen repaint next render (see _MenuLevel.invalidate): used
+        # on wake from the idle monitor so the editor doesn't paint over a half-
+        # cleared monitor.
+        self.full = True
         self._shown_idx = -1
 
     # -- input --
@@ -1411,25 +1377,9 @@ class _SlotEditor:
         elif tag == 'clear':
             menu._clear_slot(self.slot)
             self.full = True             # the CLEARED toast clobbered the screen
-        else:                            # a param row
-            key = self.rows[self.idx][1]
-            if isinstance(PARAM_DEFAULTS[key], bool):
-                self._toggle(key)        # bools toggle on a plain click
-            else:
-                self.editing = True      # numerics open the value editor
+        else:                            # a param row -- all numerics: open the editor
+            self.editing = True
             menu.dirty = True
-
-    def _toggle(self, key):
-        i = self.slot
-        slot_params[i][key] = not slot_params[i][key]
-        if key == 'reverse':
-            # Reverse is baked into the PCM, so re-load the slot to apply it.
-            if slot_paths[i]:
-                reload_slot(i)
-            self.full = True             # the LOADING notice clobbered the screen
-        else:                            # loop -> osc feedback, applied live
-            _apply_osc(i)
-        save_slot_params()
 
     def _adjust(self, delta):
         i = self.slot
@@ -1441,12 +1391,14 @@ class _SlotEditor:
         slot_params[i][key] = val
         if key in ('level', 'coarse', 'fine'):
             _apply_note(i)               # map-side params: re-send the note line
-        else:                            # pan, decay: osc-side params
+        else:                            # pan: osc-side param
             _apply_osc(i)
 
     def _commit(self):
         # Leave edit mode and persist -- the ONLY flash write for a numeric param,
-        # so a value sweep costs one write, not one per detent.
+        # so a value sweep costs one write, not one per detent. Every param
+        # (level/tune/fine/pan) already applied live during _adjust via the
+        # targeted osc/note sends, so there's nothing more to push here.
         self.editing = False
         save_slot_params()
 
@@ -1470,11 +1422,12 @@ class _SlotEditor:
         sel = (ri == self.idx)
         text = self._row_text(ri)[:MENU_LABEL_MAX]
         if sel and self.editing:
-            # Live-edit: a dim highlight bar makes it obvious the knob now moves a
-            # value, not the cursor.
-            d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 60)
-            d.text('>', 0, y, 255)
-            d.text(text, 12, y, 255)
+            # Live-edit: a bright bar with the text KNOCKED OUT in black -- white
+            # text on the bar was near-invisible. The bar itself signals "the knob
+            # now moves a value, not the cursor".
+            d.fill_rect(0, y, DISPLAY_WIDTH, MENU_LINE_H, 220)
+            d.text('>', 0, y, 0)
+            d.text(text, 12, y, 0)
         elif sel:
             d.text('>', 0, y, 255)
             d.text(text, 12, y, 255)
@@ -1551,7 +1504,12 @@ class SketchMenu:
         self.suspended = True
 
     def resume(self):
+        # Wake from the idle monitor. The monitor owned the panel while we were
+        # suspended, so force the current level to fully repaint -- an incremental
+        # band would leave the monitor bleeding through under the menu.
         self.suspended = False
+        if self.stack:
+            self.cur.invalidate()
         self.dirty = True
 
     def _push_level(self, lvl):
