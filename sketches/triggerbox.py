@@ -3,15 +3,16 @@
 #   on the board from /sd/samples (browsed folder-by-folder on the encoder) into
 #   PSRAM, and fires on a MIDI channel 11 note-on at its assigned pitch (MIDI note
 #   48, shown as C2, + slot by default). Built for short IDM-style percussion --
-#   zaps, blips, clicks -- so samples are capped at 3 seconds and retriggering a
-#   slot chokes and restarts it. No sequencer, no patterns: notes in, samples out.
+#   zaps, blips, clicks -- and retriggering a slot chokes and restarts it. Sample
+#   length is bounded only by free memory at load time, not a fixed cap. No
+#   sequencer, no patterns: notes in, samples out.
 #
 #   ENGINE: native routing (see drumkit.py). Every loaded slot becomes one PCM
 #   oscillator inside a single-voice user patch; that patch loads on synth 11 with
 #   grab_midi_notes=1, and a per-channel note map routes each slot's note to its
 #   osc IN AMY'S C FIRMWARE. So a note-on turns into sound with no MicroPython in
-#   the trigger path -- tight, jitter-free timing (proven on hardware). The MIDI
-#   callback here only lights the on-screen hit flash; it fires no audio.
+#   the trigger path -- tight, jitter-free timing (proven on hardware). Nothing in
+#   this sketch is in the trigger path at all -- not even a MIDI callback.
 #   rebuild_engine() re-lays the patch + note map whenever slots change, entirely
 #   off the trigger path. Channel 11, NOT 10: channel 10 is AMY's built-in GM drum
 #   kit and would ignore our patch.
@@ -31,7 +32,7 @@
 #   only -- AMY's header check does NOT verify bit depth, so an 8/24-bit file
 #   would load "successfully" and play as noise; parse_wav_full() screens for that.
 
-import amy, amyboard, midi, time, json, os, gc
+import amy, amyboard, time, json, os, gc
 
 # --- Launcher integration ---------------------------------------------------
 # Identical contract to polysynth.py: this sketch always talks to a
@@ -600,7 +601,6 @@ def _left_channel(pcm):
 # ---------------------------------------------------------------------------
 slot_paths = [None] * NUM_SLOTS
 slot_info = [None] * NUM_SLOTS      # cached _wav_info per loaded slot
-slot_hits = [0] * NUM_SLOTS         # ticks_ms of the last trigger (for the flash)
 slot_bytes = [0] * NUM_SLOTS        # PSRAM bytes the loaded sample occupies (mono
                                     #   PCM). Summed as our own PSRAM tally, since
                                     #   gc.mem_free() can't see sample RAM.
@@ -765,29 +765,11 @@ def init_engine():
 
 
 # ---------------------------------------------------------------------------
-# MIDI. Notes are routed to the kit NATIVELY by AMY (grab_midi_notes=1), so this
-# callback does NOT fire audio -- it only lights the on-screen slot flash. The
-# callback still receives every note-on even with grab_midi_notes on, so it is a
-# free, jitter-irrelevant place to timestamp hits for the monitor.
-# ---------------------------------------------------------------------------
-def midi_cb(m):
-    if not m or len(m) < 3:
-        return
-    if (m[0] & 0x0F) != (MIDI_CHANNEL - 1):
-        return
-    if (m[0] & 0xF0) != 0x90:        # note-on only
-        return
-    if m[2] == 0:                    # running-status note-off
-        return
-    slot = m[1] - base_note
-    if 0 <= slot < NUM_SLOTS and slot_paths[slot] is not None:
-        slot_hits[slot] = time.ticks_ms()
-
-
-def setup_midi():
-    midi.add_callback(midi_cb)
-
-
+# MIDI. Notes are routed to the kit NATIVELY by AMY (grab_midi_notes=1) -- there
+# is no MicroPython in the trigger path and no callback registered here. (An
+# earlier build timestamped note-ons to flash the on-screen slot as it fired, but
+# the panel's ~240ms full refresh can't keep up with even a slow drum part, so the
+# flash was dropped; the monitor is now a static slot map, redrawn only on change.)
 # ---------------------------------------------------------------------------
 # Display infrastructure. Lifted from polysynth.py: all drawing happens from
 # loop() -- never from the MIDI callback -- and is fully wrapped so a display
@@ -946,13 +928,14 @@ def _blocking_notice(line1, line2=''):
 # ---------------------------------------------------------------------------
 # Playing screen: the slot monitor. Shows all twelve slots as a 6-row x 2-column
 # grid (left column = slots 0-5, right = 6-11), each with its trigger note and a
-# short sample name, and flashes a slot's cell briefly when it fires. Twelve full-
-# width rows would run off the 128px panel, so the grid is how 12 pads fit; the
-# menu's slot list shows the untruncated names. Redrawn only when something
-# changes (a hit starting or a flash expiring), so an idle box is not blitting
-# the panel on every tick.
+# short sample name. Twelve full-width rows would run off the 128px panel, so the
+# grid is how 12 pads fit; the menu's slot list shows the untruncated names. It is
+# a STATIC map -- redrawn only when the slot assignments change (a load, clear or
+# base-note change marks it dirty) -- so an idle box never blits the panel. There
+# is deliberately no per-hit flash: the panel's ~240ms full refresh can't track
+# even a slow drum part, so a flash would only ever lag and stutter behind the
+# audio.
 # ---------------------------------------------------------------------------
-HIT_FLASH_MS = 120           # how long a triggered slot stays highlighted
 MON_TOP_Y    = 18
 MON_ROW_H    = 18            # 6 rows: 18,36,..,108 -- last text bottom ~116 < 128
 MON_COL_W    = 64            # two 64px columns across the 128px panel
@@ -961,22 +944,14 @@ MON_ROWS     = 6            # rows per column (NUM_SLOTS split across 2 columns)
 
 class SlotMonitor:
     def __init__(self):
-        self._lit = [False] * NUM_SLOTS
         self._dirty = True
 
     def on_activate(self):
         self._dirty = True
 
-    def render(self, now):
-        # Recompute which slots are lit; redraw only if that changed.
-        changed = False
-        for i in range(NUM_SLOTS):
-            lit = bool(slot_hits[i]) and \
-                time.ticks_diff(now, slot_hits[i]) < HIT_FLASH_MS
-            if lit != self._lit[i]:
-                self._lit[i] = lit
-                changed = True
-        if not (changed or self._dirty):
+    def render(self):
+        # Static slot map: redraw only when the assignments changed.
+        if not self._dirty:
             return
         self._dirty = False
         try:
@@ -990,10 +965,7 @@ class SlotMonitor:
                 row = i % MON_ROWS
                 x = col * MON_COL_W
                 y = MON_TOP_Y + row * MON_ROW_H
-                lit = self._lit[i]
-                if lit:
-                    d.fill_rect(x, y - 2, MON_COL_W - 2, MON_ROW_H - 2, 90)
-                c = 255 if lit else (200 if slot_paths[i] else 70)
+                c = 200 if slot_paths[i] else 70
                 d.text(note_name(slot_note(i)), x, y, c)
                 d.text(slot_label(i)[:5], x + 3 * CHAR_W, y, c)
             _begin_flush(0, 127)
@@ -1012,7 +984,7 @@ def service_display():
         return
     if _service_flush():
         return
-    monitor.render(now)
+    monitor.render()
 
 
 # ---------------------------------------------------------------------------
@@ -1482,7 +1454,6 @@ def _pump_menu():
 # Boot
 # ---------------------------------------------------------------------------
 init_engine()
-setup_midi()
 init_display()
 
 # Best-case free heap, measured once now (empty board, before any sample loads).
