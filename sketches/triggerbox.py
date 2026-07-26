@@ -192,9 +192,38 @@ def _write_settings():
         pass
 
 
+_settings_dirty = False
+
+
 def _set_setting(key, value):
+    # Record it now, write it WHEN THE PADS ARE QUIET. A flash write blocks for
+    # ~150ms, and MEASURED, that is long enough to make notes arrive late -- it
+    # showed up in the slow-tick log as a 147ms tick doing nothing else. Nothing
+    # here is urgent: the value is live in _settings immediately, and the file only
+    # has to be right before the next reboot.
+    global _settings_dirty
     _settings[key] = value
+    _settings_dirty = True
+
+
+def service_settings():
+    # Called from loop(). Writes at most one settings file, and only in a gap
+    # between hits. See _set_setting for why this is deferred at all.
+    global _settings_dirty
+    if not _settings_dirty or not pads_quiet():
+        return False
+    _settings_dirty = False
     _write_settings()
+    return True
+
+
+def flush_settings():
+    # Force the write out NOW, quiet or not. Used before anything that could cost
+    # us the deferred write -- a sample load, which is already a blocking moment.
+    global _settings_dirty
+    if _settings_dirty:
+        _settings_dirty = False
+        _write_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -343,29 +372,55 @@ def try_mount_sd():
     return sd_mounted()
 
 
-SD_BROWSE_TRIES = 4      # bounded re-mount+retry for browser SD ops (see below)
+# (SD_BROWSE_TRIES is gone: browser SD ops now get one re-mount and one retry, no
+# sleeps -- see sample_root() and list_dir() for the measurements behind that.)
+
+
+_root_cache = None       # last resolved sample root; None = probe again
+
+
+def forget_sample_root():
+    # Drop the cache so the next browse re-probes (card swapped, or a listing came
+    # back empty and we want to be sure the mount is real).
+    global _root_cache
+    _root_cache = None
 
 
 def sample_root():
-    # Where the browser starts. Resolved on every browse rather than cached at
-    # boot, so swapping the card doesn't require a reboot.
+    # Where the browser starts, RESOLVED ONCE and remembered.
     #
-    # ROBUST like the load path: the card drops out intermittently (EIO), and a
-    # single failed check would wrongly conclude "no /sd/samples" and fall back to
-    # empty flash -- exactly the "browser can't see the card mid-session" bug.
-    # So we re-mount + retry a BOUNDED number of times (a boot-storm of mounts
-    # hard-hangs the board; a few user-initiated retries are the proven-safe
-    # envelope robust_read already uses). We only re-mount on a FAILED check, so a
-    # healthy card returns on the first pass with no extra mounting.
-    for _attempt in range(SD_BROWSE_TRIES):
-        if _is_dir(SD_SAMPLE_DIR):
-            return SD_SAMPLE_DIR
+    # This has been the single worst source of interaction lag, twice over. It first
+    # retried a failed check SD_BROWSE_TRIES times with a time.sleep(0.1) between --
+    # up to ~400ms of blocked loop(), which means notes queue and fire late (see
+    # [[blocking-loop-stops-midi]]). Removing the sleeps left a 165ms `mount_sd()`
+    # still landing on the click, MEASURED:
+    #
+    #   stat /sd/samples (failing)   24ms       mount_sd()   165ms
+    #   stat /sd/samples (ok)       0.2ms       stat /sd     0.06ms
+    #
+    # and the mount does NOT decay on its own (still good after idling, and reading
+    # a whole WAV does not break it). So the failing stat was not proof of a lost
+    # mount at all -- it was this card's intermittent EIO, and we were remounting a
+    # perfectly good filesystem on every single browse because of one bad stat.
+    #
+    # Now: probe once, keep the answer, and only re-probe when a listing actually
+    # comes back empty (see _open_dir). A card swapped mid-session is picked up the
+    # first time a folder reads as empty, which costs one browse, once.
+    global _root_cache
+    if _root_cache is not None:
+        return _root_cache
+    root = FLASH_SAMPLE_DIR
+    if _is_dir(SD_SAMPLE_DIR):
+        root = SD_SAMPLE_DIR
+    else:
         try:
             amyboard.mount_sd()
         except Exception:
             pass
-        time.sleep(0.1)
-    return FLASH_SAMPLE_DIR
+        if _is_dir(SD_SAMPLE_DIR):
+            root = SD_SAMPLE_DIR
+    _root_cache = root
+    return root
 
 
 def _ensure_sample_dir():
@@ -388,6 +443,91 @@ def _u16(b, o):
     return int.from_bytes(b[o:o + 2], 'little')
 
 
+WAV_HEADER_BYTES = 512   # one SD transaction; see _wav_info
+
+# --- Keeping the card out of the way while you play --------------------------
+# MEASURED, and it overturned how this sketch was being optimised: while the
+# browser reads WAV headers, EVERY note arrives late -- worst case 554ms -- and yet
+# the slowest loop() tick during that time was 19ms. Our Python is not what stalls;
+# SD activity delays MIDI delivery somewhere underneath us, and no amount of
+# shortening our own ticks touches it. (For comparison: `navigating` measures 146ms
+# worst-case against `playing` at 141ms -- i.e. menu work is free by comparison.)
+#
+# So the rule is not "be quick", it is "do not touch the card while notes are
+# playing". Three things enforce that:
+#   1. remember what we read, so re-browsing a folder costs nothing;
+#   2. only read headers when the pads have been quiet for a moment;
+#   3. never read a header for a row you cannot see (see service_hydrate).
+# Loading a sample still hits the card hard, and that is fine -- it is an explicit
+# action with LOADING on screen.
+NOTE_QUIET_MS = 400      # silence needed before we touch the card for a header
+DIR_CACHE_MAX = 32       # folders remembered (listings are small; this has to
+                         # exceed PRESCAN_MAX_DIRS or the prescan evicts itself)
+INFO_CACHE_MAX = 400     # per-file header results remembered
+
+_dir_cache = {}
+_info_cache = {}
+_last_note_ms = 0
+
+
+def note_activity_cb(m):
+    # The ONLY thing in this sketch's MIDI path, and it does one comparison and one
+    # assignment: record that a pad was hit. AMY still routes notes to sound in its
+    # own C firmware ([[native-midi-routing-for-timing]]) -- this observes, it does
+    # not trigger, so it cannot add jitter to the sound.
+    global _last_note_ms
+    if m and len(m) >= 3 and (m[0] & 0xF0) == 0x90 and m[2]:
+        _last_note_ms = time.ticks_ms()
+
+
+def pads_quiet():
+    # True when nothing has been played recently, i.e. it is safe to read the card.
+    return time.ticks_diff(time.ticks_ms(), _last_note_ms) >= NOTE_QUIET_MS
+
+
+def _cache_put(cache, key, value, limit):
+    # Bounded and dumb: when full, start over rather than track ages. These caches
+    # exist to make repeat visits free, not to be clever.
+    if len(cache) >= limit:
+        cache.clear()
+    cache[key] = value
+
+
+# Walking the sample tree AHEAD of you, in the gaps between hits.
+#
+# The single worst stall we still caused was the FIRST visit to a folder: reading
+# its directory took 181ms and made a note arrive 341ms late. Caching fixed the
+# second visit and did nothing for the first. So read the folders before they are
+# asked for -- one per loop() tick, and only while the pads are quiet, so the cost
+# lands in silence instead of mid-bar. By the time you open the browser the listing
+# is already in RAM and the click costs nothing.
+PRESCAN_MAX_DIRS = 24    # bounded: a huge card should not scan forever
+_prescan_queue = []
+_prescan_done = 0
+
+
+def start_prescan():
+    global _prescan_queue, _prescan_done
+    _prescan_queue = [sample_root()]
+    _prescan_done = 0
+
+
+def service_prescan():
+    # One directory per call. Returns True if it did work.
+    global _prescan_done
+    if not _prescan_queue or _prescan_done >= PRESCAN_MAX_DIRS:
+        return False
+    path = _prescan_queue.pop(0)
+    if path in _dir_cache:
+        return False
+    folders, _wavs = list_dir(path)      # caches it
+    _prescan_done += 1
+    for name in folders:
+        if len(_prescan_queue) < PRESCAN_MAX_DIRS:
+            _prescan_queue.append(path + '/' + name)
+    return True
+
+
 def _wav_info(path):
     # Parse enough of a WAV header to decide whether AMY can play it correctly.
     # Returns (channels, samplerate, bits, frames) or None if unreadable/not a
@@ -397,6 +537,66 @@ def _wav_info(path):
     # audio_format == 1 but NEVER checks bits-per-sample, and then computes frame
     # count assuming 16-bit. An 8- or 24-bit file loads "successfully" and plays
     # as garbage, which is a miserable thing to debug by ear. We screen it here.
+    # ONE read, parsed in memory. This used to walk the file with ~6 separate
+    # read()/seek() calls, MEASURED at 7-10ms per file on SD -- and the browser does
+    # this for every row you can see, one per loop() tick, so it was 7-10ms of MIDI
+    # not being serviced on each of those ticks ([[blocking-loop-stops-midi]]). A
+    # single 512-byte read costs one SD transaction; the chunk walk below then runs
+    # over bytes already in RAM.
+    #
+    # 512 bytes covers a canonical 44-byte header with room for the LIST/INFO or
+    # fact chunks writers put before `data`. A file whose `data` chunk starts beyond
+    # that falls back to _wav_info_walk() below -- rare, and worth the 7-10ms,
+    # because rejecting it would mark a perfectly good sample BAD and unclickable.
+    if path in _info_cache:
+        return _info_cache[path]        # never read the same header twice
+    try:
+        with open(path, 'rb') as f:
+            buf = f.read(WAV_HEADER_BYTES)
+    except Exception:
+        return None
+    try:
+        if len(buf) < 12 or buf[0:4] != b'RIFF' or buf[8:12] != b'WAVE':
+            return None
+        channels = samplerate = bits = 0
+        fmt_ok = False
+        frames = 0
+        found_data = False
+        pos = 12
+        while pos + 8 <= len(buf):
+            cid = buf[pos:pos + 4]
+            csize = _u32(buf, pos + 4)
+            body = pos + 8
+            if cid == b'fmt ':
+                if body + 16 > len(buf):
+                    return _wav_info_walk(path)
+                fmt_ok = (_u16(buf, body) == 1)       # 1 = uncompressed PCM
+                channels = _u16(buf, body + 2)
+                samplerate = _u32(buf, body + 4)
+                bits = _u16(buf, body + 14)
+            elif cid == b'data':
+                if channels and bits:
+                    frames = csize // (channels * (bits // 8))
+                found_data = True
+                break
+            pos = body + csize + (csize & 1)          # chunks are word-aligned
+        if not found_data:
+            # `data` sits past our one read (a big LIST/INFO block, say). Walk it
+            # properly rather than calling a good file bad.
+            info = _wav_info_walk(path)
+        elif not fmt_ok or not channels or not samplerate or not bits:
+            info = None
+        else:
+            info = (channels, samplerate, bits, frames)
+        _cache_put(_info_cache, path, info, INFO_CACHE_MAX)
+        return info
+    except Exception:
+        return None
+
+
+def _wav_info_walk(path):
+    # The original read/seek walk, kept ONLY as the fallback for headers too long
+    # for one buffered read. Same contract as _wav_info.
     try:
         with open(path, 'rb') as f:
             hdr = f.read(12)
@@ -415,7 +615,7 @@ def _wav_info(path):
                     body = f.read(csize)
                     if len(body) < 16:
                         return None
-                    fmt_ok = (_u16(body, 0) == 1)     # 1 = uncompressed PCM
+                    fmt_ok = (_u16(body, 0) == 1)
                     channels = _u16(body, 2)
                     samplerate = _u32(body, 4)
                     bits = _u16(body, 14)
@@ -424,7 +624,7 @@ def _wav_info(path):
                         frames = csize // (channels * (bits // 8))
                     break
                 else:
-                    f.seek(csize + (csize & 1), 1)    # chunks are word-aligned
+                    f.seek(csize + (csize & 1), 1)
             if not fmt_ok or not channels or not samplerate or not bits:
                 return None
             return (channels, samplerate, bits, frames)
@@ -495,6 +695,35 @@ def too_big_ever(info):
     return est > 0 and est * LOAD_HEAP_FACTOR + LOAD_HEAP_RESERVE > _max_heap
 
 
+# The two instruments that earned their keep, both OFF by default. Turn this on to
+# re-measure timing lag; see docs/FIRMWARE_NOTES.md for how to read them back.
+#   * a note-arrival ruler  (MIDI_TS / MIDI_PH) -- jitter in ms, no listening test
+#   * a loop-gap log        (LOOP_GAPS)         -- catches the board NOT calling us
+DEBUG_BROWSE = False
+_last_browse = None     # last directory list_dir() walked (debug only)
+
+# NOTHING IN THIS SKETCH MAY _dbg() DURING PLAY.
+#
+# MEASURED, and it explains what a dozen other theories did not: the board stopped
+# calling loop() for 100-3100ms at a time, with our own code accounting for ~3% of
+# each gap, and every late note fell inside one of those windows. _dbg() goes to
+# the USB CDC; if no host is reading that port the buffer fills and the write
+# blocks -- and USB MIDI shares the same USB stack, so a stalled CDC write delays
+# note delivery while our Python sits there looking innocent. It also explains why
+# polysynth is clean: it does not print.
+#
+# So debug output goes to a RAM ring and is read over the REPL like everything
+# else. _dbg() allocates one string; that is the whole cost.
+DBG_MAX = 60
+DBG = []
+
+
+def _dbg(msg):
+    if len(DBG) >= DBG_MAX:
+        del DBG[0]
+    DBG.append(msg)
+
+
 def list_dir(path):
     # (folders, wavs) in `path`, each sorted, wavs as (name, info, problem).
     # Anything unreadable is skipped rather than raising -- a half-transferred
@@ -505,36 +734,65 @@ def list_dir(path):
     # retry, bounded, before giving up. Only the DIRECTORY listing is retried this
     # way; per-file header reads below stay single-try (a boot-storm of mounts
     # inside the file loop is the pattern that hard-hangs the board).
+    if path in _dir_cache:
+        if DEBUG_BROWSE:
+            global _last_browse
+            _last_browse = path
+        return _dir_cache[path]         # revisiting a folder never touches the card
     folders = []
     wavs = []
-    names = None
-    for _attempt in range(SD_BROWSE_TRIES):
+    entries = None
+    t_start = time.ticks_ms()
+    for _attempt in range(2):
+        # Two passes, no sleeps: read it, and if that throws (the card's EIO
+        # dropout), re-mount ONCE and read it again. The old version slept 100ms
+        # between four attempts, which is 400ms of silenced box for a card that is
+        # usually fine by the second try. See sample_root() for the same lesson.
         try:
-            names = os.listdir(path)
+            # ilistdir yields (name, type, ...) -- the type comes from the directory
+            # entry the card already handed us, so splitting folders from files
+            # costs NOTHING here. The old code called os.stat() per entry for this,
+            # which MEASURED 14-21ms of the ~58ms browse: a third of the block, spent
+            # re-asking the card what it had just told us.
+            entries = [(e[0], e[1]) for e in os.ilistdir(path)]
             break
+        except AttributeError:
+            # No ilistdir on this firmware: fall back to listdir + stat per entry.
+            try:
+                entries = [(n, 0x4000 if _is_dir(path + '/' + n) else 0x8000)
+                           for n in os.listdir(path)]
+                break
+            except Exception:
+                pass
         except Exception:
             try:
                 amyboard.mount_sd()
             except Exception:
                 pass
-            time.sleep(0.1)
-    if names is None:
+    if entries is None:
         return ([], [])
-    for name in names:
+    for name, etype in entries:
         # Hide OS bookkeeping: dotfiles (.DS_Store, ._AppleDouble resource forks,
         # .Spotlight-V100, .Trashes, .fseventsd) and Windows' "System Volume
         # Information". These are never samples and just clutter the browser.
         if name.startswith('.') or name == 'System Volume Information':
             continue
-        full = path + '/' + name
-        if _is_dir(full):
+        if etype & 0x4000:                 # S_IFDIR
             folders.append(name)
         elif name.lower().endswith('.wav'):
-            info = _wav_info(full)
-            wavs.append((name, info, sample_problem(info)))
+            # NO header read here -- that is the expensive part (~6ms per file) and
+            # it now happens one file per loop() tick, in _service_hydrate().
+            wavs.append(name)
     folders.sort()
     wavs.sort()
-    return (folders, wavs)
+    result = (folders, wavs)
+    _cache_put(_dir_cache, path, result, DIR_CACHE_MAX)
+    if DEBUG_BROWSE:
+        _last_browse = path
+        _dbg('BROWSE %s: %dms (no header reads) dirs=%d wavs=%d' % (
+            path, time.ticks_diff(time.ticks_ms(), t_start),
+            len(folders), len(wavs)))
+    return result
 
 
 # --- Robust in-memory load path (from drumkit.py) ---------------------------
@@ -800,7 +1058,7 @@ def load_slot(i, path):
         amy.load_sample_bytes(pcm, preset=PRESET_BASE + i,
                               midinote=NATIVE_NOTE, sr=sr)
     except Exception as e:
-        print('load_sample_bytes failed:', path, e)
+        _dbg('load_sample_bytes failed: %s: %s' % (path, e))
         return 'ERR'
     slot_paths[i] = path
     slot_info[i] = (channels, sr, bits, frames)
@@ -946,12 +1204,9 @@ def _render_fault(where, exc):
     if where in _render_faults:
         return
     _render_faults.add(where)
-    print('RENDER FAULT in %s: %s: %s' % (where, type(exc).__name__, exc))
-    try:
-        import sys
-        sys.print_exception(exc)
-    except Exception:
-        pass
+    # RAM, not serial: see _dbg. A print here would stall USB (and with it MIDI)
+    # exactly when something is already going wrong.
+    _dbg('RENDER FAULT in %s: %s: %s' % (where, type(exc).__name__, exc))
 
 
 def init_display():
@@ -968,10 +1223,9 @@ def init_display():
 
 
 def _push_rows(y0, y1):
-    # Windowed refresh: send only framebuffer rows [y0, y1] to the panel instead
-    # of the whole 8KB frame. Only the SSD1327 is handled directly (it lacks a
-    # partial show() in firmware); return False for anything else so the caller
-    # falls back to a normal full refresh.
+    # Windowed push: send framebuffer rows [y0, y1] and nothing else. Only the
+    # SSD1327 is handled directly (it lacks a partial show() in firmware); return
+    # False for anything else so the caller falls back to a full refresh.
     try:
         hw = amyboard.display._hw
     except Exception:
@@ -996,70 +1250,169 @@ def _push_rows(y0, y1):
         return False
 
 
-# Progressive framebuffer flush. A full 128x128 refresh blits 8KB over the
-# 400kHz I2C bus (240ms MEASURED) and blocks the single MicroPython thread long
-# enough to drop a trigger. These helpers push the framebuffer in bounded row
-# BANDS spread across successive loop() calls, so no single refresh exceeds
-# ~19ms (a 12-row band) instead of 240ms in one go.
-FLUSH_BAND_ROWS = 12         # MEASURED: 12 rows (768B) = 19ms, full 8KB = 240ms
+# Pushing the framebuffer to the panel: ONE full-frame blit, every time, ~3ms.
+#
+# MEASURED on the board over the REPL (min/median of 7 trials, because a single
+# average is swamped by the 13-71ms preemptions this firmware does a couple of times
+# a second -- an earlier sweep produced nonsense like "2 rows costs 6ms, 4 rows
+# costs 0.4ms" for exactly that reason):
+#
+#   display_refresh(), whole frame     2.6 / 3.4 ms
+#   fill(0) THEN display_refresh()     2.7 / 2.9 ms   <- content changed: same cost
+#   _push_rows(), 12 rows              3.3 / 24.3 ms  <- our windowed path
+#   _push_rows(), whole frame          214 / 222 ms
+#   whole frame as 11 x 12-row bands   194 / 240 ms
+#
+# Two things follow. First, display_refresh() is a real full blit (drawing first
+# does not change its cost -- that is the check that proves it is not just skipping
+# a clean framebuffer), and at ~3MB/s it is clearly SPI, not the 400kHz I2C every
+# comment in this file and polysynth assumed. Second, WINDOWING IS A PESSIMIZATION
+# HERE: our Python-level write_data is ~8x slower for 12 rows than the firmware's
+# blit is for all 128. Polysynth windows every push and caps rows-per-refresh to
+# protect its note timing; do not copy that here without re-measuring, and note its
+# own 19ms/band figure agrees with our 24ms -- what it never compared against was
+# display_refresh(). See [[panel-is-fast-flush-unneeded]].
+_frame_max_ms = 0        # worst frame seen (draw + push), reported when it grows
 
-# How many bands go out per loop() tick. Polysynth pushes ONE (19ms) because its
-# MIDI runs through a Python callback, so a long blocking write there can drop a
-# note. THIS sketch has nothing in the trigger path -- notes are routed inside AMY's
-# C firmware (grab_midi_notes) -- so blocking MicroPython longer costs us no timing
-# at all, it only delays our own encoder poll (and the Seesaw counts detents in
-# hardware meanwhile, so none are lost). loop() arrives every ~69ms and we use ~7ms
-# of it, so three bands (~57ms) still fits inside a tick: a full-screen repaint
-# lands in ~4 ticks instead of ~11 (760ms -> ~280ms), which is most of what made
-# the menu feel laggy.
-FLUSH_BANDS_PER_TICK = 3
-
-# Pending panel regions as [y0, y1], drained HEAD FIRST, each shrinking as its
-# bands go out. A list rather than one region so a cursor move can push the two
-# 12px rows that actually changed -- new one FIRST -- instead of one fat band
-# spanning everything between them. That span is what made a fast (accelerated)
-# scroll look like the cursor VANISHED: the row it left was cleared and pushed
-# immediately, while the row it landed on sat at the far end of the band, several
-# ticks away.
-_flush_q = []
-
-
-def _begin_flush(y0, y1):
-    # Start fresh: this region supersedes anything still pending (the framebuffer
-    # it would have pushed has already been redrawn).
-    del _flush_q[:]
-    _queue_flush(y0, y1)
+# Panel keepalive. The framebuffer is ALWAYS the truth -- dumped from the board, it
+# holds exactly what we last drew -- but the panel can end up showing something else
+# entirely, because the launcher's global overlay draws and pushes through the same
+# display while we are paused. When it hands control back, whatever it pushed last
+# stays on the glass, and nothing of ours is dirty, so we never push again: its menu
+# text just sits there.
+#
+# Rather than keep chasing which of the two pushes lands last (a repaint window on
+# Resume did not fix it, so that theory was wrong), re-push the frame we already
+# have once a second. No redrawing, just a blit of a buffer that is already correct:
+# ~3ms a second, 0.3% of a tick, and the panel cannot stay wrong for longer than
+# that no matter who else writes to it.
+# 5s, not 1s: the timeline showed this blitting 4ms EVERY second forever, which is
+# pure waste now that the real cure for the launcher's leftovers is the top-band
+# push in _show(). Kept as a slow backstop rather than deleted, since it costs
+# almost nothing at this interval and the overlay can still draw over us.
+# 30s. This exists only to defeat the launcher overlay's leftovers, and a full
+# repaint is no longer free: it is ~190ms of panel bus, spread over ticks. Any real
+# screen change repaints anyway (including rows 0-1, which is what the launcher
+# leaves behind), so this is a rare backstop, not a heartbeat.
+PANEL_KEEPALIVE_MS = 30000
+_last_push_ms = 0
 
 
-def _queue_flush(y0, y1):
-    # Add a region BEHIND whatever is already pending.
-    _flush_q.append([max(0, min(127, int(y0))), max(0, min(127, int(y1)))])
+def _service_panel():
+    # Re-push if nothing has gone out for a while. Cheap enough to be unconditional.
+    if time.ticks_diff(time.ticks_ms(), _last_push_ms) >= PANEL_KEEPALIVE_MS:
+        _show()
 
 
-def _service_flush():
-    # Push up to FLUSH_BANDS_PER_TICK bands per call. Returns True while anything
-    # is still pending, so the caller defers its own drawing until the panel is
-    # settled (drawing into a framebuffer mid-flush would tear across regions).
-    if not _flush_q:
-        return False
-    for _ in range(FLUSH_BANDS_PER_TICK):
-        if not _flush_q:
-            break
-        r = _flush_q[0]
-        b = min(r[1], r[0] + FLUSH_BAND_ROWS - 1)
-        if not _push_rows(r[0], b):
-            # Panel can't do windowed pushes -> one full refresh and give up
-            # chunking (everything pending is covered by a full refresh anyway).
+# The launcher draws its menu title at y=0 (wrapper_sketch.py: `frame = [(0, 't',
+# ...)]`), and its row clear only covers y..y+LINE_H. Our title is at y=2, so rows
+# 0-1 belong to the launcher's glyphs alone -- nothing we draw is ever aimed there.
+# display_refresh() does not appear to reach those rows either (a line drawn at
+# buffer rows 0-1 shows up NOT flush with the top edge, while the launcher's
+# windowed writes clearly do reach row 0), which is why the top slice of "AMYBOARD"
+# survived every repaint, keepalive and full-screen clear we threw at it.
+#
+# So push those two rows explicitly through the windowed path. Our rows 0-1 are
+# always blank -- no part of this UI starts above y=2 -- so this writes black over
+# whatever the launcher left, and it is a no-op if the hardware ever stops needing
+# it. MEASURED at 0.3ms for a 2-row window, so it can ride along with every push.
+TOP_BAND_ROWS = 2
+
+
+PUSH_ROWS_PER_TICK = 12  # one menu row's worth of panel bus per tick (~18ms)
+_push_q = []             # [y0, y1] regions still to go out
+
+
+def _queue_push(y0, y1):
+    y0 = max(0, min(127, int(y0)))
+    y1 = max(0, min(127, int(y1)))
+    if y1 >= y0:
+        _push_q.append([y0, y1])
+
+
+def _service_push():
+    # Send at most PUSH_ROWS_PER_TICK rows, then hand the CPU back. Called every
+    # tick from loop() and immediately by _show(), so a one-row change lands at
+    # once while a whole-screen change spreads over the next few ticks.
+    global _last_push_ms
+    budget = PUSH_ROWS_PER_TICK
+    while _push_q and budget > 0:
+        r = _push_q[0]
+        rows = min(budget, r[1] - r[0] + 1)
+        if not _push_rows(r[0], r[0] + rows - 1):
+            del _push_q[:]                     # no windowed push on this panel
             try:
                 amyboard.display_refresh()
             except Exception:
                 pass
-            del _flush_q[:]
-            return True
-        r[0] = b + 1
+            break
+        r[0] += rows
+        budget -= rows
         if r[0] > r[1]:
-            _flush_q.pop(0)
-    return True
+            _push_q.pop(0)
+    _last_push_ms = time.ticks_ms()
+
+
+def _show(y0=0, y1=127):
+    # Push ONLY the rows that changed, and never the whole frame in one blocking
+    # go. MEASURED, and it is the whole ballgame:
+    #
+    #   display_refresh() RETURNS in ~3ms but the transfer is 8KB over a 400kHz
+    #   bus, and the firmware blocks on it before calling loop() again. The gap log
+    #   caught exactly that: 184-193ms windows where we were NOT CALLED, our own
+    #   code accounting for 6-8ms of them, every one on a tick that had rendered.
+    #   8192 bytes at 400kHz is ~190ms. Polysynth budgets the same figure and only
+    #   ever pushes changed rows, which is why it stays smooth.
+    #
+    # An earlier bench "proved" a full blit cost 3ms and I deleted the windowing on
+    # the strength of it. That was a return time, not bus time -- the cost simply
+    # moved somewhere my instrument was not looking. Windowed writes are honest:
+    # they block in OUR tick, where they are bounded and attributable.
+    _queue_push(y0, y1)
+    _service_push()
+
+
+# --- Note-arrival ruler (DEBUG_BROWSE) ---------------------------------------
+# Timing lag is measurable, and measuring it beats asking anyone to judge audio.
+# Hold a steady pattern: the arrival intervals should be constant, and deviation IS
+# the defect, in milliseconds. Each arrival is tagged with what the sketch was doing
+# (ACT_*), so lag breaks down by activity out of ordinary use -- no test phases to
+# tell apart by ear. Read it back over the REPL; see docs/FIRMWARE_NOTES.md.
+#
+# Writes an int into a preallocated list, which allocates nothing for values this
+# size, so the instrument cannot cause the garbage it might otherwise be blamed for.
+MIDI_N = 600
+MIDI_TS = [0] * MIDI_N       # ticks_ms of each note-on
+MIDI_PH = bytearray(MIDI_N)  # the ACT_* code in force when it landed
+MIDI_I = 0
+
+ACT_NAMES = ('playing', 'menu-idle', 'navigating', 'transition', 'browsing',
+             'loading')
+ACT_PLAYING, ACT_MENU, ACT_NAV, ACT_TRANS, ACT_BROWSE, ACT_LOAD = 0, 1, 2, 3, 4, 5
+_activity = ACT_PLAYING
+
+
+def _midi_watch(m):
+    global MIDI_I
+    if not m or len(m) < 3:
+        return
+    if (m[0] & 0xF0) != 0x90 or m[2] == 0:      # note-on with velocity only
+        return
+    MIDI_TS[MIDI_I] = time.ticks_ms()
+    MIDI_PH[MIDI_I] = _activity
+    MIDI_I = (MIDI_I + 1) % MIDI_N
+
+
+def setup_midi_watch():
+    # note_activity_cb SHIPS -- it is what keeps card reads out of your playing.
+    # _midi_watch is the debug-only ruler on top of it.
+    try:
+        import midi
+        midi.add_callback(note_activity_cb)
+        if DEBUG_BROWSE:
+            midi.add_callback(_midi_watch)
+    except Exception as e:
+        _dbg('MIDI callback unavailable: %s' % e)
 
 
 def _boot_wipe(now):
@@ -1143,7 +1496,7 @@ class SlotMonitor:
                 c = 200 if slot_paths[i] else 70
                 d.text(note_name(slot_note(i)), x, y, c)
                 d.text(slot_label(i)[:5], x + 3 * CHAR_W, y, c)
-            _begin_flush(0, 127)
+            _show()
         except Exception as e:
             _render_fault('SlotMonitor.render', e)
 
@@ -1156,8 +1509,6 @@ def service_display():
     if not DISPLAY_OK:
         return
     if _boot_wipe(now):
-        return
-    if _service_flush():
         return
     monitor.render()
 
@@ -1292,6 +1643,9 @@ class _MenuLevel:
         if click:
             cb = self.items[self.idx][1]
             if cb:
+                if DEBUG_BROWSE:
+                    # Name the action, so a slow nav tick in SLOW says WHICH one.
+                    _tag('nav:' + self.items[self.idx][0][:14])
                 cb()
                 menu.dirty = True
 
@@ -1327,8 +1681,9 @@ class _MenuLevel:
             self.start = start
 
             # Incremental path: same page as last paint and only the cursor moved.
-            # Repaint just the old + new cursor rows and flush that tight band; the
-            # title, page dots and untouched rows already stand in the framebuffer.
+            # Redraw the two rows whose highlight changed and push ONLY those --
+            # two 12px windows instead of 8KB, i.e. ~36ms of panel bus instead of
+            # ~190ms of the board not calling us at all.
             if (start == self._shown_start and self._shown_idx >= 0
                     and self._shown_idx != self.idx):
                 y_old = self._row_y(self._shown_idx - start)
@@ -1336,12 +1691,8 @@ class _MenuLevel:
                 self._paint_row(d, self._shown_idx, start, n)
                 self._paint_row(d, self.idx, start, n)
                 self._shown_idx = self.idx
-                # Two 12px regions, the row the cursor LANDED ON first, so it shows
-                # up on the very next tick however far the spin jumped. (One band
-                # spanning both rows meant an accelerated jump left no cursor on
-                # screen until the band had crawled all the way down.)
-                _begin_flush(y_new, y_new + MENU_LINE_H - 1)
-                _queue_flush(y_old, y_old + MENU_LINE_H - 1)
+                _show(y_new, y_new + MENU_LINE_H - 1)    # the row you moved TO first
+                _queue_push(y_old, y_old + MENU_LINE_H - 1)
                 return
 
             # Full repaint: first paint of this level, a page crossing, or a
@@ -1359,12 +1710,7 @@ class _MenuLevel:
                 _draw_menu_row(d, MENU_PAGE_Y, 'q', (total_pages, page))
             self._shown_idx = self.idx
             self._shown_start = start
-            # Cursor row first, then the whole screen: on a page crossing the
-            # cursor is visible after one tick instead of waiting for the sweep to
-            # reach its band. Costs one duplicated 12px band.
-            y_cur = self._row_y(self.idx - start)
-            _begin_flush(y_cur, y_cur + MENU_LINE_H - 1)
-            _queue_flush(0, 127)
+            _show()
         except Exception as e:
             _render_fault('_MenuLevel.render', e)
 
@@ -1546,21 +1892,24 @@ class _SlotEditor:
                     self._paint_row(d, ri)
                 self.full = False
                 self._shown_idx = self.idx
-                _begin_flush(0, 127)
+                _show()
                 return
             if self._shown_idx != self.idx:
-                # Cursor moved: repaint the two affected rows, flush that band.
+                # Cursor moved: redraw and push the two affected rows.
+                y_old = self._row_y(self._shown_idx)
+                y_new = self._row_y(self.idx)
                 self._paint_row(d, self._shown_idx)
                 self._paint_row(d, self.idx)
-                y0 = self._row_y(min(self._shown_idx, self.idx))
-                y1 = self._row_y(max(self._shown_idx, self.idx)) + MENU_LINE_H - 1
                 self._shown_idx = self.idx
-                _begin_flush(y0, y1)
+                _show(y_new, y_new + MENU_LINE_H - 1)
+                _queue_push(y_old, y_old + MENU_LINE_H - 1)
             else:
-                # Same row, value or edit-mode changed: repaint just this row.
+                # Turning a param value: ONE row changes, so one 12px window goes
+                # out. This is the case you cannot tolerate lag on -- it touches no
+                # SD and used to cost a full-frame blit for a single number.
                 self._paint_row(d, self.idx)
                 y = self._row_y(self.idx)
-                _begin_flush(y, y + MENU_LINE_H - 1)
+                _show(y, y + MENU_LINE_H - 1)
         except Exception as e:
             _render_fault('_SlotEditor.render', e)
 
@@ -1575,6 +1924,8 @@ class SketchMenu:
         self._toast_drawn = False
         self._browse_slot = 0    # which slot the open browser is choosing for
         self._click_pending_at = 0   # ticks of a deferred editor single-click (0=none)
+        self._hydrate = None     # browser rows still waiting for their WAV header
+        self._slots_level = None  # cached SLOTS level; rebuilt only when it changes
 
     @property
     def is_open(self):
@@ -1639,16 +1990,22 @@ class SketchMenu:
     # -- Menu tree -----------------------------------------------------------
 
     def _root(self):
-        return _MenuLevel('TRIGGERBOX', [
+        items = [
             ('Slots', self._open_slots),
             ('MIDI base note', self._open_base_note),
             ('Resume playing', self.close),
-        ])
+        ]
+        return _MenuLevel('TRIGGERBOX', items)
 
     def _build_slots_level(self):
-        # The SLOTS list: one row per pad, "<note> <sample>". Factored out so it can
-        # be rebuilt in place after a load/clear (see _refresh_slots_list) to show
-        # the new label when you back out of the editor.
+        # The SLOTS list: one row per pad, "<note> <sample>".
+        #
+        # BUILT ONCE and reused (see _open_slots). MEASURED at 3.9-5.8ms -- twelve
+        # label strings, twelve tuples and twelve closures -- which is both a chunk
+        # of the click's own cost AND the garbage that eventually buys a 35-41ms
+        # gc.collect() at some unrelated moment. Every millisecond inside loop() is
+        # a millisecond MIDI is not serviced ([[blocking-loop-stops-midi]]), so the
+        # cheapest work is work that does not happen twice.
         items = []
         for i in range(NUM_SLOTS):
             items.append(('%s %s' % (note_name(slot_note(i)), slot_label(i)),
@@ -1656,7 +2013,11 @@ class SketchMenu:
         return _MenuLevel('SLOTS', items)
 
     def _open_slots(self):
-        self._push_level(self._build_slots_level())
+        # Reuse the cached level, keeping its cursor where you left it. Rebuilt only
+        # when the slot contents actually change (_refresh_slots_list).
+        if self._slots_level is None:
+            self._slots_level = self._build_slots_level()
+        self._push_level(self._slots_level)
 
     def _slot_opener(self, i):
         # Clicking a slot now opens its EDITOR (params + Load + Clear), not the
@@ -1667,16 +2028,15 @@ class SketchMenu:
         return go
 
     def _refresh_slots_list(self):
-        # Rebuild the SLOTS list wherever it sits in the stack (under the editor),
-        # preserving its cursor, so a load/clear is reflected when you back out to
-        # it. Cheap and idempotent; a no-op if the list isn't currently open.
+        # A load/clear/base-note change altered the labels: rebuild the cached level
+        # (preserving the cursor) and swap it in wherever it currently sits in the
+        # stack, so backing out of the editor shows the new name.
+        keep = self._slots_level.idx if self._slots_level else 0
+        self._slots_level = self._build_slots_level()
+        self._slots_level.idx = clamp(keep, 0, len(self._slots_level.items) - 1)
         for si in range(len(self.stack)):
-            lvl = self.stack[si]
-            if getattr(lvl, 'title', None) == 'SLOTS':
-                keep = lvl.idx
-                new = self._build_slots_level()
-                new.idx = clamp(keep, 0, len(new.items) - 1)
-                self.stack[si] = new
+            if getattr(self.stack[si], 'title', None) == 'SLOTS':
+                self.stack[si] = self._slots_level
                 break
 
     def _open_browser(self, i):
@@ -1704,32 +2064,21 @@ class SketchMenu:
         items = []
         for name in folders:
             items.append(('/' + name, self._dir_opener(path + '/' + name)))
-        # PSRAM left for THIS slot, crediting back whatever it holds now (loading a
-        # pad unloads its old sample first). Drives the '~' "wont fit right now"
-        # marker below.
-        avail = psram_free(exclude_slot=self._browse_slot)
-        for name, info, problem in wavs:
-            if problem:
-                # Show WHY it's unusable, TAG FIRST so the reason survives the row's
-                # width truncation (a long filename would otherwise push the tag
-                # off-screen and the file just looks inert on click). Still listed,
-                # not hidden, so a file you expected to see doesn't just vanish.
-                items.append(('!%s %s' % (problem, name), None))
-            elif too_big_ever(info):
-                # Too large to load even on an empty board: mark '[x]' up front and
-                # make it unclickable, but keep it visible so a file that's simply
-                # too big doesn't read as "missing from the card".
-                items.append(('[x] %s' % name, None))
-            elif est_psram_bytes(info) > avail:
-                # Fits on an empty board but not in the PSRAM left RIGHT NOW: mark
-                # '~' as a soft warning. Still CLICKABLE -- freeing a pad may make
-                # room, and if it truly won't fit the load fails cleanly ('FULL').
-                items.append(('~%s %.2fs' % (name, sample_secs(info)),
-                              self._wav_opener(path + '/' + name)))
-            else:
-                items.append(('%s %.2fs' % (name, sample_secs(info)),
-                              self._wav_opener(path + '/' + name)))
+        # Rows for the WAVs go up IMMEDIATELY, with just their names -- reading the
+        # headers that produce the duration and the !BAD / [x] / ~ marks costs ~6ms
+        # per file, and doing all of them here is what stalled playback. The marks
+        # fill in one file per loop() tick from _service_hydrate(); a row is fully
+        # clickable meanwhile, since load_slot() re-validates anyway.
+        hydrate = []
+        for name in wavs:
+            hydrate.append((len(items), name))
+            items.append((name, self._wav_opener(path + '/' + name)))
         if not items:
+            # An empty listing is the ONE signal that the cached root might be
+            # stale (card pulled, swapped, or a mount that really did drop), so
+            # re-probe on the next browse. Everywhere else we trust the cache --
+            # that is what keeps a 165ms mount_sd() off the click path.
+            forget_sample_root()
             # Say WHY it's empty. "No samples" on a board whose card silently
             # failed to mount is the single most confusing state this sketch can
             # be in, so name the actual cause instead of leaving the user to
@@ -1752,7 +2101,76 @@ class SketchMenu:
             title = path.rsplit('/', 1)[-1][:MENU_LABEL_MAX].upper()
         # accel=True: a samples folder can hold hundreds of files, and this is the
         # one list where 1:1 scrolling means a long grind to the bottom.
-        self._push_level(_MenuLevel(title, items, accel=True))
+        lvl = _MenuLevel(title, items, accel=True)
+        self._push_level(lvl)
+        self._hydrate = {'level': lvl, 'path': path, 'pending': hydrate,
+                         'slot': self._browse_slot}
+
+    def _wav_row(self, path, name, info):
+        # The label + click action for one WAV, once its header has been read.
+        # PSRAM left for THIS slot credits back whatever it holds now, since loading
+        # a pad unloads its old sample first.
+        problem = sample_problem(info)
+        if problem:
+            # Show WHY it's unusable, TAG FIRST so the reason survives the row's
+            # width truncation (a long filename would otherwise push the tag
+            # off-screen and the file just looks inert on click). Still listed, not
+            # hidden, so a file you expected to see doesn't just vanish.
+            return ('!%s %s' % (problem, name), None)
+        if too_big_ever(info):
+            # Too large to load even on an empty board: mark '[x]' up front and make
+            # it unclickable, but keep it visible so a file that's simply too big
+            # doesn't read as "missing from the card".
+            return ('[x] %s' % name, None)
+        if est_psram_bytes(info) > psram_free(exclude_slot=self._browse_slot):
+            # Fits on an empty board but not in the PSRAM left RIGHT NOW: mark '~'
+            # as a soft warning. Still CLICKABLE -- freeing a pad may make room, and
+            # if it truly won't fit the load fails cleanly ('FULL').
+            return ('~%s %.2fs' % (name, sample_secs(info)), self._wav_opener(path))
+        return ('%s %.2fs' % (name, sample_secs(info)), self._wav_opener(path))
+
+    def service_hydrate(self):
+        # Read ONE WAV header per loop() tick and fill in that row. This is the
+        # whole point of the split: the browse itself is now just a directory read,
+        # and the ~6ms-per-file header work is spread one tick apart instead of
+        # landing in a single ~58ms block that silences the box (see
+        # [[blocking-loop-stops-midi]]).
+        h = self._hydrate
+        if not h or not self.is_open or self.cur is not h['level']:
+            return False
+        if not pads_quiet():
+            # You are playing. Reading a header from the card makes notes arrive
+            # late -- MEASURED at up to 554ms, with our own loop never blocking for
+            # more than 19ms, so this is not something we can fix by being quick.
+            # The durations and marks are cosmetic; they can wait for a gap.
+            return False
+        pending = h['pending']
+        if not pending:
+            self._hydrate = None
+            return False
+        lvl = h['level']
+        # ONLY hydrate rows that are on screen. Reading a header costs 7-10ms
+        # (MEASURED in the slow-tick log), and hydrating a 200-file folder top to
+        # bottom put that on EVERY tick for half a minute -- work nobody asked for,
+        # since the marks only mean anything on a row you can see. Off-screen rows
+        # wait until you scroll to them. lvl.start is the visible page's first row.
+        pick = None
+        for n in range(len(pending)):
+            if lvl.start <= pending[n][0] < lvl.start + MENU_VISIBLE:
+                pick = n
+                break
+        if pick is None:
+            return False
+        idx, name = pending.pop(pick)
+        full = h['path'] + '/' + name
+        try:
+            lvl.items[idx] = self._wav_row(full, name, _wav_info(full))
+        except Exception as e:
+            _render_fault('service_hydrate', e)
+            return False
+        lvl.invalidate()          # the label changed: repaint the level
+        self.dirty = True
+        return True
 
     def _dir_opener(self, path):
         def go():
@@ -1766,6 +2184,7 @@ class SketchMenu:
             # single full refresh, since no loop() ticks will run to service a
             # progressive one.
             _blocking_notice('LOADING...', path.rsplit('/', 1)[-1][:14])
+            flush_settings()      # already a blocking moment: spend it here
             problem = load_slot(i, path)
             self._save_slots()
             # Unwind the browser (however deep in subfolders) back to the slot
@@ -1846,15 +2265,23 @@ class SketchMenu:
             w = len(msg) * CHAR_W
             d.text(msg, clamp((DISPLAY_WIDTH - w) // 2, 0,
                               max(0, DISPLAY_WIDTH - w)), 60, 255)
-            _begin_flush(0, 127)
+            _show()
         except Exception as e:
             _render_fault('_draw_toast', e)
 
     def render(self):
-        # If a progressive repaint is in flight, keep pushing bands and defer any
-        # new drawing until the panel is settled.
-        if _service_flush():
-            return
+        # Every path below draws and pushes within the same tick -- there is no
+        # longer a multi-tick repaint to defer around (see _show).
+        global _frame_max_ms
+        t0 = time.ticks_ms()
+        self._render()
+        dt = time.ticks_diff(time.ticks_ms(), t0)
+        if dt > _frame_max_ms:
+            _frame_max_ms = dt
+            if DEBUG_BROWSE:
+                _dbg('FRAME: worst menu frame so far %dms' % dt)
+
+    def _render(self):
         if self._toast_msg:
             if time.ticks_diff(time.ticks_ms(), self._toast_until) < 0:
                 if not self._toast_drawn:
@@ -1872,13 +2299,22 @@ menu = SketchMenu()
 _prev_menu_open = False
 _last_input_ms = 0
 
+# After a global-overlay Resume, keep repainting for a short window instead of once.
+# The framebuffer dump proved we DO redraw and push on resume -- and then the
+# launcher pushes its own overlay frame on top of ours. After that nothing of ours
+# is dirty, so we never push again and its menu text sits on the panel forever.
+# Repainting for a few ticks wins that race whichever order the two pushes land in;
+# at ~3ms a frame (see _show) the handful of extra blits costs nothing.
+RESUME_REPAINT_MS = 400
+_repaint_until = 0
+
 
 def _pump_menu():
     # Feed the launcher's abstract input to the menu, report our depth, and flag
     # a repaint whenever we drop back to playing so the monitor redraws over the
     # menu's leftover pixels. After MENU_IDLE_MS with no input the menu suspends
     # back to the monitor, keeping its stack for resume.
-    global _prev_menu_open, _last_input_ms
+    global _prev_menu_open, _last_input_ms, _repaint_until
     now = time.ticks_ms()
     # Returning from the global overlay: close our own menu so Resume always
     # lands on playing, repaint the monitor, and start a fresh idle window.
@@ -1886,6 +2322,7 @@ def _pump_menu():
         launcher.resumed = False
         menu.close()
         launcher.repaint = True
+        _repaint_until = time.ticks_add(now, RESUME_REPAINT_MS)
         _last_input_ms = now
         _prev_menu_open = False
     have_input = launcher.delta or launcher.click or launcher.back
@@ -1898,6 +2335,7 @@ def _pump_menu():
         # suspended we report depth >= 2 so the launcher delivers a hold to us
         # rather than escaping to the global menu.
         if have_input:
+            _tag('wake')             # idle screen -> back into the menu
             menu.resume()
         _prev_menu_open = menu.is_open
         launcher.menu_depth = max(2, menu.depth) if menu.suspended else menu.depth
@@ -1907,7 +2345,8 @@ def _pump_menu():
         menu.handle(launcher.delta, launcher.click, launcher.back)
         menu.service_pending(now)             # fire a deferred editor single-click
         if menu.is_open and time.ticks_diff(now, _last_input_ms) >= MENU_IDLE_MS:
-            menu.suspend()
+            _tag('idle')             # menu -> idle screen (this writes flash if a
+            menu.suspend()           # param edit was still pending: ~150ms)
             launcher.repaint = True
     elif launcher.click or launcher.delta:   # a click OR a turn opens our menu
         menu.open()
@@ -1922,6 +2361,7 @@ def _pump_menu():
 # ---------------------------------------------------------------------------
 init_engine()
 init_display()
+setup_midi_watch()      # DEBUG_BROWSE only: timestamps note arrivals, see above
 
 # Best-case free heap, measured once now (empty board, before any sample loads).
 # Loaded samples occupy PSRAM, not this heap, so it stays ~constant -- making it a
@@ -1945,6 +2385,10 @@ except Exception:
     _restore_queue = []
 _restore_total = len(_restore_queue)
 _boot_ticks = None      # ticks_ms of the first loop(); gates the SD settle delay
+if not _restore_queue:
+    start_prescan()     # nothing to restore: start warming the folder cache now
+                        # (with samples to restore, _service_restore starts it once
+                        # the queue drains, so the two never fight over the card)
 
 
 def _service_restore():
@@ -1975,10 +2419,106 @@ def _service_restore():
         _set_setting('slots', slot_paths)
     if not _restore_queue:
         monitor.on_activate()      # repaint the monitor over the notice
+        flush_settings()           # boot's blocking window: a free moment to write
+        start_prescan()            # warm the browser's folder cache from here on
     return True
 
 
+# Per-tick watchdog (DEBUG_BROWSE): report any loop() turn long enough to be heard.
+#
+# DO NOT call gc.mem_free() (or gc.mem_alloc()) in here to spot collections. Both
+# walk the whole heap to count blocks, and this board's heap is ~3.5MB of PSRAM:
+# MEASURED at ~15ms per call, so sampling it either side of the tick added ~31ms to
+# EVERY tick and made the box audibly jittery while completely idle. The probe was
+# the entire signal. Same family as amy.millis() at ~97ms a call --
+# see [[amyboard-timing-gotchas]].
+LOOP_WARN_MS = 6
+SLOW_MAX = 80
+SLOW = []                # (dt, tag, input_ms, hydrate_ms, render_ms) per slow tick
+
+# A rolling timeline of EVERY tick, not just the slow ones -- because a cost that
+# never crosses the warn threshold can still be audible, and because what matters
+# for something like "waking from the idle screen" is the SHAPE of several ticks in
+# a row, not one outlier. Two preallocated bytearrays and an index: assigning ints
+# into them allocates NOTHING, which matters when the thing we are hunting is
+# partly garbage-collection pauses. Duration is capped at 255ms per slot.
+#
+# It also TRIGGERS AND FREEZES, like a logic analyser. 240 ticks is only ~16s of
+# history, so the first capture of an idle/wake test had already been overwritten
+# by the time it was read -- every tick came back tagged '-'. Now a tagged
+# transition arms a countdown, and when that expires recording STOPS, so the window
+# around the interesting moment survives until it is read.
+TICK_N = 400
+TICK_DT = bytearray(TICK_N)
+TICK_TAG = bytearray(TICK_N)
+TICK_I = 0
+TICK_HOLD = 60           # keep recording this many ticks after a transition
+TICK_ARMED = 0           # >0 = counting down to freeze; -1 = frozen
+_trigger_tags = (1, 4, 5)   # nav, wake, idle
+TAG_CODES = {'-': 0, 'nav': 1, 'scroll': 2, 'restore': 3, 'wake': 4, 'idle': 5}
+TAG_NAMES = ('-', 'nav', 'scroll', 'restore', 'wake', 'idle', 'nav:item')
+_tick_tag = '-'
+_t_input = 0
+_t_hydrate = 0
+_t_render = 0
+
+
+def _tag(what):
+    global _tick_tag
+    _tick_tag = what
+
+
+_prev_tick_ms = 0
+LOOP_GAPS = []           # (t, gap_since_last_entry, our_duration_last_tick, tag)
+GAP_WARN_MS = 100
+_prev_dt = 0
+
+
 def loop():
+    # Slow ticks are LOGGED TO RAM, not printed. _dbg() goes out the USB CDC, which
+    # has wedged repeatedly this session, and a per-tick print is itself expensive
+    # enough to distort what it measures. Read the log back over the REPL instead:
+    #   sys.modules['sketch']._sketch_loop.__globals__['SLOW']
+    # (see [[launcher-execs-sketches]] for why that path reaches a running sketch).
+    global _tick_tag, _t_input, _t_hydrate, _t_render, TICK_I, TICK_ARMED
+    global _prev_tick_ms, _prev_dt
+    t_tick = time.ticks_ms()
+
+    # THE GAP BETWEEN CALLS, which nothing has measured until now. Every log so far
+    # recorded how long OUR code ran and concluded "not ours" when a note was 4
+    # seconds late with no slow tick. But if the firmware stops calling loop() at
+    # all, every tick still looks short and the stall is invisible. This records
+    # when we were not called, and how much of that we can account for.
+    if DEBUG_BROWSE and _prev_tick_ms:
+        gap = time.ticks_diff(t_tick, _prev_tick_ms)
+        if gap >= GAP_WARN_MS and len(LOOP_GAPS) < 60:
+            LOOP_GAPS.append((t_tick, gap, _prev_dt, _tick_tag))
+    _prev_tick_ms = t_tick
+
+    _tick_tag = '-'
+    _t_input = _t_hydrate = _t_render = 0
+    _loop_body()
+    if not DEBUG_BROWSE:
+        return
+    dt = time.ticks_diff(time.ticks_ms(), t_tick)
+    _prev_dt = dt            # always, even once the ring capture has frozen
+    if dt >= LOOP_WARN_MS and len(SLOW) < SLOW_MAX:
+        # Timestamped so a slow tick can be lined up against the note gaps.
+        SLOW.append((t_tick, dt, _tick_tag, _t_input, _t_hydrate, _t_render))
+    if TICK_ARMED >= 0:
+        code = TAG_CODES.get(_tick_tag, 6)
+        TICK_DT[TICK_I] = dt if dt < 255 else 255
+        TICK_TAG[TICK_I] = code
+        TICK_I = (TICK_I + 1) % TICK_N
+        if code in _trigger_tags:
+            TICK_ARMED = TICK_HOLD        # (re)arm on every transition
+        elif TICK_ARMED > 0:
+            TICK_ARMED -= 1
+            if TICK_ARMED == 0:
+                TICK_ARMED = -1           # freeze: the capture is complete
+
+
+def _loop_body():
     # Standalone (no wrapper): we are the sole encoder reader, so pump our own
     # reader first to fill launcher.delta/.click/.back. Wrapped: the wrapper has
     # already filled those around this call, so skip (and it clears them itself).
@@ -1988,24 +2528,76 @@ def loop():
     if _service_restore():
         # Still restoring saved slots: MIDI triggers already work for whatever
         # has loaded, but the encoder is ignored until the queue drains.
+        _tag('restore')
         if _STANDALONE:
             launcher.delta = 0
             launcher.click = False
             launcher.back = False
         return
 
-    _pump_menu()
+    global _t_input, _t_hydrate, _t_render, _activity
+    # Classify this tick for the note-arrival ruler (see ACT_NAMES). Cheap: a few
+    # comparisons, no allocation.
+    if _restore_queue:
+        _activity = ACT_LOAD
+    elif launcher.click or launcher.back or launcher.delta:
+        _activity = ACT_NAV
+    elif menu.suspended or _repaint_until and \
+            time.ticks_diff(time.ticks_ms(), _repaint_until) < 0:
+        _activity = ACT_TRANS
+    elif menu.is_open:
+        _activity = ACT_BROWSE if menu._hydrate else ACT_MENU
+    else:
+        _activity = ACT_PLAYING
+
+    if launcher.click or launcher.back:
+        _tag('nav')                  # a click/hold: this tick may build a level
+    elif launcher.delta:
+        _tag('scroll')
+    t0 = time.ticks_ms()
+    _pump_menu()                     # input handling: builds levels, touches SD
+    _t_input = time.ticks_diff(time.ticks_ms(), t0)
 
     if menu.is_open:
+        # One WAV header per tick for the open browser, then draw. Deliberately
+        # AFTER _pump_menu so the tick's input is handled first: hydration is
+        # background work and must never delay the cursor.
+        t0 = time.ticks_ms()
+        if not (launcher.delta or launcher.click or launcher.back):
+            # Never on a tick the user is driving: a header read is 7-10ms, and
+            # that belongs to the idle time between inputs, not on top of one.
+            menu.service_hydrate()
+        _t_hydrate = time.ticks_diff(time.ticks_ms(), t0)
+        t0 = time.ticks_ms()
         menu.render()                # the menu owns the OLED while open
+        _t_render = time.ticks_diff(time.ticks_ms(), t0)
     else:
-        # Playing: after returning from our menu or a global Resume, repaint once
-        # so the monitor redraws over any leftover menu/overlay pixels.
+        # Playing: after returning from our menu or a global Resume, repaint so the
+        # monitor redraws over any leftover menu/overlay pixels. The Resume case
+        # keeps repainting for RESUME_REPAINT_MS -- see _repaint_until.
         if launcher.repaint:
             launcher.repaint = False
             monitor.on_activate()
+        elif _repaint_until and time.ticks_diff(time.ticks_ms(), _repaint_until) < 0:
+            monitor.on_activate()
         # Display last so a display error never blocks audio/MIDI, and vice versa.
         service_display()
+
+    # Drain any panel rows still queued, a bounded band per tick. This is what
+    # keeps a full-screen change from becoming one ~190ms stall.
+    if _push_q:
+        _service_push()
+
+    # Whatever we own -- monitor or menu -- gets re-pushed if the panel has gone
+    # quiet, so the overlay's leftovers can never stick. See _service_panel().
+    _service_panel()
+
+    # Housekeeping I/O, strictly in the gaps between hits: one deferred settings
+    # write, or one folder read into the browser's cache. Both are things that used
+    # to happen mid-performance and made notes late.
+    if pads_quiet():
+        if not service_settings():
+            service_prescan()
 
     # Standalone: clear the one-shot events so the menu never re-consumes them
     # next tick (the wrapper does this itself after driving a wrapped sketch).

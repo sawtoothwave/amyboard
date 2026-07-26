@@ -19,7 +19,7 @@
 - This repository is intended to create the instrument/control code for an AMYboard synthesizer board, described here: https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/README.md
 - The available documentation for the AMY language and the hardware is here: https://github.com/shorepine/amy
 - The user owns an AMYboard and wants to use it within their Eurorack synthesizer system, primarily as a polyphonic synthesizer engine that they will control (keyboard, sequencing, parameter changes) via MIDI. The primary keyboard instrument will be the Arturia Keystep Pro; the primary sequencer will be the Squarp Hermod+ (although it might also be driven by MIDI from a variety of other sources, routed through the Hermod+ and into the AMYboard); the primary MIDI parameter controller will be the Oxi e16.
-- The user plans to add an Adafruit 128x128 OLED screen (https://www.adafruit.com/product/4741) to the board, as well as a M5Stack I2C joystick (https://shop.m5stack.com/products/i2c-joystick-unit-v1-1-mega8a), to increase the amount of onboard context and control available, but for now those parts are unavailable. The user will tell you when it's time to install those parts.
+- The user has an Adafruit 128x128 OLED screen (https://www.adafruit.com/product/4741) and an Adafruit I2C STEMMA QT Rotary Encoder Breakout (https://www.adafruit.com/product/5880) connected to the board.
 
 
 ## Safety Rules (Workspace Hygiene)
@@ -41,3 +41,4 @@
 - Do not delete files unless explicitly instructed.
 - Prefer to use `--3way` style analysis for merge conflicts
 - Never commit secrets.
+- When possible, consult and leverage already-working code from other sketches we've already built together (for example, knob behavior, global redraw parameters and ways of reducing screen lag or audio jittering while the user navigates the board, etc.) rather than rebuilding the wheel.
