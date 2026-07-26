@@ -1002,37 +1002,63 @@ def _push_rows(y0, y1):
 # BANDS spread across successive loop() calls, so no single refresh exceeds
 # ~19ms (a 12-row band) instead of 240ms in one go.
 FLUSH_BAND_ROWS = 12         # MEASURED: 12 rows (768B) = 19ms, full 8KB = 240ms
-_flush_active = False
-_flush_y = 0
-_flush_y1 = 127
+
+# How many bands go out per loop() tick. Polysynth pushes ONE (19ms) because its
+# MIDI runs through a Python callback, so a long blocking write there can drop a
+# note. THIS sketch has nothing in the trigger path -- notes are routed inside AMY's
+# C firmware (grab_midi_notes) -- so blocking MicroPython longer costs us no timing
+# at all, it only delays our own encoder poll (and the Seesaw counts detents in
+# hardware meanwhile, so none are lost). loop() arrives every ~69ms and we use ~7ms
+# of it, so three bands (~57ms) still fits inside a tick: a full-screen repaint
+# lands in ~4 ticks instead of ~11 (760ms -> ~280ms), which is most of what made
+# the menu feel laggy.
+FLUSH_BANDS_PER_TICK = 3
+
+# Pending panel regions as [y0, y1], drained HEAD FIRST, each shrinking as its
+# bands go out. A list rather than one region so a cursor move can push the two
+# 12px rows that actually changed -- new one FIRST -- instead of one fat band
+# spanning everything between them. That span is what made a fast (accelerated)
+# scroll look like the cursor VANISHED: the row it left was cleared and pushed
+# immediately, while the row it landed on sat at the far end of the band, several
+# ticks away.
+_flush_q = []
 
 
 def _begin_flush(y0, y1):
-    global _flush_active, _flush_y, _flush_y1
-    _flush_active = True
-    _flush_y = max(0, min(127, int(y0)))
-    _flush_y1 = max(0, min(127, int(y1)))
+    # Start fresh: this region supersedes anything still pending (the framebuffer
+    # it would have pushed has already been redrawn).
+    del _flush_q[:]
+    _queue_flush(y0, y1)
+
+
+def _queue_flush(y0, y1):
+    # Add a region BEHIND whatever is already pending.
+    _flush_q.append([max(0, min(127, int(y0))), max(0, min(127, int(y1)))])
 
 
 def _service_flush():
-    # Push one band per call. Returns True while a flush is still in progress so
-    # the caller defers its own drawing until the panel is settled.
-    global _flush_active, _flush_y
-    if not _flush_active:
+    # Push up to FLUSH_BANDS_PER_TICK bands per call. Returns True while anything
+    # is still pending, so the caller defers its own drawing until the panel is
+    # settled (drawing into a framebuffer mid-flush would tear across regions).
+    if not _flush_q:
         return False
-    a = _flush_y
-    b = min(_flush_y1, a + FLUSH_BAND_ROWS - 1)
-    if not _push_rows(a, b):
-        # Panel can't do windowed pushes -> one full refresh and give up chunking.
-        try:
-            amyboard.display_refresh()
-        except Exception:
-            pass
-        _flush_active = False
-        return True
-    _flush_y = b + 1
-    if _flush_y > _flush_y1:
-        _flush_active = False
+    for _ in range(FLUSH_BANDS_PER_TICK):
+        if not _flush_q:
+            break
+        r = _flush_q[0]
+        b = min(r[1], r[0] + FLUSH_BAND_ROWS - 1)
+        if not _push_rows(r[0], b):
+            # Panel can't do windowed pushes -> one full refresh and give up
+            # chunking (everything pending is covered by a full refresh anyway).
+            try:
+                amyboard.display_refresh()
+            except Exception:
+                pass
+            del _flush_q[:]
+            return True
+        r[0] = b + 1
+        if r[0] > r[1]:
+            _flush_q.pop(0)
     return True
 
 
@@ -1153,10 +1179,26 @@ MENU_PAGE_Y   = 116          # bottom row for the page indicator
 MENU_LABEL_MAX = 18
 MENU_IDLE_MS  = 15000        # auto-close the menu back to the monitor when idle
 TOAST_MS      = 1200         # how long a confirmation toast shows
+EDIT_DBLCLICK_MS = 400       # two clicks within this window = double-click (reset to
+                             # default); a single click's exit is deferred this long
+                             # so the second click has a chance to arrive
+
+# Encoder acceleration, ported from polysynth. The launcher hands us the detent
+# COUNT for this tick, so a fast spin already arrives as a bigger delta; we amplify
+# that so rapid turns cover ground while a single detent stays 1:1 for fine work.
+# Applied in the sketch (not the launcher) so it works wrapped AND standalone.
+ENC_ACCEL_CAP = 10           # max per-detent multiplier on a fast spin
 
 
 def clamp(value, lo, hi):
     return lo if value < lo else (hi if value > hi else value)
+
+
+def _accel(delta):
+    a = abs(delta)
+    if a <= 1:
+        return delta                     # one detent = one step (precise)
+    return delta * min(a, ENC_ACCEL_CAP)  # faster spins step quadratically further
 
 
 # Page-indicator brightness, matching polysynth's shared grid/menu marks so the two
@@ -1212,13 +1254,20 @@ class _MenuLevel:
     # within a page can repaint just the two rows whose highlight changed instead
     # of the whole screen. A full-screen flush is 11 bands (~760 ms at one band per
     # ~69 ms tick) -- the dominant term in menu lag; a two-row flush is ~2 bands.
-    __slots__ = ('title', 'items', 'idx', 'start', '_shown_idx', '_shown_start')
+    #
+    # `accel` opts a level into encoder acceleration. It is OFF by default (short
+    # lists want 1:1, and polysynth keeps its own menu scroll 1:1 for the same
+    # reason); the long lists -- the sample browser, which can be hundreds of files,
+    # and the 128-entry base-note picker -- turn it on so a fast spin gets there.
+    __slots__ = ('title', 'items', 'idx', 'start', 'accel',
+                 '_shown_idx', '_shown_start')
 
-    def __init__(self, title, items):
+    def __init__(self, title, items, accel=False):
         self.title = title
         self.items = items if items else [('(empty)', None)]
         self.idx = 0
         self.start = 0
+        self.accel = accel
         self._shown_idx = -1     # nothing painted yet -> first render is full
         self._shown_start = -1
 
@@ -1235,8 +1284,10 @@ class _MenuLevel:
             menu._pop()
             return
         if delta:
-            # List scroll is 1:1 with detents and clamps at the ends.
-            self.idx = clamp(self.idx + delta, 0, len(self.items) - 1)
+            # Scroll clamps at the ends; a long list (accel=True) scales a fast
+            # spin, a short one stays 1:1 with detents.
+            step = _accel(delta) if self.accel else delta
+            self.idx = clamp(self.idx + step, 0, len(self.items) - 1)
             menu.dirty = True
         if click:
             cb = self.items[self.idx][1]
@@ -1285,8 +1336,12 @@ class _MenuLevel:
                 self._paint_row(d, self._shown_idx, start, n)
                 self._paint_row(d, self.idx, start, n)
                 self._shown_idx = self.idx
-                _begin_flush(min(y_old, y_new),
-                             max(y_old, y_new) + MENU_LINE_H - 1)
+                # Two 12px regions, the row the cursor LANDED ON first, so it shows
+                # up on the very next tick however far the spin jumped. (One band
+                # spanning both rows meant an accelerated jump left no cursor on
+                # screen until the band had crawled all the way down.)
+                _begin_flush(y_new, y_new + MENU_LINE_H - 1)
+                _queue_flush(y_old, y_old + MENU_LINE_H - 1)
                 return
 
             # Full repaint: first paint of this level, a page crossing, or a
@@ -1304,7 +1359,12 @@ class _MenuLevel:
                 _draw_menu_row(d, MENU_PAGE_Y, 'q', (total_pages, page))
             self._shown_idx = self.idx
             self._shown_start = start
-            _begin_flush(0, 127)
+            # Cursor row first, then the whole screen: on a page crossing the
+            # cursor is visible after one tick instead of waiting for the sweep to
+            # reach its band. Costs one duplicated 12px band.
+            y_cur = self._row_y(self.idx - start)
+            _begin_flush(y_cur, y_cur + MENU_LINE_H - 1)
+            _queue_flush(0, 127)
         except Exception as e:
             _render_fault('_MenuLevel.render', e)
 
@@ -1312,9 +1372,12 @@ class _MenuLevel:
 class _SlotEditor:
     # The per-slot editor -- one screen owning a single slot. Unlike _MenuLevel
     # (a list of click-actions), its param rows are EDITABLE: click a param to enter
-    # edit mode (turn = adjust the value live, hear it immediately; click or hold =
-    # commit). Two plain action rows bookend the params: 'Sample:' opens the browser
-    # to (re)load, 'Clear slot' empties it.
+    # edit mode, then (matching polysynth's grid editor) turn = adjust the value
+    # live and hear it immediately, single click = commit and exit, DOUBLE click =
+    # reset that param to its default and keep editing, hold = exit WITHOUT saving
+    # (back to the value the row had when editing began). Two plain action rows
+    # bookend the params: 'Sample:' opens the browser to (re)load, 'Clear slot'
+    # empties it.
     #
     # Live edits are cheap and targeted -- _apply_note / _apply_osc re-send only the
     # one changed slot's map line or osc, never a full rebuild_engine() -- so a
@@ -1326,7 +1389,8 @@ class _SlotEditor:
     # the changed row(s) and flush that band -- with a `full` flag forcing a whole-
     # screen repaint after anything (a toast, a LOADING notice, a browser) clobbers
     # the panel.
-    __slots__ = ('slot', 'title', 'rows', 'idx', 'editing', 'full', '_shown_idx')
+    __slots__ = ('slot', 'title', 'rows', 'idx', 'editing', 'entry_value',
+                 'full', '_shown_idx')
 
     def __init__(self, slot):
         self.slot = slot
@@ -1336,6 +1400,7 @@ class _SlotEditor:
                      + [('clear',)])
         self.idx = 0
         self.editing = False
+        self.entry_value = 0     # value snapshot from when editing began (hold-revert)
         self.full = True         # first paint (and after any overlay) is full
         self._shown_idx = -1
 
@@ -1349,17 +1414,30 @@ class _SlotEditor:
     # -- input --
     def handle(self, menu, delta, click, back):
         if self.editing:
-            # Editing a numeric param: turn adjusts live, click/hold commits.
+            # Editing a numeric param: turn adjusts live; single click commits
+            # (DEFERRED, so a second click can still arrive and be read as a
+            # double); double click resets to the default and stays editing; hold
+            # reverts to the entry value and leaves without saving.
             if back:
-                self._commit()
+                menu._click_pending_at = 0
+                self._revert()
                 menu.dirty = True
                 return
             if delta:
+                menu._click_pending_at = 0   # a turn cancels a pending click
                 self._adjust(delta)
                 menu.dirty = True
             if click:
-                self._commit()
-                menu.dirty = True
+                now = time.ticks_ms()
+                if menu._click_pending_at and \
+                        time.ticks_diff(now, menu._click_pending_at) <= EDIT_DBLCLICK_MS:
+                    menu._click_pending_at = 0
+                    self._reset_default()
+                    menu.dirty = True
+                else:
+                    # First click: defer the commit-and-exit (SketchMenu.
+                    # service_pending fires it once the window passes).
+                    menu._click_pending_at = now
             return
         if back:                 # hold: leave the editor (back to the slot list)
             menu._pop()
@@ -1378,21 +1456,42 @@ class _SlotEditor:
             menu._clear_slot(self.slot)
             self.full = True             # the CLEARED toast clobbered the screen
         else:                            # a param row -- all numerics: open the editor
-            self.editing = True
+            self.entry_value = slot_params[self.slot][self.rows[self.idx][1]]
+            self.editing = True          # snapshot first, for a hold-to-revert
             menu.dirty = True
 
-    def _adjust(self, delta):
+    def _set_value(self, val):
+        # Store one param and push it to the engine LIVE. Every value change in the
+        # editor -- turn, double-click reset, hold-revert -- goes through here, so
+        # the "targeted send, never rebuild_engine()" rule holds for all of them
+        # (a rebuild re-arms the synth and cuts ringing audio).
         i = self.slot
         key = self.rows[self.idx][1]
-        _, _lbl, _dflt, lo, hi, step, _fmt = PARAM_BY_KEY[key]
-        val = clamp(slot_params[i][key] + delta * step, lo, hi)
-        if isinstance(step, float) or isinstance(val, float):
-            val = round(val, 2)          # kill float dust (e.g. 0.15000000002)
         slot_params[i][key] = val
         if key in ('level', 'coarse', 'fine'):
             _apply_note(i)               # map-side params: re-send the note line
         else:                            # pan: osc-side param
             _apply_osc(i)
+
+    def _adjust(self, delta):
+        key = self.rows[self.idx][1]
+        _, _lbl, _dflt, lo, hi, step, _fmt = PARAM_BY_KEY[key]
+        # Accelerated: one detent is still one step, a fast spin sweeps the range.
+        val = clamp(slot_params[self.slot][key] + _accel(delta) * step, lo, hi)
+        if isinstance(step, float) or isinstance(val, float):
+            val = round(val, 2)          # kill float dust (e.g. 0.15000000002)
+        self._set_value(val)
+
+    def _reset_default(self):
+        # Double-click: back to this param's spec default, still editing.
+        self._set_value(PARAM_BY_KEY[self.rows[self.idx][1]][2])
+
+    def _revert(self):
+        # Hold: undo the whole edit -- restore the value from when editing began
+        # and exit WITHOUT saving. Nothing was written to flash meanwhile (only
+        # _commit writes), so putting the live value back is the entire undo.
+        self._set_value(self.entry_value)
+        self.editing = False
 
     def _commit(self):
         # Leave edit mode and persist -- the ONLY flash write for a numeric param,
@@ -1475,6 +1574,7 @@ class SketchMenu:
         self._toast_until = 0
         self._toast_drawn = False
         self._browse_slot = 0    # which slot the open browser is choosing for
+        self._click_pending_at = 0   # ticks of a deferred editor single-click (0=none)
 
     @property
     def is_open(self):
@@ -1497,10 +1597,12 @@ class SketchMenu:
         self.dirty = True
 
     def close(self):
+        self._flush_pending_click()
         self.stack = []
         self.suspended = False
 
     def suspend(self):
+        self._flush_pending_click()
         self.suspended = True
 
     def resume(self):
@@ -1519,6 +1621,14 @@ class SketchMenu:
     def _pop(self):
         if self.stack:
             self.stack.pop()
+        if self.stack:
+            # The level we're returning to still thinks the screen holds what IT
+            # last painted, but the level we just popped (a browser folder, the
+            # slot editor) has been drawing over it. Without this it takes the
+            # incremental path and repaints only the cursor rows, leaving the old
+            # level's text underneath -- the mishmash you get backing out of the
+            # sample browser.
+            self.cur.invalidate()
         self.dirty = True
 
     def _show_toast(self, msg):
@@ -1640,7 +1750,9 @@ class SketchMenu:
             title = 'SLOT %s' % note_name(slot_note(self._browse_slot))
         else:
             title = path.rsplit('/', 1)[-1][:MENU_LABEL_MAX].upper()
-        self._push_level(_MenuLevel(title, items))
+        # accel=True: a samples folder can hold hundreds of files, and this is the
+        # one list where 1:1 scrolling means a long grind to the bottom.
+        self._push_level(_MenuLevel(title, items, accel=True))
 
     def _dir_opener(self, path):
         def go():
@@ -1707,6 +1819,26 @@ class SketchMenu:
             return
         self.cur.handle(self, delta, click, back)
 
+    def service_pending(self, now):
+        # Fire a deferred editor single-click once the double-click window passes
+        # with no second click: commit the value and drop back to the cursor.
+        if not self._click_pending_at:
+            return
+        if time.ticks_diff(now, self._click_pending_at) <= EDIT_DBLCLICK_MS:
+            return
+        self._flush_pending_click()
+
+    def _flush_pending_click(self):
+        # Resolve a deferred single-click NOW. Called on expiry, and also whenever
+        # the menu is about to lose the editor (suspend/close), so an in-flight
+        # commit still reaches flash instead of being silently dropped.
+        if not self._click_pending_at:
+            return
+        self._click_pending_at = 0
+        if self.stack and isinstance(self.cur, _SlotEditor) and self.cur.editing:
+            self.cur._commit()
+            self.dirty = True
+
     def _draw_toast(self, msg):
         try:
             d = amyboard.display
@@ -1721,8 +1853,7 @@ class SketchMenu:
     def render(self):
         # If a progressive repaint is in flight, keep pushing bands and defer any
         # new drawing until the panel is settled.
-        if _flush_active:
-            _service_flush()
+        if _service_flush():
             return
         if self._toast_msg:
             if time.ticks_diff(time.ticks_ms(), self._toast_until) < 0:
@@ -1774,6 +1905,7 @@ def _pump_menu():
 
     if menu.is_open:
         menu.handle(launcher.delta, launcher.click, launcher.back)
+        menu.service_pending(now)             # fire a deferred editor single-click
         if menu.is_open and time.ticks_diff(now, _last_input_ms) >= MENU_IDLE_MS:
             menu.suspend()
             launcher.repaint = True

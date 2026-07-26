@@ -1,7 +1,8 @@
 # tools/
 
-Dev tooling for the polysynth sketch. Nothing here ships to the board — these are
-host-side checks and a display harness. (Deploy scripts live at the repo root:
+Dev tooling for the sketches (mostly polysynth; `triggerbox_sim.py` covers the
+triggerbox). Nothing here ships to the board — these are host-side checks and a
+display harness. (Deploy scripts live at the repo root:
 `deploy_auto.py`, `board_serial.py`, `deploy_wifi.py`.)
 
 ## `arity_check.py` — catch call-site/signature mismatches
@@ -109,6 +110,34 @@ worst-case frame stays inside the ~69ms `loop()` tick.
   in the sim, calls are microseconds apart and get throttled away. Drive renders
   through `tick()`, which ages the timestamp. Skip it and the sim renders **nothing**
   while every check appears to pass.
+
+## `triggerbox_sim.py` — the same trick, for the triggerbox
+
+```sh
+python3 tools/triggerbox_sim.py                    # defaults to sketches/triggerbox.py
+```
+
+Exits non-zero on failure. Sibling of `grid_sim.py` with the same stub-and-exec
+approach, aimed at `triggerbox.py`'s slot editor. Unlike `grid_sim.py` it puts
+`time.ticks_ms()` fully under the test's control, because the behaviour under test
+*is* timing: a single click's commit is deferred by `EDIT_DBLCLICK_MS` so a second
+click can be read as a double.
+
+Currently checks the encoder acceleration curve (1:1 at one detent, quadratic above,
+capped) and which lists opt into it; every slot-editor gesture (single click commits
+after the window with exactly one flash write, double click resets to the
+`PARAM_SPEC` default and keeps editing, hold reverts to the pre-edit value and writes
+nothing, a turn cancels a pending click, and an in-flight commit is flushed rather
+than dropped when the menu suspends or closes); and the panel flush queue — that the
+row the cursor landed on is the FIRST band pushed, that a jump costs two 12px bands
+rather than one spanning everything between, and that popping a level forces the
+level underneath to fully repaint.
+
+- **Proves:** which gesture lands which value, when the commit fires, that a commit
+  is never silently lost, and what order panel regions go out in.
+- **Does NOT prove:** audio, encoder feel, or the real per-band I2C cost (pushes are
+  counted, not timed — 19ms/12-row band is the measured figure they're reasoned
+  against).
 
 ## `grab_font.py` — read the board's 8×8 font over serial
 
