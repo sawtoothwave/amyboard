@@ -1807,14 +1807,37 @@ MON_COL_W    = 64            # two 64px columns across the 128px panel
 MON_ROWS     = 4            # rows per column (NUM_SLOTS split across 2 columns)
 
 
-class SlotMonitor:
+class DisplayMode:
+    # What the panel shows while you are PLAYING. (The menu owns the screen
+    # whenever it is open; these only ever run in the gaps.) Ported from
+    # polysynth.py's DisplayMode so both sketches pick a mode the same way, and
+    # the choice persists across reboots.
+    #
+    # The contract is two methods and one rule: on_activate() means "the panel is
+    # not yours any more, redraw from scratch" and should only set a flag -- the
+    # drawing belongs in render(), which is the one place that runs inside loop().
+    # render() must push ONLY the rows it changed; a full-frame blit blocks the
+    # firmware ~190ms and makes notes late (see _show).
+    name = 'mode'
+
+    def on_activate(self):
+        pass
+
+    def render(self, now):
+        pass
+
+
+class SlotMonitor(DisplayMode):
+    # The default: a static map of the pads, redrawn only when something changes.
+    name = 'Slots'
+
     def __init__(self):
         self._dirty = True
 
     def on_activate(self):
         self._dirty = True
 
-    def render(self):
+    def render(self, now):
         # Static slot map: redraw only when the assignments changed.
         if not self._dirty:
             return
@@ -1845,7 +1868,117 @@ class SlotMonitor:
             _render_fault('SlotMonitor.render', e)
 
 
-monitor = SlotMonitor()
+class ScreensaverMode(DisplayMode):
+    # A small dot drifting around the panel, ported from the polysynth's. Only the
+    # band spanning the dot's old and new position is pushed per step, so the panel
+    # bus is held for a couple of rows rather than a full frame -- the whole reason
+    # a screensaver is safe to run under a playing instrument at all.
+    name = 'Screensaver'
+    SIZE = 6
+    STEP_MS = 120
+
+    def __init__(self):
+        self.x = DISPLAY_WIDTH // 2
+        self.y = DISPLAY_HEIGHT // 2
+        self.dx = 3
+        self.dy = 2
+        self.last = 0
+        self.full = True
+
+    def on_activate(self):
+        self.full = True
+
+    def render(self, now):
+        try:
+            d = amyboard.display
+            if self.full:
+                # Wipe whatever owned the panel before us, then let the next tick
+                # start moving. Drawing the dot in the same tick as the clear would
+                # cost a full frame plus a band.
+                self.full = False
+                self.last = now
+                d.fill(0)
+                _show()
+                return
+            if time.ticks_diff(now, self.last) < self.STEP_MS:
+                return
+            self.last = now
+            ox, oy = self.x, self.y
+            nx, ny = ox + self.dx, oy + self.dy
+            if nx < 0 or nx > DISPLAY_WIDTH - self.SIZE:
+                self.dx = -self.dx
+                nx = ox + self.dx
+            if ny < 0 or ny > DISPLAY_HEIGHT - 1 - self.SIZE:
+                self.dy = -self.dy
+                ny = oy + self.dy
+            self.x, self.y = nx, ny
+            d.fill_rect(ox, oy, self.SIZE, self.SIZE, 0)
+            d.fill_rect(nx, ny, self.SIZE, self.SIZE, 255)
+            _show(min(oy, ny), max(oy, ny) + self.SIZE - 1)
+        except Exception as e:
+            _render_fault('ScreensaverMode.render', e)
+
+
+class BlankMode(DisplayMode):
+    # Nothing at all: clear the panel once, then never touch it again. Zero bus and
+    # zero per-tick work -- by definition the cheapest mode, and the one to pick to
+    # make the box disappear on a dark stage (or to spare an OLED that spends hours
+    # showing the same static slot map).
+    name = 'Blank'
+
+    def __init__(self):
+        self.full = True
+
+    def on_activate(self):
+        self.full = True
+
+    def render(self, now):
+        if not self.full:
+            return                       # already black; nothing can have changed
+        self.full = False
+        try:
+            amyboard.display.fill(0)
+            _show()
+        except Exception as e:
+            _render_fault('BlankMode.render', e)
+
+
+# The modes the Display mode menu offers, in menu order.
+SLOT_MONITOR_MODE = SlotMonitor()
+SCREENSAVER_MODE = ScreensaverMode()
+BLANK_MODE = BlankMode()
+DISPLAY_MODES = [SLOT_MONITOR_MODE, SCREENSAVER_MODE, BLANK_MODE]
+
+active_display_mode = SLOT_MONITOR_MODE
+
+
+def set_display_mode(mode):
+    global active_display_mode
+    active_display_mode = mode
+    if DISPLAY_OK:
+        try:
+            mode.on_activate()
+        except Exception:
+            pass
+
+
+def _restore_display_mode():
+    # Boot: re-select the mode the user last picked, so the panel comes back the
+    # way they left it. Matched by NAME, not index, so reordering DISPLAY_MODES
+    # can never silently select a different one; an unknown name keeps the
+    # default. No on_activate() here -- the first service_display() after the boot
+    # wipe draws it.
+    global active_display_mode
+    name = _settings.get('display_mode')
+    if not name:
+        return
+    for m in DISPLAY_MODES:
+        if m.name == name:
+            active_display_mode = m
+            return
+
+
+_restore_display_mode()
 
 
 def service_display():
@@ -1854,7 +1987,7 @@ def service_display():
         return
     if _boot_wipe(now):
         return
-    monitor.render()
+    active_display_mode.render(now)
 
 
 # ---------------------------------------------------------------------------
@@ -2453,6 +2586,7 @@ class SketchMenu:
             ('Load kit', self._open_load),
             ('Delete kit', self._open_delete),
             ('MIDI base note', self._open_base_note),
+            ('Display mode', self._open_display),
             ('Resume playing', self.close),
         ]
         return _MenuLevel('TRIGGERBOX', items)
@@ -2688,6 +2822,22 @@ class SketchMenu:
             rebuild_engine()          # slot notes moved -> rebuild the note map
             self._pop()
             self._show_toast('BASE ' + note_name(n))
+        return go
+
+    def _open_display(self):
+        # Which screen shows while you play. The current one is starred, the same
+        # convention the base-note picker uses.
+        items = []
+        for m in DISPLAY_MODES:
+            mark = '*' if m is active_display_mode else ' '
+            items.append(('%s%s' % (mark, m.name), self._mode_setter(m)))
+        self._push_level(_MenuLevel('DISPLAY MODE', items))
+
+    def _mode_setter(self, mode):
+        def go():
+            set_display_mode(mode)
+            _set_setting('display_mode', mode.name)   # survives a reboot
+            self.close()      # close, so the mode you picked is visible at once
         return go
 
     # -- Kit workflows -------------------------------------------------------
@@ -3081,7 +3231,7 @@ def _service_restore():
         slot_paths[i] = None
         slot_missing[i] = (path, problem)
     if not _restore_queue:
-        monitor.on_activate()      # repaint the monitor over the notice
+        active_display_mode.on_activate()   # repaint the idle screen over the notice
         flush_settings()           # boot's blocking window: a free moment to write
         start_prescan()            # warm the browser's folder cache from here on
     return True
@@ -3245,9 +3395,9 @@ def _loop_body():
         # flash every pad as empty on the way past, which reads as "it wiped my kit".
         if launcher.repaint:
             launcher.repaint = False
-            monitor.on_activate()
+            active_display_mode.on_activate()
         elif _repaint_until and time.ticks_diff(time.ticks_ms(), _repaint_until) < 0:
-            monitor.on_activate()
+            active_display_mode.on_activate()
         # Display last so a display error never blocks audio/MIDI, and vice versa.
         service_display()
 

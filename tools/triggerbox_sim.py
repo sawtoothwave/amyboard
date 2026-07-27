@@ -823,8 +823,61 @@ def main():
     menu.open()
     check([it[0] for it in menu.cur.items] == [
         'Kit parameters', 'Save kit', 'Load kit', 'Delete kit',
-        'MIDI base note', 'Resume playing'], 'root items, in order')
+        'MIDI base note', 'Display mode', 'Resume playing'], 'root items, in order')
     check(len(menu.cur.items) <= ns['MENU_VISIBLE'], 'and still one page')
+
+    print('\n--- display modes: pick one, and it sticks across a reboot')
+    menu.open()
+    menu._open_display()
+    labels = [it[0] for it in menu.cur.items]
+    check(labels == ['*Slots', ' Screensaver', ' Blank'],
+          'the picker stars the current mode: %r' % (labels,))
+    menu.cur.items[1][1]()                              # pick Screensaver
+    check(ns['active_display_mode'] is ns['SCREENSAVER_MODE'],
+          'picking one switches the active mode')
+    check(ns['_settings'].get('display_mode') == 'Screensaver',
+          'and persists it BY NAME, so reordering the list is safe')
+    check(not menu.is_open, 'and closes the menu so the choice is visible at once')
+
+    ns['active_display_mode'] = ns['SLOT_MONITOR_MODE']  # simulate a reboot
+    ns['_restore_display_mode']()
+    check(ns['active_display_mode'] is ns['SCREENSAVER_MODE'],
+          'a reboot restores the saved mode')
+    ns['_settings']['display_mode'] = 'No Such Mode'
+    ns['active_display_mode'] = ns['SLOT_MONITOR_MODE']
+    ns['_restore_display_mode']()
+    check(ns['active_display_mode'] is ns['SLOT_MONITOR_MODE'],
+          'and an unknown name falls back to the default rather than failing')
+
+    print('\n--- the screensaver stays off the panel bus')
+    sv = ns['SCREENSAVER_MODE']
+    sv.on_activate()
+    sv.render(NOW[0])                                   # the initial clear
+    for _ in range(16):                                 # drain the banded clear
+        ns['_service_push']()
+    NOW[0] += sv.STEP_MS + 1
+    PUSHES.clear()
+    sv.render(NOW[0])
+    rows = sum(p[1] - p[0] + 1 for p in PUSHES if isinstance(p, tuple))
+    check(0 < rows < 20,
+          'one step pushes a small band, not a 128-row frame (%d rows)' % rows)
+    PUSHES.clear()
+    sv.render(NOW[0])                                   # same tick, inside STEP_MS
+    check(PUSHES == [], 'and it does nothing at all between steps')
+
+    print('\n--- blank mode clears once, then never touches the panel again')
+    bl = ns['BLANK_MODE']
+    bl.on_activate()
+    PUSHES.clear()
+    bl.render(NOW[0])
+    for _ in range(16):
+        ns['_service_push']()
+    check(PUSHES, 'activating it wipes the screen')
+    PUSHES.clear()
+    for _ in range(20):
+        NOW[0] += 70
+        bl.render(NOW[0])
+    check(PUSHES == [], 'and 20 ticks later it has sent nothing more')
 
     print('\n--- kits: delete removes the snapshot, not what is playing')
     menu.open()
