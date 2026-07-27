@@ -14,6 +14,7 @@ encoder feel, or panel timing -- see tools/README.md.
 Usage:  python3 tools/triggerbox_sim.py [path/to/sketch.py]
 Exits non-zero on failure, so it can gate a deploy.
 """
+import json
 import os
 import shutil
 import struct
@@ -83,6 +84,8 @@ def _install_stubs():
     for n in ('reset', 'volume', 'stop', 'start', 'live', 'pause'):
         setattr(amy, n, lambda *a, **k: None)
     amy.load_sample_bytes = lambda *a, **k: None
+    amy.unload_sample = lambda *a, **k: None
+    amy.PCM = 10                                    # AMY's PCM wave constant
 
     amyboard = types.ModuleType('amyboard')
     amyboard.display = _FakeDisplay()
@@ -197,7 +200,8 @@ def main():
     menu = ns['SketchMenu']()
     menu.open()
     check(menu.cur.accel is False, 'the root menu scrolls 1:1')
-    check(menu._build_slots_level().accel is False, 'the 12-row SLOTS list scrolls 1:1')
+    check(menu._build_slots_level().accel is False,
+          'the %d-row slot list scrolls 1:1' % ns['NUM_SLOTS'])
     menu._browse_slot = 0
     menu._open_dir(ns['sample_root'](), first=True)
     check(menu.cur.accel is True, 'the sample browser (long list) accelerates')
@@ -231,6 +235,123 @@ def main():
           'a 900-byte LIST chunk before data still parses: %r' % (info,))
     check(len(reads) == 2, 'via the slow walk, not by calling it BAD')
     check(ns['sample_problem'](info) is None, 'so the row stays clickable')
+    ns['open'] = real_open
+
+    print('\n--- a rejected header says WHY, and a dropout is not held against it')
+    notwav = os.path.join(hdr_dir, 'notes.wav')
+    with open(notwav, 'wb') as f:
+        f.write(b'this is not a wav file at all')
+    check(ns['sample_problem'](ns['_wav_info'](notwav)) == ns['WAV_NOWAV'],
+          "a non-WAV reads '!NOWAV', not a blanket '!BAD'")
+    adpcm = os.path.join(hdr_dir, 'adpcm.wav')
+    with open(adpcm, 'wb') as f:                  # valid RIFF, unusable fmt tag
+        f.write(b'RIFF' + struct.pack('<I', 36) + b'WAVE')
+        f.write(b'fmt ' + struct.pack('<IHHIIHH', 16, 0x11, 1, 16000,
+                                      16000, 2, 16))
+        f.write(b'data' + struct.pack('<I', 0))
+    check(ns['sample_problem'](ns['_wav_info'](adpcm)) == ns['WAV_FMT'],
+          "a non-PCM fmt reads '!FMT'")
+    # A card dropout must NOT be remembered: the file is probably fine, and the
+    # browser has to be willing to look again. This is the failure mode that would
+    # otherwise leave good samples permanently marked bad for the whole session.
+    ns['_info_cache'].clear()
+    boom = os.path.join(hdr_dir, 'flaky.wav')
+    _write_wav(boom, secs=0.2)
+    fail_next = [True]
+
+    down = [True]
+
+    def _flaky_open(p, m='r'):
+        if p == boom and down[0]:
+            raise OSError(5, 'EIO')
+        return real_open(p, m)
+
+    ns['open'] = _flaky_open
+    check(ns['sample_problem'](ns['_wav_info'](boom)) == ns['WAV_EIO'],
+          "a read that keeps throwing reads '!EIO'")
+    check(boom not in ns['_info_cache'], 'and the dropout is NOT cached')
+    down[0] = False
+    check(ns['sample_problem'](ns['_wav_info'](boom)) is None,
+          'so the very next look reads the file fine')
+    # A ONE-OFF hiccup should never reach the screen at all. The browser reading
+    # once while the loader retried is what made a card dropout look like "loading
+    # a sample breaks browsing".
+    ns['_info_cache'].clear()
+    once = [True]
+
+    def _hiccup_hdr(p, m='r'):
+        if p == boom and once[0]:
+            once[0] = False
+            raise OSError(5, 'EIO')
+        return real_open(p, m)
+
+    ns['open'] = _hiccup_hdr
+    check(ns['sample_problem'](ns['_wav_info'](boom)) is None,
+          'a single dropout never reaches the row: the header read retries')
+
+    # THE post-load EIO fix. On the board, loading a sample drops the card off the
+    # bus: listdir('/sd') returns [] and every deeper path raises EIO until
+    # mount_sd() is called. The browser's header read was the one card access with
+    # no re-mount behind it, so it was the only one that could never recover -- and
+    # because list_dir is cached (and the boot prescan pre-caches every folder) the
+    # listing still looked healthy while every row under it read EIO.
+    ns['_info_cache'].clear()
+    revived = []
+    down_until_mount = [True]
+
+    def _dead_until_mount(p, m='r'):
+        if p == boom and down_until_mount[0]:
+            raise OSError(5, 'EIO')
+        return real_open(p, m)
+
+    def _mount_fixes_it(*a, **k):
+        revived.append(1)
+        down_until_mount[0] = False        # what mount_sd() really does, measured
+
+    ns['amyboard'].mount_sd = _mount_fixes_it
+    ns['open'] = _dead_until_mount
+    check(ns['sample_problem'](ns['_wav_info'](boom)) is None,
+          'a card that is DOWN until re-mounted still yields a good row')
+    check(len(revived) >= 1, '  ...because the header read re-mounted it')
+
+    print('\n--- reads escalate to a re-mount only when plain retries fail')
+    # Both directions matter and they pull opposite ways. Remounting on the FIRST
+    # error breaks every single-shot read that follows (a load that hiccups once
+    # still reports success, so the damage is invisible). NEVER remounting means a
+    # genuinely sick mount can't recover and the load just fails.
+    mounts = []
+    ns['amyboard'].mount_sd = lambda *a, **k: mounts.append(1)
+    flaky2 = os.path.join(hdr_dir, 'flaky2.wav')
+    _write_wav(flaky2, secs=0.2)
+    tries = [0]
+
+    def _hiccup_open(p, m='r'):
+        if p == flaky2:
+            tries[0] += 1
+            if tries[0] == 1:
+                raise OSError(5, 'EIO')
+        return real_open(p, m)
+
+    ns['open'] = _hiccup_open
+    check(ns['robust_read'](flaky2) is not None,
+          'a one-off dropout still reads, on a plain retry')
+    check(mounts == [], 'and does NOT remount a card that is merely noisy')
+
+    mounts.clear()
+    dead = [True]
+
+    def _dead_open(p, m='r'):
+        if p == flaky2 and dead[0]:
+            raise OSError(5, 'EIO')
+        return real_open(p, m)
+
+    ns['open'] = _dead_open
+    check(ns['robust_read'](flaky2) is None,
+          'a card that never answers gives up rather than hanging')
+    check(len(mounts) >= 1, 'but not before escalating to a re-mount')
+    check(len(mounts) < ns['READ_TRIES'],
+          'and not on every single attempt (%d re-mounts of %d tries)'
+          % (len(mounts), ns['READ_TRIES']))
     ns['open'] = real_open
     shutil.rmtree(hdr_dir, ignore_errors=True)
 
@@ -529,6 +650,196 @@ def main():
     depth = len(menu.stack)
     ed.handle(menu, 0, False, True)
     check(len(menu.stack) == depth - 1, 'hold leaves the editor when not editing')
+
+    # -- Kits ----------------------------------------------------------------
+    # These drive the REAL menu callbacks and the REAL JSON file (redirected to a
+    # temp path), so the round-trip through flash is exercised rather than mocked.
+    # The samples are real WAVs on disk, so load_slot runs for true.
+    kit_dir = tempfile.mkdtemp(prefix='tbx-sim-kits-')
+    ns['KITS_FILE'] = os.path.join(kit_dir, 'kits.json')
+    kit_samples = make_sample_dir()          # its own, outliving the browser tests'
+    kick = os.path.join(kit_samples, 'kick.wav')
+    snare = os.path.join(kit_samples, 'snare.wav')
+    slot_paths = ns['slot_paths']
+    slot_missing = ns['slot_missing']
+
+    def drain_restore():
+        """Run the restore queue to completion, past the boot settle gate."""
+        ns['_service_restore']()                    # first call arms _boot_ticks
+        NOW[0] += ns['LOAD_SETTLE_MS'] + 1
+        for _ in range(ns['NUM_SLOTS'] + 2):
+            if not ns['_service_restore']():
+                break
+
+    print('\n--- kits: a kit round-trips through flash')
+    menu = ns['SketchMenu']()
+    menu.open()
+    check(ns['load_slot'](0, kick) is None, 'kick.wav loads into slot 0')
+    check(ns['load_slot'](1, snare) is None, 'snare.wav loads into slot 1')
+    slot_params[0]['pan'] = 50
+    menu._do_save('rock')
+    check([k['name'] for k in ns['_kits']] == ['rock'], 'saving stores one kit')
+    on_disk = json.load(open(ns['KITS_FILE']))
+    check(on_disk[0]['slots'][:2] == [kick, snare],
+          'the kit on disk holds the sample PATHS, not audio')
+    check(on_disk[0]['params'][0]['pan'] == 50, 'and each pad\'s params')
+    check(ns['_current_kit_name'] == 'rock', 'the saved kit becomes current')
+    check(ns['_kit_dirty'] is False, 'and starts out unmodified')
+    check(ns['kit_display_name']() == 'rock', 'the idle screen names it')
+
+    print('\n--- kits: the * marks unsaved work, and only real edits set it')
+    ns['mark_kit_dirty']()
+    check(ns['kit_display_name']() == 'rock*', 'an edit marks the kit modified')
+    long_name = 'a' * ns['KIT_NAME_MAX']
+    ns['_current_kit_name'] = long_name
+    check(ns['kit_display_name']().endswith('*'),
+          'a name at the length cap still shows its *')
+    check(len(ns['kit_display_name']()) <= ns['KIT_HEADLINE_MAX'],
+          'and the headline still clears the CH readout')
+    ns['_current_kit_name'] = 'rock'
+
+    print('\n--- kits: EMPTY is the virtual "new kit"')
+    lst = ns['_kit_load_list']()
+    check(lst[0]['name'] == ns['EMPTY_KIT_NAME'], 'EMPTY heads the Load list')
+    menu.open()
+    menu._load_kit(0)
+    drain_restore()
+    check(all(p is None for p in slot_paths), 'loading EMPTY clears every pad')
+    check(slot_params[0]['pan'] == 0, 'and resets every param to its default')
+    check(ns['_current_kit_name'] == '', 'EMPTY leaves NO current kit to overwrite')
+    check(ns['kit_display_name']() == 'TRIGGERBOX', 'so the idle screen says so')
+
+    print('\n--- kits: loading one drops the cached slot list')
+    # The slot list is built once and reused, so a kit load has to invalidate it --
+    # otherwise 'Kit parameters' shows the PREVIOUS kit's sample names.
+    check(ns['load_slot'](0, kick) is None, 'a pad is loaded again')
+    menu.open()
+    menu._open_slots()
+    cached = menu._slots_level
+    check(cached is not None and 'kick' in cached.items[0][0],
+          'the list is cached, showing the loaded pad')
+    menu.open()
+    menu._load_kit(0)                                   # EMPTY
+    drain_restore()
+    check(menu._slots_level is None, 'the kit load dropped the stale cache')
+    menu.open()
+    menu._open_slots()
+    check('kick' not in menu._slots_level.items[0][0],
+          'so the rebuilt list shows the pad as empty')
+
+    print('\n--- kits: loading one refills the pads from the card')
+    lst = ns['_kit_load_list']()
+    idx = [i for i, k in enumerate(lst) if k['name'] == 'rock'][0]
+    menu.open()
+    menu._load_kit(idx)
+    check(not menu.is_open, 'the menu closes so the progress notice owns the panel')
+    check(len(ns['_restore_queue']) == 2, 'both samples are QUEUED, not loaded inline')
+    check(ns['_settings']['slots'][:2] == [kick, snare],
+          'the kit is persisted before the first load, so a power cut resumes it')
+    drain_restore()
+    check(slot_paths[:2] == [kick, snare], 'both pads come back')
+    check(slot_params[0]['pan'] == 50, 'with their saved params')
+    check(ns['_kit_dirty'] is False, 'a freshly loaded kit is not modified')
+
+    print('\n--- kits: a sample that moved leaves a LABELLED empty pad')
+    os.remove(snare)
+    menu.open()
+    menu._load_kit(idx)
+    drain_restore()
+    check(slot_paths[1] is None, 'the pad stays empty -- there is nothing to play')
+    check(slot_missing[1] and slot_missing[1][0] == snare,
+          'but it remembers the file it wanted')
+    check(slot_missing[1][1] == 'GONE',
+          "and knows it is MISSING, not corrupt ('GONE' vs 'BAD')")
+    check(ns['slot_label'](1) == '!snare', 'and the UI shows it tag-first')
+    check(ns['wanted_paths']()[1] == snare,
+          'the wanted path is what gets persisted, so the card can bring it back')
+    check(slot_paths[0] == kick, 'the other pads load normally')
+    _write_wav(snare, secs=0.50)
+    check(ns['load_slot'](1, snare) is None, 'restoring the file lets it load again')
+    check(slot_missing[1] is None, 'which clears the marker')
+
+    print('\n--- kits: overwrite, reserved names, and the full cap')
+    menu.open()
+    menu._do_save('rock')
+    check(len(ns['_kits']) == 1, 'saving the same name overwrites in place')
+    menu.open()
+    menu._start_save()
+    labels = [it[0] for it in menu.cur.items]
+    check('Overwrite' in labels and 'Save as new' in labels,
+          'with a kit current, Save offers Overwrite')
+    check(menu.cur.idx == 1, 'and the cursor skips the unclickable name row')
+
+    class _FakeName:
+        name = ns['EMPTY_KIT_NAME'].lower()
+    before = len(ns['_kits'])
+    menu.open()
+    menu._commit_name(_FakeName())
+    check(menu.cur.title == 'NAME RESERVED', 'EMPTY is refused as a kit name')
+    check(len(ns['_kits']) == before, 'and nothing is saved')
+
+    print('\n--- kits: naming one on the encoder')
+    menu.open()
+    menu._start_name_entry()
+    lvl = menu.cur
+    ring = ns['_NAME_RING']
+    for ch in 'jazz':
+        lvl.sel = ring.index(ch)
+        lvl.handle(menu, 0, True, False)
+    check(lvl.name == 'jazz', 'clicking the ring builds the name')
+    lvl.sel = ring.index('DEL')
+    lvl.handle(menu, 0, True, False)
+    check(lvl.name == 'jaz', 'DEL backspaces')
+    lvl.sel = ring.index('z')
+    lvl.handle(menu, 0, True, False)
+    lvl.sel = 0
+    lvl.handle(menu, 99, False, False)
+    check(lvl.sel == len(ring) - 1, 'a fast spin clamps on OK rather than wrapping')
+    lvl.handle(menu, 0, True, False)                    # OK
+    check(menu.cur.title == 'SAVE KIT?', 'OK asks to confirm the new name')
+    menu.cur.items[menu.cur.idx][1]()                   # Yes
+    check('jazz' in [k['name'] for k in ns['_kits']], 'confirming saves it')
+    check(ns['_current_kit_name'] == 'jazz', 'and it becomes the current kit')
+    lvl2 = ns['_NameLevel']()
+    for _ in range(ns['KIT_NAME_MAX'] + 5):
+        lvl2.sel = ring.index('a')
+        lvl2.handle(menu, 0, True, False)
+    check(len(lvl2.name) == ns['KIT_NAME_MAX'], 'the name cap holds')
+
+    print('\n--- kits: the Load list is EMPTY first, then alphabetical')
+    menu.open()
+    menu._do_save('Brushes')
+    menu.open()
+    menu._do_save('anvil')
+    names = [k['name'] for k in ns['_kit_load_list']()]
+    check(names[0] == ns['EMPTY_KIT_NAME'], 'EMPTY stays pinned first')
+    check(names[1:] == sorted(names[1:], key=str.lower),
+          'the rest sort case-insensitively: %r' % (names[1:],))
+    for n in ('jazz', 'Brushes', 'anvil'):
+        menu.open()
+        menu._do_delete(n)
+
+    print('\n--- the root menu is the agreed IA')
+    menu.open()
+    check([it[0] for it in menu.cur.items] == [
+        'Kit parameters', 'Save kit', 'Load kit', 'Delete kit',
+        'MIDI base note', 'Resume playing'], 'root items, in order')
+    check(len(menu.cur.items) <= ns['MENU_VISIBLE'], 'and still one page')
+
+    print('\n--- kits: delete removes the snapshot, not what is playing')
+    menu.open()
+    menu._do_save('rock')
+    menu.open()
+    menu._do_delete('rock')
+    check(ns['_kits'] == [], 'the kit is gone')
+    check(json.load(open(ns['KITS_FILE'])) == [], 'and gone from flash')
+    check(ns['_current_kit_name'] == '', 'the Overwrite target is cleared')
+    check(slot_paths[:2] == [kick, snare], 'the live pads keep playing')
+    menu.open()
+    menu._open_delete()
+    check(menu.cur.items[0][1] is None, 'an empty Delete list has nothing to click')
+    shutil.rmtree(kit_dir, ignore_errors=True)
+    shutil.rmtree(kit_samples, ignore_errors=True)
 
     print()
     if FAILED:

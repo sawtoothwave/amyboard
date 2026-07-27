@@ -1,11 +1,18 @@
 # AMYboard Sketch
-# DESCRIPTION: 12-slot one-shot sample trigger box. Each slot holds a WAV loaded
+# DESCRIPTION: 8-slot one-shot sample trigger box. Each slot holds a WAV loaded
 #   on the board from /sd/samples (browsed folder-by-folder on the encoder) into
 #   PSRAM, and fires on a MIDI channel 11 note-on at its assigned pitch (MIDI note
 #   48, shown as C2, + slot by default). Built for short IDM-style percussion --
 #   zaps, blips, clicks -- and retriggering a slot chokes and restarts it. Sample
 #   length is bounded only by free memory at load time, not a fixed cap. No
 #   sequencer, no patterns: notes in, samples out.
+#
+#   KITS: the eight pads and their tuning can be saved as a named kit in internal
+#   flash and recalled from the menu (modelled on the polysynth's presets). A kit
+#   stores sample PATHS, not audio, so loading one re-reads the card -- and a pad
+#   whose file has since moved comes back labelled '!name' rather than silently
+#   empty. base_note is NOT part of a kit: it belongs to your controller, not to
+#   the sounds, so switching kits never moves the pads under your fingers.
 #
 #   ENGINE: native routing (see drumkit.py). Every loaded slot becomes one PCM
 #   oscillator inside a single-voice user patch; that patch loads on synth 11 with
@@ -236,7 +243,13 @@ MIDI_CHANNEL = 11        # 1-based, as printed on hardware; the status byte
                          # double-triggers). We load our kit as synth 11 and let
                          # AMY route channel-11 notes to it natively.
 SYNTH        = MIDI_CHANNEL   # AMY synth number == the MIDI channel we answer on
-NUM_SLOTS    = 12        # pads; slot i -> MIDI note base_note + i
+NUM_SLOTS    = 8         # pads; slot i -> MIDI note base_note + i. Eight, not
+                         # twelve: twelve pads only ever fit the idle screen as two
+                         # columns of five-character names, and a kit of eight is
+                         # what actually gets played. Settings and kits saved by the
+                         # twelve-slot build still open -- every restore loop is
+                         # bounded by min(NUM_SLOTS, len(saved)), so slots 9-12 are
+                         # ignored and drop out the next time the file is written.
 
 # NATIVE ROUTING (from drumkit.py). Unlike the old build, notes are NOT fired
 # from a Python callback (the jitter path). Instead every loaded slot becomes one
@@ -263,7 +276,12 @@ GAIN        = 5.0
 # makes that guaranteed rather than incidental.
 NATIVE_NOTE = 60
 
-READ_TRIES  = 6          # robust-read attempts per WAV (re-mount the SD between)
+READ_TRIES  = 6          # robust-read attempts per WAV
+REMOUNT_AFTER = 2        # ...of which the first this many are PLAIN retries. Only
+                         # once those fail do we re-mount the card: a transient EIO
+                         # clears on its own, and remounting a working filesystem
+                         # breaks every single-shot read that follows. See
+                         # robust_read for the full reasoning.
 LOAD_SETTLE_MS = 1200    # wait this long after boot before the first SD load, so
                          # touching the card can't knock USB-MIDI offline mid-enum
 
@@ -352,6 +370,12 @@ def _is_dir(path):
 
 
 def sd_mounted():
+    # "Is there a mountpoint", NOT "is the card healthy" -- do not use it as the
+    # latter. MEASURED on a card that had dropped off the bus: this still returned
+    # True (stat '/sd' answered 16384) while os.listdir('/sd') gave [] and every
+    # path below it raised EIO. There is no cheap health check; the only way to
+    # know a read works is to do one, which is why the read paths recover by
+    # re-mounting on failure rather than by asking first.
     return _is_dir('/sd')
 
 
@@ -363,6 +387,10 @@ def try_mount_sd():
     #
     # It will NOT rescue an exFAT card: the firmware has no exFAT support at all,
     # so the mount fails every time. Reformat as FAT32.
+    # NEVER call os.umount('/sd') to "clean up" before re-mounting. MEASURED on the
+    # board: mount_sd() on a dropped-off card recovers it completely, but a umount
+    # first leaves it ENODEV and mount_sd() will NOT bring it back -- only a power
+    # cycle does. mount_sd() alone is the whole recovery.
     if sd_mounted():
         return True
     try:
@@ -444,6 +472,8 @@ def _u16(b, o):
 
 
 WAV_HEADER_BYTES = 512   # one SD transaction; see _wav_info
+HDR_TRIES = 3            # header-read attempts: one plain, then two behind a
+                         # re-mount. A card that answers pays for the first only.
 
 # --- Keeping the card out of the way while you play --------------------------
 # MEASURED, and it overturned how this sketch was being optimised: while the
@@ -528,6 +558,24 @@ def service_prescan():
     return True
 
 
+# WHY a header read failed, as short tags the browser shows tag-first (alongside
+# the existing 8BIT / CH4 / EMPTY). This used to be a single blanket None -> '!BAD',
+# which collapsed "the card hiccuped", "this isn't a WAV" and "this is ADPCM" into
+# one word. The first of those is retryable and the others aren't, so it is exactly
+# the distinction worth having -- and with no REPL while the sketch runs, the panel
+# is the only place a diagnosis can actually surface.
+WAV_EIO   = 'EIO'      # the read itself threw: a card dropout. RETRYABLE
+WAV_HDR   = 'HDR'      # bytes arrived, but parsing them threw
+WAV_NOWAV = 'NOWAV'    # doesn't begin RIFF/WAVE -- or the read came up short
+WAV_FMT   = 'FMT'      # a fmt chunk we can't use: not uncompressed PCM, or zeroed
+
+# Verdicts safe to REMEMBER. A dropout must never be cached: the file is probably
+# fine and the next look should read it again. A short/garbled read looks exactly
+# like "not a WAV", so that one stays uncached too rather than condemning a good
+# file on one bad transaction.
+_WAV_TRANSIENT = (WAV_EIO, WAV_HDR, WAV_NOWAV)
+
+
 def _wav_info(path):
     # Parse enough of a WAV header to decide whether AMY can play it correctly.
     # Returns (channels, samplerate, bits, frames) or None if unreadable/not a
@@ -550,14 +598,46 @@ def _wav_info(path):
     # because rejecting it would mark a perfectly good sample BAD and unclickable.
     if path in _info_cache:
         return _info_cache[path]        # never read the same header twice
-    try:
-        with open(path, 'rb') as f:
-            buf = f.read(WAV_HEADER_BYTES)
-    except Exception:
-        return None
+    # RETRY, AND RE-MOUNT IF THAT DOESN'T CLEAR IT.
+    #
+    # This is the browser's whole recovery, and it went missing for a long time: a
+    # header read was the ONE card access in the sketch with no re-mount behind it,
+    # so it was the only one that could never come back.
+    #
+    # MEASURED on the board, in the failed state, over the REPL: after a sample
+    # loads, the card drops off the bus completely -- os.listdir('/sd') returns []
+    # and every deeper path raises EIO -- and a single amyboard.mount_sd() restores
+    # it entirely (root listing back, 512-byte read fine). gc.collect() changes
+    # nothing, and the heap was 5.1 MB free at the time, so this was never memory.
+    #
+    # Why it presented as "loading a sample breaks browsing": list_dir caches, and
+    # the boot prescan has usually cached every folder already, so the LISTING comes
+    # back from RAM and looks healthy while every header read underneath it hits the
+    # dead card. A folder you had already opened looked fine for the same reason --
+    # its headers were in _info_cache too.
+    #
+    # Cost: nothing on a card that is answering (first attempt returns). One
+    # re-mount, once, on a card that isn't -- after which everything else works
+    # again, because the re-mount fixes the card, not just this read.
+    buf = err = None
+    for attempt in range(HDR_TRIES):
+        try:
+            with open(path, 'rb') as f:
+                buf = f.read(WAV_HEADER_BYTES)
+            break
+        except Exception as e:
+            err = e
+            if attempt:            # first attempt plain, in case it was a one-off
+                try:
+                    amyboard.mount_sd()
+                except Exception:
+                    pass
+    if buf is None:
+        _dbg('wav read failed %s: %s: %s' % (path, type(err).__name__, err))
+        return WAV_EIO
     try:
         if len(buf) < 12 or buf[0:4] != b'RIFF' or buf[8:12] != b'WAVE':
-            return None
+            return WAV_NOWAV
         channels = samplerate = bits = 0
         fmt_ok = False
         frames = 0
@@ -585,13 +665,16 @@ def _wav_info(path):
             # properly rather than calling a good file bad.
             info = _wav_info_walk(path)
         elif not fmt_ok or not channels or not samplerate or not bits:
-            info = None
+            info = WAV_FMT
         else:
             info = (channels, samplerate, bits, frames)
+        if info in _WAV_TRANSIENT:
+            return info            # a dropout: don't condemn the file for it
         _cache_put(_info_cache, path, info, INFO_CACHE_MAX)
         return info
-    except Exception:
-        return None
+    except Exception as e:
+        _dbg('wav parse failed %s: %s: %s' % (path, type(e).__name__, e))
+        return WAV_HDR
 
 
 def _wav_info_walk(path):
@@ -601,7 +684,7 @@ def _wav_info_walk(path):
         with open(path, 'rb') as f:
             hdr = f.read(12)
             if len(hdr) < 12 or hdr[0:4] != b'RIFF' or hdr[8:12] != b'WAVE':
-                return None
+                return WAV_NOWAV
             channels = samplerate = bits = 0
             fmt_ok = False
             frames = 0
@@ -614,7 +697,7 @@ def _wav_info_walk(path):
                 if cid == b'fmt ':
                     body = f.read(csize)
                     if len(body) < 16:
-                        return None
+                        return WAV_FMT
                     fmt_ok = (_u16(body, 0) == 1)
                     channels = _u16(body, 2)
                     samplerate = _u32(body, 4)
@@ -626,10 +709,11 @@ def _wav_info_walk(path):
                 else:
                     f.seek(csize + (csize & 1), 1)
             if not fmt_ok or not channels or not samplerate or not bits:
-                return None
+                return WAV_FMT
             return (channels, samplerate, bits, frames)
-    except Exception:
-        return None
+    except Exception as e:
+        _dbg('wav walk failed %s: %s: %s' % (path, type(e).__name__, e))
+        return WAV_EIO
 
 
 def sample_problem(info):
@@ -638,6 +722,8 @@ def sample_problem(info):
     # in the list instead of silently failing on click.
     if info is None:
         return 'BAD'
+    if isinstance(info, str):
+        return info               # already a short tag from _wav_info: EIO/FMT/...
     channels, samplerate, bits, frames = info
     if bits != 16:
         return '%dBIT' % bits         # AMY assumes 16 and would play noise
@@ -765,6 +851,11 @@ def list_dir(path):
             except Exception:
                 pass
         except Exception:
+            # Two attempts only, so the re-mount IS this function's whole recovery
+            # strategy -- gating it on sd_mounted() would remove it, since /sd goes
+            # on stat-ing as a directory even when the mount underneath is sick.
+            # (robust_read has six attempts and can afford to try plain retries
+            # first; this one cannot.)
             try:
                 amyboard.mount_sd()
             except Exception:
@@ -804,15 +895,32 @@ def list_dir(path):
 def robust_read(path):
     # Read the WHOLE file into memory, re-mounting + retrying on EIO. Returns the
     # complete bytes or None. One f.read() per attempt -- no per-chunk SD contact.
-    for _attempt in range(READ_TRIES):
+    for attempt in range(READ_TRIES):
         try:
             with open(path, 'rb') as f:
                 return f.read()
         except Exception:
-            try:
-                amyboard.mount_sd()
-            except Exception:
-                pass
+            # PLAIN RETRIES FIRST, REMOUNT ONLY IF THEY DON'T CLEAR IT.
+            #
+            # This card throws two different failures that look identical here:
+            #   - a transient EIO, which a plain retry clears, and
+            #   - a genuinely sick mount, which only a re-mount clears.
+            # Remounting for the FIRST kind is harmful: this loop is inside an
+            # operation that goes on to REPORT SUCCESS, so a load that hiccups once
+            # and succeeds on retry silently remounts the card, and the browser's
+            # single-shot header reads then return EIO with nothing on screen
+            # linking the two. Never remounting is worse still -- the sick-mount
+            # case then never recovers and the load fails outright.
+            #
+            # So: try again untouched, and escalate to a re-mount only once plain
+            # retries have proved it is not the transient kind. sd_mounted() is no
+            # help in telling them apart -- /sd stat-s as a directory either way.
+            gc.collect()          # cheap, and the retry may want the room
+            if attempt + 1 >= REMOUNT_AFTER:
+                try:
+                    amyboard.mount_sd()
+                except Exception:
+                    pass
             time.sleep(0.1)
     return None
 
@@ -862,6 +970,13 @@ slot_info = [None] * NUM_SLOTS      # cached _wav_info per loaded slot
 slot_bytes = [0] * NUM_SLOTS        # PSRAM bytes the loaded sample occupies (mono
                                     #   PCM). Summed as our own PSRAM tally, since
                                     #   gc.mem_free() can't see sample RAM.
+
+# A slot a kit (or the boot restore) WANTED to fill and couldn't: (path, reason).
+# The slot itself stays empty and silent -- there is nothing to play -- but it
+# remembers the name so the UI can say "this pad expected snare.wav and it wasn't
+# on the card" instead of showing an empty pad indistinguishable from one you never
+# filled. Cleared the moment the slot is loaded or cleared.
+slot_missing = [None] * NUM_SLOTS
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +1057,174 @@ def save_slot_params():
     _set_setting('params', slot_params)
 
 
+def wanted_paths():
+    # What each pad SHOULD hold: the sample it has loaded, or -- for a pad whose
+    # sample was missing when we tried -- the path it is still waiting for.
+    #
+    # This, not slot_paths, is what gets persisted and what a kit stores. Saving the
+    # empty reality instead would quietly forget a pad the moment anything else
+    # wrote the settings file, so a card put back would never bring it home.
+    return [slot_paths[i] or (slot_missing[i][0] if slot_missing[i] else None)
+            for i in range(NUM_SLOTS)]
+
+
+def save_slot_paths():
+    # Persist which sample each slot holds. Kept next to save_slot_params because
+    # the two together ARE the live kit -- the same pair a kit snapshot stores.
+    _set_setting('slots', wanted_paths())
+
+
+# ---------------------------------------------------------------------------
+# Kits. A named snapshot of the whole box -- which sample sits on each pad and how
+# it is tuned -- saved to internal flash. Modelled directly on the polysynth's
+# presets (_load_presets / _save_preset / _sorted_presets over there), including
+# the write-protected virtual entry at the top of the Load list, so the two
+# sketches behave identically under the same gestures.
+#
+# What a kit stores is PATHS, not audio: a WAV is up to a couple of megabytes and
+# lives on the card, while /user flash is 2.19 MiB total. So loading a kit re-reads
+# every sample from the card, and a kit only reloads while its samples stay put --
+# hence slot_missing, which turns a moved file into a labelled empty pad rather
+# than a silent one.
+#
+# base_note is deliberately NOT part of a kit. It is a property of the controller
+# you plugged in, not of the sounds, so switching kits must not move your pads out
+# from under your fingers.
+# ---------------------------------------------------------------------------
+KITS_FILE     = '/user/triggerbox_kits.json'
+KIT_NAME_MAX  = 12       # longest kit name the name-entry screen accepts
+MAX_KITS      = 32       # backstop so a runaway can't fill flash
+EMPTY_KIT_NAME = 'EMPTY'  # the virtual "no samples" kit; reserved, never saved
+
+
+def _load_kits():
+    try:
+        with open(KITS_FILE) as f:
+            d = json.load(f)
+        if isinstance(d, list):
+            return d
+    except Exception:
+        pass
+    return []
+
+
+_kits = _load_kits()
+
+# The kit most recently loaded OR saved this session: the Save menu's Overwrite
+# target and what the idle screen names. `_kit_dirty` tracks whether the live slots
+# have drifted from it since -- so a '*' can warn you there is unsaved work before
+# you load something else over it.
+_current_kit_name = _settings.get('current_kit') or ''
+_kit_dirty = bool(_settings.get('kit_dirty'))
+
+
+def _write_kits():
+    # Whole-file write, guarded like _write_settings: a flash fault must never
+    # disturb audio, it just costs the save.
+    #
+    # SYNCHRONOUS, unlike the settings file's deferred writes: saving or deleting a
+    # kit is an explicit menu action you navigated to, which is exactly the case the
+    # user's tolerance model calls fine to block on. (The polysynth's _write_presets
+    # is the same.) If kits ever get written from somewhere that ISN'T an explicit
+    # action, that decision needs revisiting -- this file is bigger than settings.
+    try:
+        with open(KITS_FILE, 'w') as f:
+            json.dump(_kits, f)
+        return True
+    except Exception:
+        return False
+
+
+def mark_kit_dirty():
+    # The live slots no longer match the saved kit. Called from the three places a
+    # user changes them -- loading a sample, clearing a slot, committing a param --
+    # rather than from the save helpers, so a kit LOAD (which writes the same two
+    # settings keys) doesn't immediately mark itself modified.
+    global _kit_dirty
+    if not _kit_dirty:
+        _kit_dirty = True
+        _set_setting('kit_dirty', True)
+
+
+def _capture_kit():
+    # The save payload: paths + params, copied so later edits can't reach back into
+    # a stored kit.
+    return {'slots': wanted_paths(),
+            'params': [dict(p) for p in slot_params]}
+
+
+def _find_kit(name):
+    for i, k in enumerate(_kits):
+        if k.get('name') == name:
+            return i
+    return -1
+
+
+def _save_kit(name):
+    # Overwrite a same-name kit in place, else append. The MAX_KITS cap is enforced
+    # by the UI before a NEW name reaches here.
+    entry = {'name': name}
+    entry.update(_capture_kit())
+    i = _find_kit(name)
+    if i >= 0:
+        _kits[i] = entry
+    else:
+        _kits.append(entry)
+    return _write_kits()
+
+
+def _empty_kit_entry():
+    # The virtual kit: every pad empty, every param at its default. Shaped like a
+    # saved kit so the Load path needs no special case, and write-protected (it is
+    # not in _kits) so it can't be overwritten or deleted. This is also what "start
+    # a new kit" means -- there is no separate menu item for it.
+    return {'name': EMPTY_KIT_NAME,
+            'slots': [None] * NUM_SLOTS,
+            'params': [_default_params() for _ in range(NUM_SLOTS)]}
+
+
+def _sorted_kits():
+    # Saved kits in display order: alphabetical, case-insensitive (so 'brushes' and
+    # 'Brushes' sort together), matching the polysynth's preset lists.
+    return sorted(_kits, key=lambda k: k.get('name', '').lower())
+
+
+def _kit_load_list():
+    # What the Load menu offers: the virtual EMPTY first as a fixed home row, then
+    # the saved kits alphabetically.
+    return [_empty_kit_entry()] + _sorted_kits()
+
+
+def _kit_params(entry):
+    # A kit's params, merged over the defaults exactly as _restore_params does for
+    # the settings file: a kit saved by an older build (or one missing a param added
+    # since) opens cleanly instead of failing, and unknown keys are ignored.
+    saved = entry.get('params') or []
+    out = []
+    for i in range(NUM_SLOTS):
+        p = _default_params()
+        if i < len(saved) and isinstance(saved[i], dict):
+            for k in PARAM_DEFAULTS:
+                if k in saved[i]:
+                    p[k] = saved[i][k]
+        out.append(p)
+    return out
+
+
+KIT_HEADLINE_MAX = 11    # 16 columns across the panel, less 'CH11' and a gap
+
+
+def kit_display_name():
+    # The idle screen's headline: the loaded kit, with '*' when the live slots have
+    # drifted from it, or the sketch's own name when no kit is loaded. The star is
+    # reserved out of the budget rather than truncated away -- "there is unsaved
+    # work here" is the part you cannot afford to lose to a long name.
+    if not _current_kit_name:
+        return 'TRIGGERBOX'
+    star = '*' if _kit_dirty else ''
+    return _current_kit_name[:KIT_HEADLINE_MAX - len(star)] + star
+
+
 # -- Param -> AMY translation. Kept next to the spec so the mapping is obvious. --
 def _param_level_gain(i):
     # The note map's velocity scale. GAIN (5.0) is unity; the per-slot level
@@ -981,15 +1264,25 @@ def slot_note(i):
     return base_note + i
 
 
-def slot_label(i):
-    # Short display name: the filename without directories or .wav.
-    p = slot_paths[i]
-    if not p:
-        return '-'
-    name = p.rsplit('/', 1)[-1]
+def _base_name(path):
+    # Filename without directories or the .wav extension.
+    name = path.rsplit('/', 1)[-1]
     if name.lower().endswith('.wav'):
         name = name[:-4]
     return name
+
+
+def slot_label(i):
+    # Short display name for a slot. A slot whose sample failed to load keeps the
+    # name it wanted, prefixed '!' -- the same tag-first convention the browser uses
+    # for unusable files, so the reason is never pushed off-screen by a long name.
+    p = slot_paths[i]
+    if p:
+        return _base_name(p)
+    m = slot_missing[i]
+    if m:
+        return '!' + _base_name(m[0])
+    return '-'
 
 
 def unload_slot(i):
@@ -1005,6 +1298,7 @@ def unload_slot(i):
     slot_paths[i] = None
     slot_info[i] = None
     slot_bytes[i] = 0
+    slot_missing[i] = None       # whatever this pad was waiting for, it isn't now
 
 
 def load_slot(i, path):
@@ -1026,6 +1320,18 @@ def load_slot(i, path):
     # load_sample_bytes' buffers). Check the file size against free heap FIRST and
     # bail with '!BIG' before the read, so a too-large file is a clean refusal
     # rather than an OOM crash mid-read. gc.collect() first to measure true free.
+    # A FAILING stat IS NOT PROOF THE FILE IS GONE. This card throws intermittent
+    # EIO -- measured, and written up in sample_root(): "the failing stat was not
+    # proof of a lost mount at all". robust_read's ladder of six opens exists for
+    # exactly that, and it usually succeeds on a later attempt. So the stat here is
+    # only ever a size HINT for the heap guard; a failure just means "size unknown",
+    # as it always did, and we go on to try the read properly.
+    #
+    # (An earlier version of this short-circuited a failed stat into an immediate
+    # 'GONE', with a try_mount_sd() first. That remounted a perfectly good
+    # filesystem on a transient error -- the precise mistake sample_root() was
+    # rewritten to stop making -- and turned a recoverable hiccup into a hard
+    # failure. Don't reintroduce it.)
     try:
         size = os.stat(path)[6]
     except Exception:
@@ -1034,6 +1340,23 @@ def load_slot(i, path):
     if size and size * LOAD_HEAP_FACTOR + LOAD_HEAP_RESERVE > gc.mem_free():
         return 'BIG'
     data = robust_read(path)
+    if data is None:
+        # Every attempt failed. The retries are already spent, so a couple of stats
+        # cost nothing -- and 'GONE' is a claim we had better be able to back up.
+        # Telling someone their sample is missing when it is sitting exactly where
+        # they left it, and the CARD is what stopped answering, sends them looking
+        # for the wrong problem entirely.
+        try:
+            os.stat(path)
+            return 'BAD'              # it is right there, it just would not read
+        except Exception:
+            pass
+        try:
+            os.stat(path.rsplit('/', 1)[0] or '/')
+            return 'GONE'             # its folder reads fine: the file really has
+        except Exception:             #   moved or been deleted
+            return 'EIO'              # the card itself is not answering. Nothing
+                                      #   here is 'gone'; come back when it is well
     parsed = parse_wav_full(data)        # (channels, samplerate, bits, frames, pcm)
     if parsed is None:
         return 'BAD'
@@ -1063,6 +1386,16 @@ def load_slot(i, path):
     slot_paths[i] = path
     slot_info[i] = (channels, sr, bits, frames)
     slot_bytes[i] = pcm_len
+    # Drop the sample and collect before returning. Housekeeping, not a fix: at this
+    # point the heap still holds `pcm` and `parsed` -- up to a megabyte of sample
+    # that nothing else will free until the TOP of the next load_slot() -- and there
+    # is no reason to carry it through everything the caller does next.
+    #
+    # It is explicitly NOT the cause of the post-load EIO bug, which was investigated
+    # here at length. MEASURED in the failed state: the heap was 5.1 MB free and
+    # gc.collect() changed nothing. See _wav_info for what it actually was.
+    parsed = pcm = None
+    gc.collect()
     rebuild_engine()
     return None
 
@@ -1454,10 +1787,11 @@ def _blocking_notice(line1, line2=''):
 
 
 # ---------------------------------------------------------------------------
-# Playing screen: the slot monitor. Shows all twelve slots as a 6-row x 2-column
-# grid (left column = slots 0-5, right = 6-11), each with its trigger note and a
-# short sample name. Twelve full-width rows would run off the 128px panel, so the
-# grid is how 12 pads fit; the menu's slot list shows the untruncated names. It is
+# Playing screen: the slot monitor. Shows all eight slots as a 4-row x 2-column
+# grid (left column = slots 0-3, right = 4-7), each with its trigger note and a
+# short sample name. The grid shape is inherited from the twelve-pad build, where
+# full-width rows would not have fit the 128px panel; the menu's slot list shows
+# the untruncated names. (A ground-up idle screen is a planned feature.) It is
 # a STATIC map -- redrawn only when the slot assignments change (a load, clear or
 # base-note change marks it dirty) -- so an idle box never blits the panel. There
 # is deliberately no per-hit flash: the panel's ~240ms full refresh can't track
@@ -1465,9 +1799,12 @@ def _blocking_notice(line1, line2=''):
 # audio.
 # ---------------------------------------------------------------------------
 MON_TOP_Y    = 18
-MON_ROW_H    = 18            # 6 rows: 18,36,..,108 -- last text bottom ~116 < 128
+MON_ROW_H    = 18            # 4 rows: 18,36,54,72 -- the panel's lower third is
+                             #   free, and stays that way until the idle screen is
+                             #   rebuilt (the row pitch is left as it was so the
+                             #   two builds' screens read the same)
 MON_COL_W    = 64            # two 64px columns across the 128px panel
-MON_ROWS     = 6            # rows per column (NUM_SLOTS split across 2 columns)
+MON_ROWS     = 4            # rows per column (NUM_SLOTS split across 2 columns)
 
 
 class SlotMonitor:
@@ -1485,7 +1822,7 @@ class SlotMonitor:
         try:
             d = amyboard.display
             d.fill(0)
-            d.text('TRIGGERBOX', 0, 2, 255)
+            d.text(kit_display_name(), 0, 2, 255)
             d.text('CH%d' % MIDI_CHANNEL,
                    DISPLAY_WIDTH - 4 * CHAR_W, 2, 150)
             for i in range(NUM_SLOTS):
@@ -1493,7 +1830,14 @@ class SlotMonitor:
                 row = i % MON_ROWS
                 x = col * MON_COL_W
                 y = MON_TOP_Y + row * MON_ROW_H
-                c = 200 if slot_paths[i] else 70
+                # Three states, three brightnesses: loaded, waiting for a file that
+                # isn't there ('!name', mid), and simply empty (dim).
+                if slot_paths[i]:
+                    c = 200
+                elif slot_missing[i]:
+                    c = 140
+                else:
+                    c = 70
                 d.text(note_name(slot_note(i)), x, y, c)
                 d.text(slot_label(i)[:5], x + 3 * CHAR_W, y, c)
             _show()
@@ -1846,6 +2190,7 @@ class _SlotEditor:
         # targeted osc/note sends, so there's nothing more to push here.
         self.editing = False
         save_slot_params()
+        mark_kit_dirty()
 
     # -- render --
     def _row_text(self, ri):
@@ -1912,6 +2257,115 @@ class _SlotEditor:
                 _show(y, y + MENU_LINE_H - 1)
         except Exception as e:
             _render_fault('_SlotEditor.render', e)
+
+
+# ---------------------------------------------------------------------------
+# Name entry, ported from the polysynth (its _NAME_RING / _NameLevel) so naming a
+# kit here feels exactly like naming a preset there. One encoder, one row: turning
+# scrolls a character through the active slot, clicking commits it. The two special
+# tokens act instead of appending -- DEL backspaces, OK confirms -- and draw as
+# glyphs so each occupies a single cell like any letter. Scrolling CLAMPS at the
+# ends rather than wrapping, so a fast spin lands on OK (end) or 'a' (start).
+# ---------------------------------------------------------------------------
+NAME_ROW_Y = 44          # the word + its inline active slot, one 8px row, mid-panel
+_NAME_RING = [c for c in 'abcdefghijklmnopqrstuvwxyz0123456789 '] + ['DEL', 'OK']
+
+
+def _glyph_del(d, x, y, col):
+    # Left-pointing arrow (backspace) in an 8x8 cell: a triangular head widening
+    # rightward, then a short shaft. Spans cols 1-6, leaving 1px either side.
+    d.fill_rect(x + 1, y + 3, 1, 2, col)
+    d.fill_rect(x + 2, y + 2, 1, 4, col)
+    d.fill_rect(x + 3, y + 1, 1, 6, col)
+    d.fill_rect(x + 4, y + 3, 3, 2, col)
+
+
+def _glyph_ok(d, x, y, col):
+    # Check mark in an 8x8 cell: a short down-right arm to a bottom vertex, then an
+    # up-right arm, drawn as overlapping 2px squares across cols 1-6.
+    for dx, dy in ((1, 3), (2, 4), (3, 5), (4, 3), (5, 1)):
+        d.fill_rect(x + dx, y + dy, 2, 2, col)
+
+
+class _NameLevel:
+    # Kit-name entry pushed on the menu stack. `name` is the string committed so
+    # far; `sel` indexes _NAME_RING for the character in the active slot. Hold
+    # cancels the whole name.
+    __slots__ = ('name', 'sel', 'full')
+
+    def __init__(self):
+        self.name = ''
+        self.sel = 0
+        self.full = True
+
+    def invalidate(self):
+        self.full = True
+
+    def handle(self, menu, delta, click, back):
+        if back:
+            menu._pop()
+            return
+        if delta:
+            # Accelerated, like the polysynth's ring: one detent still steps one
+            # character, a flick crosses the alphabet.
+            self.sel = clamp(self.sel + _accel(delta), 0, len(_NAME_RING) - 1)
+            menu.dirty = True
+        if click:
+            item = _NAME_RING[self.sel]
+            if item == 'OK':
+                menu._commit_name(self)
+            elif item == 'DEL':
+                if self.name:
+                    self.name = self.name[:-1]
+                menu.dirty = True
+            elif len(self.name) < KIT_NAME_MAX:
+                self.name += item
+                # Leave the candidate where it is, which makes double letters and
+                # near-neighbours (a/b, o/p) a single click apart.
+                menu.dirty = True
+
+    def _draw_line(self, d):
+        # The committed name with the active slot rendered IN PLACE at its end,
+        # knocked out (black on a white block). A space is a blank white block --
+        # itself the "a space goes here" cue.
+        y = NAME_ROW_Y
+        d.fill_rect(0, y, DISPLAY_WIDTH, CHAR_H, 0)
+        name = self.name
+        maxc = DISPLAY_WIDTH // CHAR_W
+        if len(name) + 1 > maxc:               # keep the active slot on-screen
+            name = name[-(maxc - 1):]
+        item = _NAME_RING[self.sel]
+        total = (len(name) + 1) * CHAR_W        # committed chars + active slot
+        sx = clamp((DISPLAY_WIDTH - total) // 2, 0, max(0, DISPLAY_WIDTH - total))
+        if name:
+            d.text(name, sx, y, 255)
+        ax = sx + len(name) * CHAR_W            # active slot origin
+        d.fill_rect(ax, y, CHAR_W, CHAR_H, 255)
+        if item == 'DEL':
+            _glyph_del(d, ax, y, 0)
+        elif item == 'OK':
+            _glyph_ok(d, ax, y, 0)
+        elif item != ' ':
+            d.text(item, ax, y, 0)
+
+    def render(self, menu):
+        if not menu.dirty:
+            return
+        menu.dirty = False
+        try:
+            d = amyboard.display
+            if self.full:
+                d.fill(0)
+                _draw_menu_row(d, 2, 't', ('NAME KIT', ''))
+                self._draw_line(d)
+                self.full = False
+                _show()
+                return
+            # Scrolling the ring: one 8px row goes out, not a whole frame.
+            self._draw_line(d)
+            _show(NAME_ROW_Y, NAME_ROW_Y + CHAR_H - 1)
+        except Exception as e:
+            _render_fault('_NameLevel.render', e)
 
 
 class SketchMenu:
@@ -1990,18 +2444,24 @@ class SketchMenu:
     # -- Menu tree -----------------------------------------------------------
 
     def _root(self):
+        # Flat, like the polysynth's root: the kit actions sit directly on it rather
+        # than behind a 'Kits' submenu, so saving is two clicks from playing. Six
+        # rows -- still one page, with room for Display mode when it lands.
         items = [
-            ('Slots', self._open_slots),
+            ('Kit parameters', self._open_slots),
+            ('Save kit', self._start_save),
+            ('Load kit', self._open_load),
+            ('Delete kit', self._open_delete),
             ('MIDI base note', self._open_base_note),
             ('Resume playing', self.close),
         ]
         return _MenuLevel('TRIGGERBOX', items)
 
     def _build_slots_level(self):
-        # The SLOTS list: one row per pad, "<note> <sample>".
+        # The slot list: one row per pad, "<note> <sample>".
         #
-        # BUILT ONCE and reused (see _open_slots). MEASURED at 3.9-5.8ms -- twelve
-        # label strings, twelve tuples and twelve closures -- which is both a chunk
+        # BUILT ONCE and reused (see _open_slots). MEASURED at 3.9-5.8ms for twelve
+        # pads -- a label string, a tuple and a closure each -- which is both a chunk
         # of the click's own cost AND the garbage that eventually buys a 35-41ms
         # gc.collect() at some unrelated moment. Every millisecond inside loop() is
         # a millisecond MIDI is not serviced ([[blocking-loop-stops-midi]]), so the
@@ -2010,7 +2470,7 @@ class SketchMenu:
         for i in range(NUM_SLOTS):
             items.append(('%s %s' % (note_name(slot_note(i)), slot_label(i)),
                           self._slot_opener(i)))
-        return _MenuLevel('SLOTS', items)
+        return _MenuLevel('KIT PARAMETERS', items)
 
     def _open_slots(self):
         # Reuse the cached level, keeping its cursor where you left it. Rebuilt only
@@ -2031,11 +2491,15 @@ class SketchMenu:
         # A load/clear/base-note change altered the labels: rebuild the cached level
         # (preserving the cursor) and swap it in wherever it currently sits in the
         # stack, so backing out of the editor shows the new name.
-        keep = self._slots_level.idx if self._slots_level else 0
+        old = self._slots_level
+        keep = old.idx if old else 0
         self._slots_level = self._build_slots_level()
         self._slots_level.idx = clamp(keep, 0, len(self._slots_level.items) - 1)
+        # Found by IDENTITY, not by title: the level we are replacing is the exact
+        # object we cached, so nothing here depends on a title string staying in
+        # sync with the one _build_slots_level writes.
         for si in range(len(self.stack)):
-            if getattr(self.stack[si], 'title', None) == 'SLOTS':
+            if self.stack[si] is old:
                 self.stack[si] = self._slots_level
                 break
 
@@ -2052,6 +2516,7 @@ class SketchMenu:
         rebuild_engine()              # drop the freed osc from the patch + map
         self._save_slots()
         save_slot_params()
+        mark_kit_dirty()
         self._refresh_slots_list()    # update the label under the editor
         self._show_toast('SLOT CLEARED')
 
@@ -2187,6 +2652,10 @@ class SketchMenu:
             flush_settings()      # already a blocking moment: spend it here
             problem = load_slot(i, path)
             self._save_slots()
+            # Marked whatever the outcome: a load that failed late still emptied the
+            # pad (unload_slot runs before load_sample_bytes), so "nothing changed"
+            # isn't a safe assumption. A spurious '*' only ever over-warns.
+            mark_kit_dirty()
             # Unwind the browser (however deep in subfolders) back to the slot
             # EDITOR (root, slots, editor = depth 3), so you land back on the slot
             # you just filled, ready to tweak it. Refresh the list underneath and
@@ -2202,7 +2671,7 @@ class SketchMenu:
     def _open_base_note(self):
         # Controllers disagree about octave numbering, so rather than a free
         # numeric editor this offers the handful of C's a drum part realistically
-        # sits on. Each shows the span the twelve slots would cover.
+        # sits on. Each shows the span the slots would cover.
         items = []
         for n in (36, 48, 60):
             span = '%s-%s' % (note_name(n), note_name(n + NUM_SLOTS - 1))
@@ -2221,8 +2690,157 @@ class SketchMenu:
             self._show_toast('BASE ' + note_name(n))
         return go
 
+    # -- Kit workflows -------------------------------------------------------
+    # Ported from the polysynth's preset menu (_start_save / _commit_name /
+    # _open_load / _delete_menu over there) so both sketches answer the same
+    # gestures: Save offers Overwrite when a kit is already current, Load and Delete
+    # list alphabetically, and anything destructive confirms first.
+    #
+    # ONE difference, forced by the panel code: the polysynth puts the kit name in
+    # the confirm HEADER using embedded newlines, but this sketch's _draw_menu_row
+    # draws a title with a single d.text(), which renders '\n' as a glyph rather
+    # than a line break. So the name goes on an unclickable row instead --
+    # see _push_choice.
+
+    def _push_choice(self, title, name, items):
+        # A confirm/chooser screen that has to show a kit name. The name is an
+        # unclickable first row, and the cursor starts on the first real action so
+        # a click can never land on the dead row.
+        lvl = _MenuLevel(title, [(name[:MENU_LABEL_MAX], None)] + items)
+        lvl.idx = 1
+        self._push_level(lvl)
+
+    def _start_save(self):
+        # With a kit current (loaded or saved this session, and still on disk),
+        # offer to update it in place rather than making you retype the name.
+        name = _current_kit_name
+        if name and _find_kit(name) >= 0:
+            self._push_choice('SAVE KIT', name, [
+                ('Overwrite', (lambda n=name: self._confirm_overwrite(n))),
+                ('Save as new', self._start_name_entry),
+                ('Cancel', self._pop),
+            ])
+        else:
+            self._start_name_entry()
+
+    def _start_name_entry(self):
+        self._push_level(_NameLevel())
+
+    def _confirm_overwrite(self, name):
+        self._push_choice('OVERWRITE?', name, [
+            ('Yes', (lambda n=name: self._do_save(n))),
+            ('No', self._pop),
+        ])
+
+    def _commit_name(self, lvl):
+        # The name-entry screen's OK. Empty names are ignored (stay editing).
+        name = lvl.name.strip()
+        if not name:
+            return
+        if name.upper() == EMPTY_KIT_NAME:
+            self._push_choice('NAME RESERVED', '%s is built-in' % EMPTY_KIT_NAME,
+                              [('Back', self._pop)])
+            return
+        exists = _find_kit(name) >= 0
+        if not exists and len(_kits) >= MAX_KITS:
+            self._push_choice('KITS FULL', 'Max %d reached' % MAX_KITS,
+                              [('Back', self._pop)])
+        else:
+            self._push_choice('OVERWRITE?' if exists else 'SAVE KIT?', name, [
+                ('Yes', (lambda n=name: self._do_save(n))),
+                ('No', self._pop),
+            ])
+
+    def _do_save(self, name):
+        # Snapshot the live slots under `name`, which becomes the session's current
+        # kit (the Overwrite target) and is no longer modified.
+        global _current_kit_name, _kit_dirty
+        ok = _save_kit(name)
+        if ok:
+            _current_kit_name = name
+            _kit_dirty = False
+            _set_setting('current_kit', name)
+            _set_setting('kit_dirty', False)
+        self.stack = [self._root()]
+        self._show_toast('KIT SAVED!' if ok else 'SAVE FAILED')
+
+    def _open_load(self):
+        lst = _kit_load_list()
+        items = [(lst[i].get('name', '?')[:MENU_LABEL_MAX],
+                  (lambda i=i: self._load_kit(i)))
+                 for i in range(len(lst))]
+        self._push_level(_MenuLevel('LOAD KIT', items))
+
+    def _load_kit(self, i):
+        # `i` indexes _kit_load_list() -- EMPTY at 0, saved kits after.
+        global _current_kit_name, _kit_dirty
+        lst = _kit_load_list()
+        if not (0 <= i < len(lst)):
+            return
+        entry = lst[i]
+        name = entry.get('name', '')
+        # CLOSE FIRST. apply_kit fills the restore queue, and while that drains
+        # loop() paints the progress notice and ignores the encoder -- exactly as at
+        # boot. Leaving the menu open would strand a stale level under the notice,
+        # and there is no toast to show because the load is not instant: the notice
+        # itself is the feedback, and the result stays visible afterwards in the
+        # idle screen's kit name and any '!' pads.
+        self.close()
+        # DROP the cached slot list. It is built once and reused (see _open_slots),
+        # and its rows carry the OLD kit's sample names -- rebuilding it here would
+        # be wrong too, since the pads fill in one per tick after this returns. Nil
+        # it and the next 'Kit parameters' builds it fresh from whatever loaded.
+        self._slots_level = None
+        # Named BEFORE applying, so apply_kit's flush carries the kit name out to
+        # flash in the same write as its slots. EMPTY is virtual, so loading it
+        # leaves you with NO current kit -- the next Save asks for a name rather
+        # than offering to overwrite a built-in.
+        _current_kit_name = '' if name == EMPTY_KIT_NAME else name
+        _kit_dirty = False
+        _set_setting('current_kit', _current_kit_name)
+        _set_setting('kit_dirty', False)
+        apply_kit(entry)
+
+    def _delete_menu(self):
+        # Rebuilt on each open so it always reflects the current set. Items delete
+        # by NAME, not index, so the alphabetical order can never remove the wrong
+        # kit. EMPTY is absent: it is virtual and cannot be deleted.
+        if not _kits:
+            return _MenuLevel('DELETE KIT', [('(none saved)', None)])
+        items = [(k.get('name', '?')[:MENU_LABEL_MAX],
+                  (lambda nm=k.get('name', '?'): self._confirm_delete(nm)))
+                 for k in _sorted_kits()]
+        return _MenuLevel('DELETE KIT', items)
+
+    def _open_delete(self):
+        self._push_level(self._delete_menu())
+
+    def _confirm_delete(self, name):
+        self._push_choice('DELETE KIT?', name, [
+            ('Yes', (lambda n=name: self._do_delete(n))),
+            ('No', self._pop),
+        ])
+
+    def _do_delete(self, name):
+        global _current_kit_name
+        i = _find_kit(name)
+        if i >= 0:
+            del _kits[i]
+            _write_kits()
+        if name == _current_kit_name:
+            # Don't leave the Overwrite target pointing at a kit that's gone. The
+            # live slots are untouched: deleting a kit deletes the SNAPSHOT, not
+            # what is currently loaded and playing.
+            _current_kit_name = ''
+            _set_setting('current_kit', '')
+        # Land back on a refreshed delete list, or the root if that was the last kit.
+        self.stack = [self._root()]
+        if _kits:
+            self.stack.append(self._delete_menu())
+        self._show_toast('DELETED!')
+
     def _save_slots(self):
-        _set_setting('slots', slot_paths)
+        save_slot_paths()
 
     # -- Input / render ------------------------------------------------------
 
@@ -2384,11 +3002,48 @@ try:
 except Exception:
     _restore_queue = []
 _restore_total = len(_restore_queue)
+_restore_title = 'RESTORING...'   # notice headline; a kit load retitles it
 _boot_ticks = None      # ticks_ms of the first loop(); gates the SD settle delay
 if not _restore_queue:
     start_prescan()     # nothing to restore: start warming the folder cache now
                         # (with samples to restore, _service_restore starts it once
                         # the queue drains, so the two never fight over the card)
+
+
+def apply_kit(entry):
+    # Make `entry` the live kit. Params and empty pads land immediately; the samples
+    # go through the SAME queue the boot restore drains, one per loop() tick behind
+    # the progress notice, because load_slot() blocks for a whole file read and
+    # eight of them inline would freeze the box for seconds -- a loop() that does
+    # not return is a loop() not servicing MIDI.
+    #
+    # Every pad is emptied first, so loading a kit REPLACES the box rather than
+    # merging into it -- a slot the kit doesn't fill ends up empty, not holding
+    # whatever the last kit left there.
+    global _restore_queue, _restore_total, _restore_title
+    params = _kit_params(entry)          # merged before anything is torn down, so a
+                                         # malformed kit can't leave us half-applied
+    for i in range(NUM_SLOTS):
+        unload_slot(i)                   # also clears any stale '!missing' marker
+        slot_params[i] = params[i]
+    rebuild_engine()                     # silent-but-valid engine while samples load
+    saved = entry.get('slots') or []
+    wanted = [saved[i] if i < len(saved) else None for i in range(NUM_SLOTS)]
+    _restore_queue = [(i, wanted[i]) for i in range(NUM_SLOTS) if wanted[i]]
+    _restore_total = len(_restore_queue)
+    _restore_title = 'LOADING KIT'
+    # Persist the KIT's paths now, before a single sample has actually loaded. What
+    # plays after a reboot is the slots, not the kit name -- so writing them up
+    # front means power lost halfway through a load still comes back as this kit,
+    # and any edit you make afterwards is what survives instead.
+    #
+    # Flushed rather than deferred: while the queue drains, loop() returns early and
+    # never reaches service_settings(), so a deferred write would sit unwritten for
+    # the whole load -- exactly the window this is meant to cover. We are already in
+    # a blocking moment, so the ~150ms is free.
+    _set_setting('slots', wanted)
+    save_slot_params()
+    flush_settings()
 
 
 def _service_restore():
@@ -2409,14 +3064,22 @@ def _service_restore():
     i, path = _restore_queue.pop(0)
     # Progress counts the QUEUE, not NUM_SLOTS -- only saved slots are restored,
     # so a box with two samples saved shows 1/2 and 2/2, not 5/6 and 6/6.
-    _blocking_notice('RESTORING...', '%s %d/%d' % (
+    _blocking_notice(_restore_title, '%s %d/%d' % (
         note_name(slot_note(i)), _restore_total - len(_restore_queue),
         _restore_total))
-    if load_slot(i, path):
-        # The file moved, was deleted, or no longer passes validation. Drop it
-        # from the saved set so the stale path doesn't retry on every boot.
+    problem = load_slot(i, path)
+    if problem:
+        # The file moved, was deleted, or no longer passes validation. The pad stays
+        # EMPTY -- there is nothing to play -- but it keeps the name it wanted, so
+        # the slot list and idle screen can show '!snare' instead of a blank that
+        # looks like a pad you simply never filled.
+        #
+        # The path is KEPT, not dropped, so putting the card back and rebooting
+        # brings the pad back on its own. Retrying it next boot is now cheap: an
+        # absent file fails on the stat in load_slot ('GONE'), not after ~1.6s of
+        # re-mounts.
         slot_paths[i] = None
-        _set_setting('slots', slot_paths)
+        slot_missing[i] = (path, problem)
     if not _restore_queue:
         monitor.on_activate()      # repaint the monitor over the notice
         flush_settings()           # boot's blocking window: a free moment to write
@@ -2571,10 +3234,15 @@ def _loop_body():
         t0 = time.ticks_ms()
         menu.render()                # the menu owns the OLED while open
         _t_render = time.ticks_diff(time.ticks_ms(), t0)
-    else:
+    elif not _restore_queue:
         # Playing: after returning from our menu or a global Resume, repaint so the
         # monitor redraws over any leftover menu/overlay pixels. The Resume case
         # keeps repainting for RESUME_REPAINT_MS -- see _repaint_until.
+        #
+        # Skipped while a load is QUEUED. Loading a kit closes the menu and fills the
+        # queue in the same tick, so without this we would spend a full-frame blit
+        # painting an idle screen the notice overwrites next tick -- and it would
+        # flash every pad as empty on the way past, which reads as "it wiped my kit".
         if launcher.repaint:
             launcher.repaint = False
             monitor.on_activate()

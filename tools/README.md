@@ -133,11 +133,23 @@ row the cursor landed on is the FIRST band pushed, that a jump costs two 12px ba
 rather than one spanning everything between, and that popping a level forces the
 level underneath to fully repaint.
 
+It also covers **kits** end to end, against real WAVs and a real JSON file (with
+`KITS_FILE` redirected to a temp path, so the round-trip through flash actually
+runs rather than being mocked): save/overwrite/delete, the pinned-first `EMPTY`
+virtual kit and alphabetical ordering, the name-entry ring (build, backspace, clamp
+on OK, the length cap), the root menu's item list, the `*` modified marker and its
+headline budget, that loading a kit QUEUES its samples instead of loading them
+inline, and that a sample which has moved leaves a labelled empty pad — refused on
+the `stat` as `GONE`, with the wanted path still persisted so putting the card back
+brings it home.
+
 - **Proves:** which gesture lands which value, when the commit fires, that a commit
-  is never silently lost, and what order panel regions go out in.
+  is never silently lost, what order panel regions go out in, and what a kit
+  actually stores and restores.
 - **Does NOT prove:** audio, encoder feel, or the real per-band I2C cost (pushes are
   counted, not timed — 19ms/12-row band is the measured figure they're reasoned
-  against).
+  against). Nor the real SD card: the "missing sample" path is a deleted temp file,
+  not a pulled card.
 
 ## `grab_font.py` — read the board's 8×8 font over serial
 
