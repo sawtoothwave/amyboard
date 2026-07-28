@@ -261,6 +261,18 @@ NUM_SLOTS    = 8         # pads; slot i -> MIDI note base_note + i. Eight, not
 # latency. One osc per slot still gives choke-and-restart for free.
 KIT_PATCH   = 1024       # user-patch slot for our kit (built-in patches end at 390)
 
+# Kit synth flags, using AMY's own names instead of a bare 3. Verified against
+# shorepine/amy src/amy.h (read 2026-07-27):
+#   SYNTH_FLAGS_NOTES_VIA_MIDI   (1) "Note-on/off events routed through MIDI"
+#                                    -- what makes our midi_note_cmd map do the
+#                                    routing in C rather than in Python.
+#   SYNTH_FLAGS_IGNORE_NOTE_OFFS (2) "Note offs are ignored (drums with long
+#                                    decays)" -- ring-out: a one-shot plays to its
+#                                    end no matter when the controller lifts.
+# Needs the 2026-07-27 firmware or later; older builds have no SYNTH_FLAGS_*
+# names and this line raises AttributeError at import.
+KIT_SYNTH_FLAGS = amy.SYNTH_FLAGS_NOTES_VIA_MIDI | amy.SYNTH_FLAGS_IGNORE_NOTE_OFFS
+
 # Sample preset numbers. AMY's built-in ROM PCM lives low (the drum kits are
 # 384+), so user samples start well above it; an overlapping number would
 # shadow a built-in until unloaded. Presets and patches are separate namespaces.
@@ -1465,10 +1477,9 @@ def rebuild_engine():
             pass
         return
 
-    # One PCM osc per loaded slot in one voice. synth_flags=3 = notes-via-MIDI map +
-    # ring-out (ignore note-offs), so a one-shot plays to its end regardless of when
-    # the controller sends note-off.
-    bank = amy.message(num_voices=1, oscs_per_voice=n, synth_flags=3)
+    # One PCM osc per loaded slot in one voice. See KIT_SYNTH_FLAGS for what the
+    # flags buy us (native MIDI routing + ring-out).
+    bank = amy.message(num_voices=1, oscs_per_voice=n, synth_flags=KIT_SYNTH_FLAGS)
     osc_of = {}
     for k, i in enumerate(loaded):
         bank += amy.message(osc=k, wave=amy.PCM, preset=PRESET_BASE + i,
@@ -1476,7 +1487,7 @@ def rebuild_engine():
         osc_of[slot_note(i)] = (k, i)
     amy.send(patch=KIT_PATCH, patch_string=bank)
     amy.send(synth=SYNTH, num_voices=1, patch=KIT_PATCH,
-             synth_flags=3, grab_midi_notes=1)
+             synth_flags=KIT_SYNTH_FLAGS, grab_midi_notes=1)
 
     # full-range map: loaded slots -> their osc at the slot's level/pitch; all else
     # silent (gain 0) so an unmapped note can't strand the voice.
