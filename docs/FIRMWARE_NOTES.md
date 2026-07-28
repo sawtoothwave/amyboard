@@ -1,18 +1,45 @@
 # Firmware notes & gotchas
 
-Hard-won notes about the AMYboard firmware, current as of the latest
-`amyboard-full-AMYBOARD.bin` build. Several of these caused long debugging
-sessions; read before assuming a bug is in this repo's code.
+Hard-won notes about the AMYboard firmware, verified against the
+**`82e69df-dirty on 2026-07-27`** build (see "Which build is on the board?"
+below). Several of these caused long debugging sessions; read before assuming a
+bug is in this repo's code.
 
 ## Correct firmware & flashing
 
 - Image: `amyboard-full-AMYBOARD.bin` from the shorepine/tulipcc `amyboard`
   release (<https://github.com/shorepine/tulipcc/releases/tag/amyboard>).
-- Browser flasher: <https://amyboard.com/editor>. Or esptool:
-  `esptool.py write_flash 0x0 amyboard-full-AMYBOARD.bin`.
-- **A reflash WIPES `/user`** — the launcher, `/user/sketches`, and
-  `polysynth_settings.json` are all erased. Redeploy afterward (launcher to
-  `/user/current/sketch.py`, then the sketch with `--activate`).
+- Two ways to update, and they differ in whether you lose `/user`:
+  - **In-place upgrade at <https://amyboard.com/editor>** — **`/user` SURVIVES.**
+    VERIFIED 2026-07-27: upgrading from the 2026-07-18 build to 2026-07-27 left all
+    11 files intact at byte-identical sizes (launcher, both sketches, presets, kits,
+    settings, wifi.json). This is the normal way to update.
+  - **esptool writing the whole image** (`esptool.py write_flash 0x0
+    amyboard-full-AMYBOARD.bin`) — **WIPES `/user`.** The launcher,
+    `/user/sketches`, `polysynth_presets.json`, `triggerbox_kits.json` and the rest
+    are all erased. Redeploy afterward (launcher to `/user/current/sketch.py`, then
+    the sketch with `--activate`), and restore the JSON state files by hand.
+  Reserve the full flash for actual recovery. An earlier version of this file said
+  "a reflash WIPES /user" without the distinction, which is true only of the second.
+- **Back up `/user` before a full flash.** Samples live on the SD card and are not
+  touched by either path, but presets and kits exist ONLY on the board.
+
+## Which build is on the board?
+
+`os.uname()` over the serial REPL carries the build commit and date — use it before
+guessing from behaviour:
+
+```python
+import os; os.uname()
+# (sysname='esp32', ..., release='1.24.0-preview',
+#  version='82e69df-dirty on 2026-07-27', machine='AMYboard with ESP32S3')
+```
+
+The `amyboard` release tag is *rolling* — it gets re-pointed at new builds, so it
+pins nothing on its own. `amy._KW_MAP` is the authoritative list of keywords the
+build accepts (unknown kwargs raise `ValueError`, they are not silently dropped),
+and `amy.message(**kw)` is a safe way to test one: it builds a wire string and
+returns it without sending, touching the engine, or making a sound.
 
 ## Testing whether audio works
 
