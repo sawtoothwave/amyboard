@@ -1059,10 +1059,10 @@ def update_porta():
     # AMY's per-OSCILLATOR struct, the same one that holds `phase`. So this follows
     # the same path as wave/freq/duty/amp.
     #
-    # UNVERIFIED BY EAR at the time of writing: if glide turns out not to sound,
-    # the next thing to try is the chain HEAD (FILT_OSC) as well or instead -- a
-    # note-on propagates head -> A -> B, so the head may be where the pitch that
-    # glides actually lands.
+    # VERIFIED BY EAR on hardware 2026-07-27 (firmware 82e69df, 2026-07-27): glide
+    # sounds from the per-osc sends alone. The chain HEAD (FILT_OSC) does NOT need
+    # it -- worth knowing, because a note-on propagates head -> A -> B, so the head
+    # was the obvious other candidate and it turns out not to be involved.
     amy.send(synth=SYNTH, osc=OSC_A, portamento=porta_ms)
     amy.send(synth=SYNTH, osc=OSC_B, portamento=porta_ms)
 
