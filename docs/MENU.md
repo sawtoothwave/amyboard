@@ -177,6 +177,15 @@ Presets / Delete Preset**).
   `param_values`, a preset captures the current patch **regardless of which set it**
   (last-write-wins per parameter). Loading replays those values through `handle_cc`,
   the same path a knob turn takes, so held notes are never cut.
+- **A preset is a COMPLETE patch.** Loading applies *every* editable param — the
+  saved value where the snapshot has one, the `PARAMS` default where it doesn't — so
+  a load lands on the same sound regardless of what played before it. This matters
+  for presets saved *before* a param existed: they don't name it, and `_apply_preset`
+  used to leave such a param at its current value, so (e.g.) glide followed you from
+  patch to patch until you hit INIT, the only entry naming every CC. Heard while
+  scanning on hardware 2026-07-28; fixed by applying the full `PARAMS` set. A CC in
+  a snapshot that no longer maps to a param is still **skipped** — that half was
+  always deliberate, so a retired param can't make an old preset unloadable.
 - **Save flow:** if a preset is "current" (last loaded or saved this session, and
   still present), Save As Preset opens a chooser — **Overwrite** (→ `OVERWRITE
   "name"?` confirm), **Save as New** (→ name entry), **Cancel**. With nothing

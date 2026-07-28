@@ -101,6 +101,11 @@ without raising (the table calls `to_val`/`update` through variables, which
 `arity_check.py` cannot see — this is the arity net for those), and that the
 worst-case frame stays inside the ~69ms `loop()` tick.
 
+`preset_apply_checks` covers **preset loading**: that a param the snapshot predates
+resets to its default instead of inheriting the last patch's value (the portamento
+leak heard on hardware 2026-07-28), that a retired CC is still skipped rather than
+fatal, and that a load applies all 50 params.
+
 It also covers **Scan Presets** (`scan_checks`), driven through `menu.handle()` so
 the root-menu wiring and dispatch are exercised too: that a turn loads without a
 click, that the ends wrap, that a summed fast-spin delta applies only the preset

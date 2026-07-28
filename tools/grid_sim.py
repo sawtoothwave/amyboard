@@ -155,6 +155,53 @@ def check(cond, what):
         FAILED.append(what)
 
 
+def preset_apply_checks(ns):
+    """A preset is a COMPLETE patch: loading one lands on the same sound whatever
+    played before it.
+
+    The regression this guards: _apply_preset used to replay only the CCs the
+    saved map named, so a preset saved BEFORE a param existed inherited that
+    param from whatever was loaded previously. Portamento was the one that showed
+    it (heard while scanning on hardware 2026-07-28) -- glide followed you from
+    preset to preset until you hit INIT, the only entry naming every CC.
+    """
+    print('\n--- Preset apply')
+    handle_cc = ns['handle_cc']
+    apply_preset = ns['_apply_preset']
+    PARAMS = ns['PARAMS']
+    porta = ns['CC_PORTA_TIME']
+    porta_default = ns['PARAM_BY_CC'][porta].default
+
+    # A legacy preset: saved before portamento, so it names every CC except that one.
+    legacy = {str(p.cc): 40 for p in PARAMS if p.cc != porta}
+    handle_cc(porta, 90)                       # ... and glide is on when we load it
+    on = ns['porta_ms']
+    apply_preset(legacy)
+    check(on > 0 and ns['porta_ms'] == ns['cc_to_porta_ms'](porta_default),
+          'a param the preset predates resets to its default, not the last patch '
+          '(glide %d ms -> %d ms)' % (on, ns['porta_ms']))
+    check(ns['param_values'][PARAMS[0].cc] == 40, 'saved values still land')
+
+    # The half of the old policy that WAS deliberate: a retired param's CC must be
+    # ignored rather than raise, so an old snapshot stays loadable.
+    try:
+        apply_preset({'126': 64, str(PARAMS[0].cc): 7})
+        ok = ns['param_values'][PARAMS[0].cc] == 7
+    except Exception as e:
+        ok = 'raised %r' % e
+    check(ok is True, 'an unknown/retired CC in a snapshot is still skipped, not fatal')
+
+    # Completeness, stated directly: a load touches EVERY param, not just the ones
+    # the snapshot happened to name.
+    seen = []
+    ns['handle_cc'] = lambda cc, val: (seen.append(cc), handle_cc(cc, val))[1]
+    apply_preset(legacy)
+    ns['handle_cc'] = handle_cc
+    check(set(seen) == {p.cc for p in PARAMS},
+          'a load applies every param (%d of %d), so nothing can leak in from the '
+          'previous patch' % (len(set(seen)), len(PARAMS)))
+
+
 def scan_checks(ns):
     """Scan Presets: the level that loads as you scroll.
 
@@ -343,6 +390,7 @@ def main():
             ms += 9.5
     check(ms < 69.0, 'worst-case frame = %.1f ms, inside the ~69 ms loop() tick' % ms)
 
+    preset_apply_checks(ns)
     scan_checks(ns)
 
     print('\n%s' % ('ALL CHECKS PASSED' if not FAILED else 'FAILURES:\n  ' + '\n  '.join(FAILED)))

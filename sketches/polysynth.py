@@ -1238,19 +1238,40 @@ def _capture_preset():
 
 def _apply_preset(cc_map):
     # Replay a saved snapshot through handle_cc -- the canonical live-apply path.
-    # Unknown/uneditable CCs are skipped, so an older preset stays compatible if
-    # the parameter set changes (its stale CCs are ignored; untouched params keep
-    # their current value rather than resetting).
+    # A preset is a COMPLETE patch: EVERY editable param is applied, taking its
+    # saved value if the snapshot has one and its PARAMS default if it does not.
+    # So a load lands on the same sound no matter what was playing before it.
+    #
+    # That second half is the fix for a real bug. This used to iterate the SAVED
+    # map only, which left any param the snapshot didn't mention at its current
+    # value -- and a preset saved before a param existed doesn't mention it. Load a
+    # patch with glide, then load one saved before portamento shipped, and the
+    # glide came with it; only INIT (synthesized from every default, so it names
+    # every CC) cleared it. Found by ear while scanning presets on hardware
+    # 2026-07-28. It was never a decision -- it was the shape of the loop.
+    #
+    # Skipping UNKNOWN CCs, on the other hand, IS deliberate and stays: a snapshot
+    # may name a param that has since been retired, and that must be ignored
+    # rather than raise.
+    #
+    # Cost is unchanged in practice: _capture_preset() dumps all of param_values,
+    # so a preset already carries every CC and a load already replayed the lot.
+    # This only tops legacy presets up to that same full set.
     if not isinstance(cc_map, dict):
         return
+    saved = {}
     for k, v in cc_map.items():
         try:
             cc = int(k)
             val = clamp(int(v), 0, 127)
         except Exception:
             continue
-        if cc in param_values:
-            handle_cc(cc, val)
+        if cc in param_values:       # retired/unknown CC -> ignore
+            saved[cc] = val
+    # PARAMS order (not dict order): MicroPython dicts don't preserve insertion
+    # order, so this also makes the replay sequence deterministic.
+    for p in PARAMS:
+        handle_cc(p.cc, saved.get(p.cc, p.default))
 
 
 def _find_preset(name):
