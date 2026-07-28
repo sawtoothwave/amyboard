@@ -259,6 +259,14 @@ CC_LFO_PWM     = 83
 CC_DRIFT_DEPTH = 28
 CC_DRIFT_RATE  = 29
 
+# Portamento (glide) time. AMY exposes exactly ONE portamento parameter -- a time
+# in ms (`portamento`, wire 'm', C `uint16_t portamento_ms`); there is no glide
+# curve, legato flag or mode in the whole keyword table, so this one CC is the
+# entire feature. A SPARE CC deliberately, not MIDI's standard CC 5 "Portamento
+# Time": the same reasoning that kept master volume off CC 7 (see CC_MASTER_VOL)
+# -- a standard number risks the firmware auto-mapping it out from under us.
+CC_PORTA_TIME  = 34
+
 # Global master effects (AMY's EQ / chorus / echo / reverb). Unlike every CC
 # above, these are NOT per-osc/per-synth: AMY runs one instance of each on the
 # final mix bus, so their handle_cc branches issue GLOBAL amy.send()s (no synth=/
@@ -353,6 +361,21 @@ LFO_AMP_DEPTH_MAX   = 0.5    # tremolo depth (per osc); full ~ -60 dB dip to sil
 # is the wander SPEED: how many fresh random targets the wander eases through per
 # second (logarithmic), from a very slow drift up to a fast warble. See
 # service_drift() for the smooth-random generator.
+# Portamento glide-time ladder, in ms. Deliberately NOT a curve: glide is judged
+# by feel, and the useful resolution is wildly uneven across the range. Fine where
+# it matters (5 ms steps through the first 50 ms, the difference between a slur and
+# a smear), coarse where it doesn't (100 ms steps past half a second, where nobody
+# hears 640 vs 700). 25 rungs; index 0 = 0 ms = OFF, which is the default, so
+# existing presets are unchanged. cc_to_porta_ms() buckets 0-127 across these and
+# fmt_porta_ms() labels them -- adding or removing a rung re-voices any preset whose
+# raw CC sits near a moved boundary, so treat the ladder as frozen once presets
+# exist.
+PORTA_MS_STEPS = (
+    0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,     # 5 ms   -- slur territory
+    100, 150, 200, 250, 300, 350, 400, 450, 500,  # 50 ms  -- audible glide
+    600, 700, 800, 900, 1000,                     # 100 ms -- lazy portamento
+)
+
 DRIFT_DEPTH_MAX_CENTS = 100.0  # +/- cents at CC 127 (0 = OFF, the default); a full
                                # semitone each way at the top for extreme lo-fi
 DRIFT_RATE_MIN_HZ     = 0.05   # ~1 new target / 20 s at CC 0 (slow drift)
@@ -505,6 +528,9 @@ lfo_amp_b_depth = 0.0
 # folds into both oscs' pitch; the rest is the smooth-random generator's own
 # state, driven at control rate by service_drift(). _drift_rng is a tiny built-in
 # LCG (seeded lazily from the clock) so we depend on no `random` module.
+porta_ms = 0               # portamento/glide time in ms (0 = off, the default).
+                           # AMY has no separate glide enable, so 0 IS the off
+                           # switch -- see PORTA_MS_STEPS.
 drift_depth_cents = 0.0    # +/- cents excursion at full wander (0 = off)
 drift_rate_hz     = 0.40   # wander speed (targets/s); mirrors the 'Drift Rate'
                            # Param default (raw 48 ~ 0.40 Hz) so a fresh boot
@@ -643,6 +669,16 @@ def cc_to_eg_type(cc):
 def cc_to_time_ms(cc):
     u = cc_unit(cc)
     return int(ENV_TIME_MIN_MS + (u * u) * (ENV_TIME_MAX_MS - ENV_TIME_MIN_MS))
+
+
+def cc_to_porta_ms(cc):
+    # Glide time, in ms, off a hand-written LADDER rather than a curve. The steps
+    # coarsen where the ear stops resolving them: 5 ms apart through the first
+    # 50 ms (where 5 ms is an audible difference in a fast lead slur), 50 ms apart
+    # to half a second, then 100 ms to 1 s, by which point the exact number no
+    # longer matters. 25 detents total -- `stepped` derives them from fmt_porta_ms,
+    # so the knob lands on each rung and never crawls through identical CCs.
+    return PORTA_MS_STEPS[cc_bucket(cc, len(PORTA_MS_STEPS))]
 
 
 def cc_to_drift_depth(cc):
@@ -823,12 +859,14 @@ def init_synth():
              wave=a_wave, freq=osc_freq(a_cents), duty=osc_duty(a_duty),
              amp=osc_amp(a_level, lfo_amp_a_depth), bp0=vca_bp(), eg0_type=amp_eg_type,
              mod_source=LFO_OSC,
+             portamento=porta_ms,
              chained_osc=OSC_B)
 
     amy.send(synth=SYNTH, osc=OSC_B,
              wave=b_wave, freq=osc_freq(b_cents), duty=osc_duty(b_duty),
              amp=osc_amp(b_level, lfo_amp_b_depth), bp0=vca_bp(), eg0_type=amp_eg_type,
-             mod_source=LFO_OSC)
+             mod_source=LFO_OSC,
+             portamento=porta_ms)
 
     # Per-voice LFO. amp=1.0 sets full modulation strength (per-target depth is
     # set by each 'mod' coef); no vel is sent and it is named as a mod_source,
@@ -1011,6 +1049,22 @@ def service_drift():
         _drift_cents = new_cents
         update_osc_a_freq()
         update_osc_b_freq()
+
+
+def update_porta():
+    # Glide time onto the SOUNDING oscs. Sent per-osc, not per-synth: AMY's wire
+    # code for portamento is a bare 'm', while every instrument-scoped keyword in
+    # the table carries an 'i' prefix (synth_level 'iV', num_voices 'iv',
+    # synth_flags 'if'), and the C declares portamento_ms inside `synthinfo` --
+    # AMY's per-OSCILLATOR struct, the same one that holds `phase`. So this follows
+    # the same path as wave/freq/duty/amp.
+    #
+    # UNVERIFIED BY EAR at the time of writing: if glide turns out not to sound,
+    # the next thing to try is the chain HEAD (FILT_OSC) as well or instead -- a
+    # note-on propagates head -> A -> B, so the head may be where the pitch that
+    # glides actually lands.
+    amy.send(synth=SYNTH, osc=OSC_A, portamento=porta_ms)
+    amy.send(synth=SYNTH, osc=OSC_B, portamento=porta_ms)
 
 
 def update_drift_depth():
@@ -1904,6 +1958,20 @@ def fmt_drift_rate(v):
     return '%.2f Hz' % hz if hz < 1.0 else '%.1f Hz' % hz
 
 
+def fmt_porta_ms(v):
+    # Glide time off the PORTA_MS_STEPS ladder. 0 reads 'Off' rather than '0 ms'
+    # because it IS the off switch -- AMY has no separate portamento enable, so a
+    # zero time is the only way to disable glide. The top rung reads '1.0 s' so the
+    # scale's end is legible at a glance instead of as a four-digit millisecond
+    # count. This is also what `stepped` scans to find the detents, so every rung
+    # MUST render a distinct string -- two rungs sharing a label would silently
+    # fuse into one detent.
+    ms = cc_to_porta_ms(v)
+    if ms == 0:
+        return 'Off'
+    return '%.1f s' % (ms / 1000.0) if ms >= 1000 else '%d ms' % ms
+
+
 # --- Master FX readouts (each mirrors its cc_to_* map) -----------------------
 def fmt_master_vol(v):
     # dB relative to AMY's old default (volume 1.0). vol 1 -> 0 dB, ~3 -> +10 dB,
@@ -1975,11 +2043,12 @@ def _bucket_advance(steps, value, delta):
 
 class _Param:
     __slots__ = ('label', 'cc', 'default', 'grid', 'to_val', 'store', 'update',
-                 'fmt', 'bipolar', 'steps', 'group', 'section', 'newrow')
+                 'fmt', 'bipolar', 'steps', 'group', 'section', 'newrow',
+                 'hdr', 'halfcol')
 
     def __init__(self, label, cc, default, grid, to_val, store, update,
                  fmt=None, bipolar=False, stepped=False, group='', section='',
-                 newrow=False):
+                 newrow=False, hdr='', halfcol=False):
         self.label = label
         self.cc = cc
         self.default = default   # raw 0-127 value used until a CC/editor sets one
@@ -2008,6 +2077,24 @@ class _Param:
                                  # destinations read as 3 + 2, not the 4 + 1 that plain
                                  # wrapping gives). Ignored if the cell already starts
                                  # a row.
+        self.hdr = hdr           # grid: SPLIT this run's header row here. The run's
+                                 # own `section` name then spans only the columns to
+                                 # the LEFT of this cell, and `hdr` labels the columns
+                                 # from this cell rightward -- two names on one header
+                                 # row ("--DRIFT--  --PORTA--") instead of one centred
+                                 # across the panel. The params stay ONE run, so the
+                                 # vertical walk, page breaks and cross-group row
+                                 # alignment are all untouched; only the header's
+                                 # drawing changes. See _grid_layout / _draw_grid_section.
+        self.halfcol = halfcol   # grid: shift this cell right by HALF a column. For
+                                 # centring a LONE cell under a split header -- one
+                                 # param beneath a 2-column name sits half a column
+                                 # over so it is centred under the name rather than
+                                 # shoved to the name's left edge. A second param in
+                                 # that half needs no shift: the two then fill their
+                                 # columns normally. Resolved in _grid_layout, which is
+                                 # where GRID_CELL_W is in scope (this table is defined
+                                 # before the grid constants).
         # "Bucketed" params (a few discrete display values): one detent jumps to
         # the next distinct bucket instead of crawling through identical CCs.
         self.steps = _bucket_centers(fmt) if (stepped and fmt) else None
@@ -2068,6 +2155,12 @@ PARAMS = [
     # Rate default raw 48 ~ 0.3 Hz, a gentle wander for when Amt is dialed up.
     _Param('Drift Amt',   CC_DRIFT_DEPTH,   0, 'AMT', cc_to_drift_depth, 'drift_depth_cents', update_drift_depth, fmt=fmt_drift_depth, group='Osc', section='Drift'),
     _Param('Drift Rate',  CC_DRIFT_RATE,   48, 'HZ',  cc_to_drift_rate, 'drift_rate_hz', None, fmt=fmt_drift_rate, group='Osc', section='Drift'),
+    # Shares the Drift RUN (so it lands on the same row, costing no vertical space
+    # on a page that has none) but carries its own header name via `hdr`: the row
+    # reads "--DRIFT--  --PORTA--". halfcol centres this lone cell under PORTA; a
+    # second Porta param would drop into the last column and both would lose the
+    # offset. See _Param.hdr / _grid_layout.
+    _Param('Porta Time',  CC_PORTA_TIME,    0, 'TIME', cc_to_porta_ms, 'porta_ms', update_porta, fmt=fmt_porta_ms, stepped=True, group='Osc', section='Drift', hdr='Porta', halfcol=True),
     # VCF: filter controls. Order is chosen for the ROW-MAJOR 4-wide grid (see
     # GRID_COLS) -- these 11 land as three read-across rows: the filter proper
     # (Cutoff, Res, env Amount, Type), then the whole filter envelope (ADSR + curve
@@ -2665,18 +2758,40 @@ def _grid_layout(params):
         if cells and y + need > limit:               # won't fit -> break before the run
             page += 1
             y = GRID_HDR_H
+        # Header SEGMENTS: (x0, x1, TEXT) spans to centre a name within. Normally one
+        # span across the full panel. A param carrying `hdr` splits the row at its
+        # column: the run's own name keeps the columns to its left, the `hdr` name
+        # takes the rest. Split at the cell's COLUMN boundary, not its offset x, so a
+        # half-column-shifted cell still sits centred under its name.
         if sect:                                     # unlabelled: reserve, draw nothing
-            heads.append((page, y, sect.upper()))
+            # Only the FIRST row can split the header: the header row sits above the
+            # whole run, so a split on a later row would label columns it isn't over.
+            # That caps a split section at one row -- 4 cells, e.g. 2 + 2 -- which is
+            # the shape it is for. A 5th param wraps and the halves stop lining up.
+            split = 0
+            for c, k in enumerate(rows[0] if rows else ()):
+                if c and params[k].hdr:              # c=0 would leave an empty left half
+                    split = c * GRID_CELL_W
+                    break
+            if split:
+                segs = [(0, split, sect.upper()),
+                        (split, DISPLAY_WIDTH, params[rows[0][c]].hdr.upper())]
+            else:
+                segs = [(0, DISPLAY_WIDTH, sect.upper())]
+            heads.append((page, y, segs))
         y += GRID_SECT_H
         for r, row in enumerate(rows):
             for c, k in enumerate(row):
-                cells.append((page, c * GRID_CELL_W, y + r * GRID_CELL_H))
+                x = c * GRID_CELL_W
+                if params[k].halfcol:
+                    x += GRID_CELL_W // 2
+                cells.append((page, x, y + r * GRID_CELL_H))
         y += len(rows) * GRID_CELL_H
         i = j
     return cells, heads, page + 1
 
 
-def _draw_grid_section(d, y, text):
+def _draw_grid_section(d, y, segs):
     # A section header row: the dim name CENTRED, with the dividing rule split to lead
     # and trail it -- "----- OSC A -----". The rule is what visually groups the cells
     # beneath; the text alone read as just another cell label. (It has been left-then-
@@ -2685,8 +2800,17 @@ def _draw_grid_section(d, y, text):
     # length.)
     ty = y + GRID_SECT_TOP
     d.fill_rect(0, y, DISPLAY_WIDTH, GRID_SECT_H, 0)
+    for sx0, sx1, text in segs:
+        _draw_grid_section_seg(d, ty, sx0, sx1, text)
+
+
+def _draw_grid_section_seg(d, ty, sx0, sx1, text):
+    # One name centred inside [sx0, sx1) with its rules. Split out from the row so a
+    # header can carry TWO names side by side (see _Param.hdr) without either one
+    # thinking it owns the panel. A full-width header is just the single-span case,
+    # so the common path is unchanged.
     tw = len(text) * CHAR_W
-    tx = (DISPLAY_WIDTH - tw) // 2
+    tx = sx0 + (sx1 - sx0 - tw) // 2
     d.text(text, tx, ty, GRID_C_SECT)
     # MIDDLE-aligned with the text: the font inks rows 0..6 of its 8px cell (row 7 is
     # blank), so +3 is the glyphs' true mid-height. Mid-height only works now that the
@@ -2701,12 +2825,15 @@ def _draw_grid_section(d, y, text):
     # where there is nothing to look at. Both are clipped to whatever room the name
     # leaves, so a long section title shortens them symmetrically instead of pushing
     # them off-panel.
+    # Clipped to this SEGMENT's bounds, not the panel's: two names on one row must not
+    # run their rules into each other's half. With a full-width span these are 0 and
+    # DISPLAY_WIDTH, i.e. exactly the old behaviour.
     lend = tx - gap                              # left rule ends here
-    lx = max(0, lend - GRID_SECT_RULE_W)
+    lx = max(sx0, lend - GRID_SECT_RULE_W)
     if lend > lx:
         d.fill_rect(lx, ry, lend - lx, 1, GRID_C_SECT_RUL)
     rx = tx + tw + gap                           # right rule starts here
-    rend = min(DISPLAY_WIDTH, rx + GRID_SECT_RULE_W)
+    rend = min(sx1, rx + GRID_SECT_RULE_W)
     if rend > rx:
         d.fill_rect(rx, ry, rend - rx, 1, GRID_C_SECT_RUL)
 
@@ -2951,9 +3078,9 @@ class _GridLevel:
             if full:
                 d.fill(0)
                 _draw_grid_header(d, self.group.upper(), hdisp)
-                for hpage, hy, htext in self.heads:
+                for hpage, hy, hsegs in self.heads:
                     if hpage == page:
-                        _draw_grid_section(d, hy, htext)
+                        _draw_grid_section(d, hy, hsegs)
                 for gi, p in enumerate(self.params):
                     cpage, cx, cy = self.cells[gi]
                     if cpage != page:

@@ -15,7 +15,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'sketches', '01_polysynth.py')
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'sketches', 'polysynth.py')
 src = open(SRC).read()
 
 W = H = 128
@@ -87,9 +87,11 @@ class P:
     # Mirrors the sketch's _Param closely enough for _grid_layout. If _Param grows a
     # field that _grid_layout reads, add it here too -- the parser below is regex, not
     # an import, so a new field fails loudly rather than defaulting.
-    def __init__(s, label, cc, group, section, bipolar, default, newrow, grid):
+    def __init__(s, label, cc, group, section, bipolar, default, newrow, grid,
+                 hdr='', halfcol=False):
         s.label, s.cc, s.group, s.section = label, cc, group, section
         s.bipolar, s.default, s.newrow, s.grid = bipolar, default, newrow, grid
+        s.hdr, s.halfcol = hdr, halfcol      # split header name / half-column shift
 
 
 body = src[src.index('PARAMS = ['):]
@@ -103,9 +105,11 @@ for m in re.finditer(r"_Param\(\s*'([^']*)'\s*,\s*(CC_[A-Z0-9_]+)\s*,\s*(\d+)\s*
     tail = m.group(5)
     g = re.search(r"group='([^']*)'", tail)
     sec = re.search(r"section='([^']*)'", tail)
+    hdr = re.search(r"hdr='([^']*)'", tail)
     params.append(P(m.group(1), m.group(2), g.group(1) if g else '',
                     sec.group(1) if sec else '', 'bipolar=True' in tail, int(m.group(3)),
-                    'newrow=True' in tail, m.group(4)))
+                    'newrow=True' in tail, m.group(4),
+                    hdr.group(1) if hdr else '', 'halfcol=True' in tail))
 
 # A row the regex fails to match would silently VANISH from the preview (that is how
 # regex parsing fails); refuse to render from a partial table instead.
