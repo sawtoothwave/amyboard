@@ -198,11 +198,13 @@ Presets / Delete Preset**).
   every turn applies the preset it lands on immediately, with no click, and the
   level stays open so one continuous spin walks the whole set by ear. Scrolling
   **wraps** at both ends (last → first) so a spin never dead-ends. **Click** opens
-  **Param Control** on the preset you landed on — find it by ear, then edit it —
-  pushed *on top of* the scan level, so a hold out of Param Control drops back into
-  the scan with the cursor where you left it and the spin continues. **Hold** from
-  the scan itself goes back to the root (the preset stays loaded either way); the
-  way out to *playing* is the root's Resume Playing or the idle timeout. What Param
+  **Param Control** on the preset you landed on — find it by ear, then edit it. It
+  *replaces* the scan level rather than stacking on it, so a hold out of Param
+  Control goes to the root exactly as it does when you enter Param Control the
+  normal way (leaving the scan underneath made a hold read as a trapdoor back into
+  scanning). **Hold** from the scan itself also goes back to the root (the preset
+  stays loaded either way); the way out to *playing* is the root's Resume Playing or
+  the idle timeout. What Param
   Control shows is **live state** (`param_values`), not the saved snapshot — so a
   MIDI CC that arrived while that preset was up is already reflected in the grid,
   and Save → Overwrite from there stores the patch as you're actually hearing it.
@@ -210,10 +212,9 @@ Presets / Delete Preset**).
   you were playing stands until the first turn.
   Two deliberate differences from Load: no `PRESET LOADED!` toast (it would cover
   the list you're scrolling), and the "current preset" pointer moves in **RAM** per
-  step but is written to settings **once, when the scan level itself goes away** (a
-  hold out of it, or the menu closing — `SketchMenu.close()` sweeps the *whole*
-  stack, since Param Control can be sitting on top of the scan) — a settings write
-  per detent would put flash I/O in the audio/MIDI path.
+  step but is written to settings **once, when the scan level itself goes away** —
+  a hold out of it, a click into Param Control, or the menu closing — because a
+  settings write per detent would put flash I/O in the audio/MIDI path.
   A fast spin is safe for the same
   reason list scrolling is: `handle()` gets the tick's *summed* delta, so only the
   preset actually landed on is applied, never the ones skimmed past. The exit

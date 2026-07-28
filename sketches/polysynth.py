@@ -2493,11 +2493,14 @@ class _ScanLevel(_MenuLevel):
     #            ends aren't a boundary you're navigating to, they're just the
     #            seam in a loop you're listening through.
     #   click -- open Param Control on the preset you've landed on: find it by ear,
-    #            then edit it. Pushed ON TOP of this level (not replacing it), so a
-    #            hold out of Param Control lands back in the scan with the cursor
-    #            where you left it and the spin can continue. What the grid shows is
-    #            LIVE state (param_values), not the saved snapshot -- so any MIDI CC
-    #            that arrived while this preset was up is already reflected there.
+    #            then edit it. The scan level is REPLACED, not stacked under, so
+    #            Param Control sits directly on the root and a hold out of it behaves
+    #            exactly as it does when you enter Param Control the normal way --
+    #            back to POLYSYNTH. (Keeping the scan underneath meant a hold dropped
+    #            you back into scanning, which reads as a trapdoor.) What the grid
+    #            shows is LIVE state (param_values), not the saved snapshot -- so any
+    #            MIDI CC that arrived while this preset was up is already reflected
+    #            there, and a Save->Overwrite stores the patch as actually heard.
     #   hold  -- back to the root menu (the preset stays loaded either way).
     #
     # Nothing is applied on OPEN: the cursor starts on the current preset (if it
@@ -2563,10 +2566,9 @@ class _ScanLevel(_MenuLevel):
             self._load(self.idx)
             menu.dirty = True
         if click:                # found it by ear -> now edit it
-            # No persist() here: this level stays ON the stack underneath Param
-            # Control, so the scan hasn't ended -- the write still happens once,
-            # when it is finally popped or the menu closes.
-            menu._open_params()
+            self.persist()       # the scan ends here (the level is about to go)
+            menu._pop()          # drop this level, so Param Control opens ON the
+            menu._open_params()  # root and a hold out of it lands there, not here
 
 
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
@@ -3294,16 +3296,13 @@ class SketchMenu:
 
     def close(self):
         # A scan in progress writes its landing preset to settings here, so every
-        # way out of the MENU persists the same thing. Backing out of the scan with
-        # a hold pops that level instead of closing, so _ScanLevel.handle() calls
-        # persist() there itself.
-        #
-        # The whole stack, not just the top: clicking a scanned preset opens Param
-        # Control ON TOP of the scan level, so by the time we close (a global
-        # Resume, say) the scan can be buried a level or two down.
-        for lvl in self.stack:
-            if isinstance(lvl, _ScanLevel):
-                lvl.persist()
+        # way out of the MENU persists the same thing. The top of the stack is
+        # enough: a scan level is only ever entered from the root and leaves the
+        # stack the moment you act on it (a hold pops it, a click replaces it with
+        # Param Control), and both of those call persist() themselves -- so if a
+        # scan is still live when we close, it is what you are looking at.
+        if self.stack and isinstance(self.cur, _ScanLevel):
+            self.cur.persist()
         self.stack = []
         self.suspended = False
         self._click_pending_at = 0

@@ -275,9 +275,12 @@ def scan_checks(ns):
     menu.handle(0, True, False)                 # click
     check(menu.is_open and menu.cur.title == 'PARAM CONTROL',
           'a click opens Param Control on the scanned preset')
-    check(any(isinstance(l, ScanLevel) for l in menu.stack),
-          'the scan level stays UNDER it (so a hold returns to the scan)')
-    check(not writes, 'clicking into Param Control does not end the scan (no write yet)')
+    check(not any(isinstance(l, ScanLevel) for l in menu.stack)
+          and menu.stack[0].title == 'POLYSYNTH' and len(menu.stack) == 2,
+          'it REPLACES the scan level, sitting directly on the root (no trapdoor '
+          'back into scanning on a hold)')
+    check(writes == [('current_preset', landed)],
+          'the click ended the scan, so the pointer is written once, here')
 
     grp = ns['PARAM_BY_CC'][saved_cc].group
     dict(menu.cur.items)[grp]()                 # drill into that param's grid
@@ -289,12 +292,11 @@ def scan_checks(ns):
 
     menu.handle(0, False, True)                 # hold: out of the grid...
     menu.handle(0, False, True)                 # ...out of Param Control
-    check(menu.cur is lvl and lvl.idx == 5 % n,
-          'two holds land back in the scan, cursor where it was left')
-
-    menu.handle(0, False, True)                 # hold again: leave the scan
+    check(menu.cur.title == 'POLYSYNTH',
+          'a hold out of Param Control lands on the root, exactly as it does when '
+          'you enter it the normal way')
     check(writes == [('current_preset', landed)],
-          'exactly ONE settings write, when the scan itself ends')
+          'still exactly ONE settings write across the whole scan')
 
     # ... and the other way out: a hold pops back to the root and persists the same.
     writes.clear()
