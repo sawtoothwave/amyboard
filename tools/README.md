@@ -109,10 +109,12 @@ fatal, and that a load applies all 50 params.
 It also covers **Scan Presets** (`scan_checks`), driven through `menu.handle()` so
 the root-menu wiring and dispatch are exercised too: that a turn loads without a
 click, that the ends wrap, that a summed fast-spin delta applies only the preset
-landed on, that both exits (click → playing, hold → root) persist the current-preset
-pointer **exactly once** and that no step in between writes settings. That last one
-is the point — a settings write per detent is flash I/O in the audio path, and
-nothing else here would notice it.
+landed on, that a click opens Param Control *over* the scan (and that the grid there
+shows the live CC-informed value, not the snapshot's), that a hold returns to the
+scan with its cursor intact, and that the current-preset pointer is written
+**exactly once** — when the scan level itself goes away — with no step in between
+writing settings. That last one is the point: a settings write per detent is flash
+I/O in the audio path, and nothing else here would notice it.
 
 - **Proves:** state-machine behaviour — which cells go stale, what gets pushed, on
   which tick.

@@ -2492,7 +2492,12 @@ class _ScanLevel(_MenuLevel):
     #            one place in this menu where scrolling wraps, because here the
     #            ends aren't a boundary you're navigating to, they're just the
     #            seam in a loop you're listening through.
-    #   click -- keep what you're hearing and drop straight to playing.
+    #   click -- open Param Control on the preset you've landed on: find it by ear,
+    #            then edit it. Pushed ON TOP of this level (not replacing it), so a
+    #            hold out of Param Control lands back in the scan with the cursor
+    #            where you left it and the spin can continue. What the grid shows is
+    #            LIVE state (param_values), not the saved snapshot -- so any MIDI CC
+    #            that arrived while this preset was up is already reflected there.
     #   hold  -- back to the root menu (the preset stays loaded either way).
     #
     # Nothing is applied on OPEN: the cursor starts on the current preset (if it
@@ -2557,10 +2562,11 @@ class _ScanLevel(_MenuLevel):
             self.idx = (self.idx + delta) % len(self.entries)   # wrap, don't clamp
             self._load(self.idx)
             menu.dirty = True
-        if click:                # keep this one and go play
-            self.persist()
-            menu.close()         # _pump_menu sees us close and repaints the
-                                 # display mode over the list
+        if click:                # found it by ear -> now edit it
+            # No persist() here: this level stays ON the stack underneath Param
+            # Control, so the scan hasn't ended -- the write still happens once,
+            # when it is finally popped or the menu closes.
+            menu._open_params()
 
 
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
@@ -3287,12 +3293,17 @@ class SketchMenu:
         self._panel_dirty_to = 128    # the display mode was full-screen behind us
 
     def close(self):
-        # A scan in progress writes its landing preset to settings here, so EVERY
-        # way out of the menu (its own click, a global Resume) persists the same
-        # thing. Backing out with a hold pops the level instead of closing, so
-        # _ScanLevel.handle() calls persist() there itself.
-        if self.stack and isinstance(self.cur, _ScanLevel):
-            self.cur.persist()
+        # A scan in progress writes its landing preset to settings here, so every
+        # way out of the MENU persists the same thing. Backing out of the scan with
+        # a hold pops that level instead of closing, so _ScanLevel.handle() calls
+        # persist() there itself.
+        #
+        # The whole stack, not just the top: clicking a scanned preset opens Param
+        # Control ON TOP of the scan level, so by the time we close (a global
+        # Resume, say) the scan can be buried a level or two down.
+        for lvl in self.stack:
+            if isinstance(lvl, _ScanLevel):
+                lvl.persist()
         self.stack = []
         self.suspended = False
         self._click_pending_at = 0

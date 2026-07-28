@@ -265,11 +265,36 @@ def scan_checks(ns):
     tick(menu, lvl)                             # the list still draws (it is a _MenuLevel)
     check(any(p[0] in ('FLUSH', 'ROWS') for p in PUSHES), 'the scan list renders')
 
+    # A click opens Param Control ON the preset you landed on -- and what the grid
+    # shows must be LIVE state, so a MIDI CC that arrived while this preset was up
+    # is already reflected there rather than the saved snapshot's value.
+    saved_cc = ccs[0]
     landed = lvl.entries[lvl.idx].get('name')
-    menu.handle(0, True, False)                 # click: keep it and go play
-    check(not menu.is_open and not menu.stack, 'a click exits scan mode to playing')
+    saved_val = int(lvl.entries[lvl.idx]['cc'][str(saved_cc)])
+    ns['midi_cb']([0xB0 | (ns['SYNTH'] - 1), saved_cc, 77])   # a knob turn mid-scan
+    menu.handle(0, True, False)                 # click
+    check(menu.is_open and menu.cur.title == 'PARAM CONTROL',
+          'a click opens Param Control on the scanned preset')
+    check(any(isinstance(l, ScanLevel) for l in menu.stack),
+          'the scan level stays UNDER it (so a hold returns to the scan)')
+    check(not writes, 'clicking into Param Control does not end the scan (no write yet)')
+
+    grp = ns['PARAM_BY_CC'][saved_cc].group
+    dict(menu.cur.items)[grp]()                 # drill into that param's grid
+    grid = menu.cur
+    shown = ns['param_values'][saved_cc]
+    check(saved_cc in [p.cc for p in grid.params] and shown == 77 != saved_val,
+          'the grid shows the LIVE CC-informed value (%d), not the preset\'s saved '
+          'one (%d)' % (shown, saved_val))
+
+    menu.handle(0, False, True)                 # hold: out of the grid...
+    menu.handle(0, False, True)                 # ...out of Param Control
+    check(menu.cur is lvl and lvl.idx == 5 % n,
+          'two holds land back in the scan, cursor where it was left')
+
+    menu.handle(0, False, True)                 # hold again: leave the scan
     check(writes == [('current_preset', landed)],
-          'exactly ONE settings write, on exit, naming the preset landed on')
+          'exactly ONE settings write, when the scan itself ends')
 
     # ... and the other way out: a hold pops back to the root and persists the same.
     writes.clear()
