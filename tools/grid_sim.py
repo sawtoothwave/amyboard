@@ -155,6 +155,90 @@ def check(cond, what):
         FAILED.append(what)
 
 
+def scan_checks(ns):
+    """Scan Presets: the level that loads as you scroll.
+
+    Same reason as the CC checks above -- the behaviour under test is a state
+    machine (which preset is applied on which turn, and WHEN the settings write
+    happens), and the board gives no way to observe either while a sketch runs.
+    Driven through menu.handle() so the real root-menu wiring and dispatch are
+    exercised, not just the level in isolation.
+    """
+    print('\n--- Scan Presets')
+    SketchMenu = ns['SketchMenu']
+    ScanLevel = ns['_ScanLevel']
+    PARAMS = ns['PARAMS']
+
+    # Two saved presets, each pinning the first three params to its own values, so
+    # "which preset is loaded" is readable straight off param_values.
+    ccs = [p.cc for p in PARAMS[:3]]
+    ns['_presets'][:] = [{'name': 'bass', 'cc': {str(c): 11 for c in ccs}},
+                         {'name': 'arp', 'cc': {str(c): 99 for c in ccs}}]
+    ns['_current_preset_name'] = ''
+
+    applied = []                      # every preset actually replayed
+    real_apply = ns['_apply_preset']
+    ns['_apply_preset'] = lambda cc_map: (applied.append(cc_map), real_apply(cc_map))[1]
+    writes = []                       # every settings write (flash I/O on the board)
+    ns['_set_setting'] = lambda k, v: writes.append((k, v))
+
+    menu = SketchMenu()
+    menu.open()
+    root = menu.cur
+    check(len(root.items) <= ns['MENU_VISIBLE'],
+          'root menu still fits one page (%d of %d rows, no pagination)'
+          % (len(root.items), ns['MENU_VISIBLE']))
+    labels = [lbl for lbl, _ in root.items]
+    check(labels.index('Scan presets') == labels.index('Load preset') + 1,
+          'Scan presets sits directly after Load preset on the root')
+
+    dict(root.items)['Scan presets']()          # open it the way a click does
+    lvl = menu.cur
+    n = len(lvl.entries)
+    check(isinstance(lvl, ScanLevel) and n == 3,
+          'opens a scan level over INIT + both presets (%d entries)' % n)
+    check(not applied, 'opening loads NOTHING (the patch you were playing stands)')
+
+    menu.handle(1, False, False)                # one detent
+    check(len(applied) == 1 and lvl.idx == 1,
+          'a turn loads the preset it lands on, with no click')
+    check(not writes, 'no settings write per step (flash stays out of the audio path)')
+
+    menu.handle(-1, False, False)               # back to the top of the list...
+    menu.handle(-1, False, False)               # ...and past it
+    check(lvl.idx == n - 1, 'counter-clockwise past the first wraps to the last')
+    menu.handle(1, False, False)
+    check(lvl.idx == 0, 'clockwise past the last wraps back to the first')
+
+    applied.clear()
+    menu.handle(5, False, False)                # a fast spin arrives as one summed delta
+    check(lvl.idx == 5 % n and len(applied) == 1,
+          'a fast spin applies only the preset landed on, not the ones skimmed past')
+
+    tick(menu, lvl)                             # the list still draws (it is a _MenuLevel)
+    check(any(p[0] in ('FLUSH', 'ROWS') for p in PUSHES), 'the scan list renders')
+
+    landed = lvl.entries[lvl.idx].get('name')
+    menu.handle(0, True, False)                 # click: keep it and go play
+    check(not menu.is_open and not menu.stack, 'a click exits scan mode to playing')
+    check(writes == [('current_preset', landed)],
+          'exactly ONE settings write, on exit, naming the preset landed on')
+
+    # ... and the other way out: a hold pops back to the root and persists the same.
+    writes.clear()
+    menu.open()
+    dict(menu.cur.items)['Scan presets']()
+    lvl = menu.cur
+    menu.handle(1, False, False)
+    landed = lvl.entries[lvl.idx].get('name')
+    menu.handle(0, False, True)                 # hold
+    check(menu.is_open and menu.cur is not lvl,
+          'a hold leaves scan mode back at the root menu (not to playing)')
+    check(writes == [('current_preset', landed)], 'the hold exit persists once too')
+    check(ns['_current_preset_name'] == landed,
+          'the scanned preset becomes the session current (Save->Overwrite target)')
+
+
 def main():
     ns = load()
     _patch_push(ns)
@@ -258,6 +342,8 @@ def main():
         elif kind == 'WIN':
             ms += 9.5
     check(ms < 69.0, 'worst-case frame = %.1f ms, inside the ~69 ms loop() tick' % ms)
+
+    scan_checks(ns)
 
     print('\n%s' % ('ALL CHECKS PASSED' if not FAILED else 'FAILURES:\n  ' + '\n  '.join(FAILED)))
     return 1 if FAILED else 0

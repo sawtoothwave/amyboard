@@ -2459,6 +2459,89 @@ class _MenuLevel:
             _render_fault('_MenuLevel.render', e)
 
 
+class _ScanLevel(_MenuLevel):
+    # Scan Presets: the Load list, but the CURSOR IS THE AUDITION. Every turn
+    # applies the preset it lands on immediately -- no click -- and the level stays
+    # open, so one continuous spin walks the whole set by ear. It reuses
+    # _MenuLevel's rendering unchanged (same list, cursor and page marker), and
+    # overrides only the input semantics:
+    #
+    #   turn  -- move AND load. WRAPS at both ends (last -> first, first -> last)
+    #            instead of clamping, so a continued spin never dead-ends -- the
+    #            one place in this menu where scrolling wraps, because here the
+    #            ends aren't a boundary you're navigating to, they're just the
+    #            seam in a loop you're listening through.
+    #   click -- keep what you're hearing and drop straight to playing.
+    #   hold  -- back to the root menu (the preset stays loaded either way).
+    #
+    # Nothing is applied on OPEN: the cursor starts on the current preset (if it
+    # is still in the list) and the patch you were already playing is untouched
+    # until the first turn.
+    #
+    # Cost per step is one _apply_preset() -- the same live replay a Load does --
+    # and no file I/O: the "current preset" pointer moves in RAM on every step but
+    # is written to settings ONCE, by persist(), when the mode ends. A settings
+    # write per detent would put flash I/O in the audio/MIDI path (see
+    # docs/ARCHITECTURE.md on keeping loop() short). A fast spin is safe for the
+    # same reason list scrolling is: handle() gets the tick's SUMMED delta, so we
+    # apply only the preset actually landed on, never the ones skimmed past.
+    __slots__ = ('entries', 'touched')
+
+    def __init__(self, entries):
+        _MenuLevel.__init__(self, 'SCAN PRESETS',
+                            [(e.get('name', '?')[:MENU_LABEL_MAX], None)
+                             for e in entries])
+        # Snapshot of _load_list() taken at open: presets can't be added or
+        # deleted while we're on this level, so the labels and `entries` stay
+        # index-aligned for the life of the scan.
+        self.entries = entries
+        self.touched = False     # a preset was actually loaded (persist() no-ops
+                                 # otherwise, so opening and backing straight out
+                                 # never writes settings)
+        for i, e in enumerate(entries):
+            if e.get('name', '') == _current_preset_name:
+                self.idx = i     # start where the patch already is
+                break
+
+    def _load(self, i):
+        # Apply live, exactly as Load does, and move the session's "current"
+        # pointer in RAM only -- so a Save->Overwrite during or after the scan
+        # targets what you're hearing, without touching flash mid-scan.
+        global _current_preset_name
+        entry = self.entries[i]
+        try:
+            _apply_preset(entry.get('cc'))
+        except Exception:
+            pass
+        name = entry.get('name', '')
+        if name:
+            _current_preset_name = name
+            self.touched = True
+
+    def persist(self):
+        # End of the scan: write the landing preset's name once, so a reset
+        # resumes it (the same thing Load persists). Idempotent -- every exit path
+        # can call it.
+        if not self.touched:
+            return
+        self.touched = False
+        _set_setting('current_preset', _current_preset_name)
+
+    def handle(self, menu, delta, click, back):
+        if back:                 # hold: back to the root menu
+            self.persist()
+            menu._pop()
+            return
+        if delta:
+            self.idx = (self.idx + delta) % len(self.entries)   # wrap, don't clamp
+            self._load(self.idx)
+            menu.dirty = True
+        if click:                # keep this one and go play
+            self.persist()
+            menu.close()         # _pump_menu sees us close and repaints the
+                                 # display mode over the list
+
+
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
 # the current one. Plain chars append (the candidate stays put for the next slot);
 # the two special tokens act instead of appending (DEL backspaces, OK confirms/
@@ -3183,6 +3266,12 @@ class SketchMenu:
         self._panel_dirty_to = 128    # the display mode was full-screen behind us
 
     def close(self):
+        # A scan in progress writes its landing preset to settings here, so EVERY
+        # way out of the menu (its own click, a global Resume) persists the same
+        # thing. Backing out with a hold pops the level instead of closing, so
+        # _ScanLevel.handle() calls persist() there itself.
+        if self.stack and isinstance(self.cur, _ScanLevel):
+            self.cur.persist()
         self.stack = []
         self.suspended = False
         self._click_pending_at = 0
@@ -3255,6 +3344,7 @@ class SketchMenu:
             ('Param control', self._open_params),
             ('Save as preset', self._start_save),
             ('Load preset', self._open_load),
+            ('Scan presets', self._open_scan),
             ('Delete preset', self._open_delete),
             ('Display mode', self._open_display),
             ('Resume playing', self.close),
@@ -3388,6 +3478,11 @@ class SketchMenu:
         self._show_toast('PRESET LOADED!')
         self._close_after_toast = True
         self._repaint()
+
+    def _open_scan(self):
+        # Same list Load offers (INIT + saved, never empty) -- but scrolling it
+        # loads as it goes and the level stays put. See _ScanLevel.
+        self._push_level(_ScanLevel(_load_list()))
 
     def _delete_menu(self):
         # The delete list, rebuilt each time so it always reflects the current set.

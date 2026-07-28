@@ -82,13 +82,16 @@ POLYSYNTH
 ├─ Param Control     → Osc · VCF · LFO · VCA · FX → each a sectioned knob grid
 ├─ Save As Preset    → Overwrite current · Save as New · Cancel  (see Presets)
 ├─ Load Preset       → INIT (built-in) + saved presets
+├─ Scan Presets      → the same list, but scrolling LOADS as it goes (see Presets)
 ├─ Delete Preset     → saved presets (INIT is not deletable)
 ├─ Display Mode      → CC Monitor · Screensaver · Oscilloscope   (see DISPLAY_MODES.md)
 └─ Resume Playing
 ```
 
 - **List scrolling** is 1:1 with encoder detents and **clamps at the ends** (no
-  wrap-around). Lists longer than one screen are **paginated** (`MENU_VISIBLE`
+  wrap-around — Scan Presets is the one exception, and deliberately so: there the
+  ends are a seam in a loop you're listening through, not a boundary you're
+  navigating to). Lists longer than one screen are **paginated** (`MENU_VISIBLE`
   items per page) rather than continuously scrolled: the cursor moves within a
   fixed page, and the window advances a whole page only when the cursor crosses a
   page boundary. A **bottom-centre page indicator** — one mark per page, a bright
@@ -165,8 +168,8 @@ editing (shown knocked out / reverse-video):
 ### Presets
 
 Presets are named patch snapshots in internal flash (`/user/polysynth_presets.json`).
-The three actions live directly on the root menu (**Save As Preset / Load Preset /
-Delete Preset**).
+The actions live directly on the root menu (**Save As Preset / Load Preset / Scan
+Presets / Delete Preset**).
 
 - **What a preset stores:** the raw 0-127 value of every editable CC — a snapshot
   of `param_values`. Because both the E16 knobs (external MIDI CC) and the on-device
@@ -182,6 +185,20 @@ Delete Preset**).
   flashes **PRESET SAVED!**.
 - **Load flow:** applies the preset live, flashes **PRESET LOADED!**, then returns
   to playing. The loaded preset becomes the session's "current" one.
+- **Scan flow (`_ScanLevel`):** the same list, but the **cursor is the audition** —
+  every turn applies the preset it lands on immediately, with no click, and the
+  level stays open so one continuous spin walks the whole set by ear. Scrolling
+  **wraps** at both ends (last → first) so a spin never dead-ends. **Click** keeps
+  what you're hearing and drops straight to playing; **hold** goes back to the root
+  (the preset stays loaded either way). Opening applies nothing — the cursor starts
+  on the current preset and the patch you were playing stands until the first turn.
+  Two deliberate differences from Load: no `PRESET LOADED!` toast (it would cover
+  the list you're scrolling), and the "current preset" pointer moves in **RAM** per
+  step but is written to settings **once, on exit** — a settings write per detent
+  would put flash I/O in the audio/MIDI path. A fast spin is safe for the same
+  reason list scrolling is: `handle()` gets the tick's *summed* delta, so only the
+  preset actually landed on is applied, never the ones skimmed past. The exit
+  writes are covered by `tools/grid_sim.py`.
 - **Built-in `INIT` preset:** a *virtual*, write-protected preset synthesized from
   the parameter defaults (not stored in flash, so it can never go stale or be
   corrupted). It is always first in the Load list — a one-click return to a clean

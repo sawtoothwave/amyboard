@@ -101,6 +101,14 @@ without raising (the table calls `to_val`/`update` through variables, which
 `arity_check.py` cannot see — this is the arity net for those), and that the
 worst-case frame stays inside the ~69ms `loop()` tick.
 
+It also covers **Scan Presets** (`scan_checks`), driven through `menu.handle()` so
+the root-menu wiring and dispatch are exercised too: that a turn loads without a
+click, that the ends wrap, that a summed fast-spin delta applies only the preset
+landed on, that both exits (click → playing, hold → root) persist the current-preset
+pointer **exactly once** and that no step in between writes settings. That last one
+is the point — a settings write per detent is flash I/O in the audio path, and
+nothing else here would notice it.
+
 - **Proves:** state-machine behaviour — which cells go stale, what gets pushed, on
   which tick.
 - **Does NOT prove:** real I2C timing, audio, or anything visual. Frame costs are
