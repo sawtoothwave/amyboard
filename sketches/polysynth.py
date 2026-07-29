@@ -3090,10 +3090,11 @@ GRID_EXT_MAX = 2        # Max externally-changed (MIDI/CC) cells repainted per t
 # Why these numbers:
 # - 3 s is longer than any deliberate pass-through: spinning the cursor across a
 #   page never trips it, so it only ever appears when you have actually stopped.
-# - 1 s per phase is ~14 loop() ticks. loop() arrives every ~69 ms, so anything
-#   under ~140 ms would render as a stutter rather than a swap; 1 s reads calm and
-#   costs one 32x21 cell push per second (9.5 ms MEASURED, see GRID_EXT_MAX) --
-#   about 1% of the audio budget, on a surface that is idle by definition.
+# - 2 s per phase is ~29 loop() ticks. loop() arrives every ~69 ms, so anything
+#   under ~140 ms would render as a stutter rather than a swap. Started at 1 s;
+#   2 s on hardware reads calmer and gives you time to actually read the number.
+#   Costs one 32x21 cell push every 2 s (9.5 ms MEASURED, see GRID_EXT_MAX) --
+#   well under 1% of the audio budget, on a surface that is idle by definition.
 # - The reveal starts ON at 3 s (bar, then #CC, then bar...), so the information
 #   appears the moment the dwell is recognised.
 #
@@ -3101,7 +3102,7 @@ GRID_EXT_MAX = 2        # Max externally-changed (MIDI/CC) cells repainted per t
 # the display mode, which bounds the cycle to a 12 s window. That was the user's
 # call -- an animation that runs forever would keep the panel busy indefinitely.
 HOVER_REVEAL_MS = 3000
-HOVER_CYCLE_MS = 1000
+HOVER_CYCLE_MS = 2000
 
 
 class _GridLevel:

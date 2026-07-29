@@ -143,18 +143,19 @@ editing (shown knocked out / reverse-video):
 
 - **Hover CC reveal:** rest the cursor on a cell for `HOVER_REVEAL_MS` (3 s) without
   touching the encoder and its **value bar alternates with the param's CC number**,
-  `#103`-style, every `HOVER_CYCLE_MS` (1 s). It exists so you can map an E16 knob
+  `#103`-style, every `HOVER_CYCLE_MS` (2 s). It exists so you can map an E16 knob
   without leaving the grid or opening [CC_MAPPING.md](CC_MAPPING.md). Notes:
   - **Cursor only, never selected** — while you're turning a value, a swapping
     readout would fight the bar you're watching.
   - Any input restarts the dwell and puts the bar back **immediately**, not at the
     next phase boundary, so it can never be what you're looking at when you act.
   - 3 s is longer than any deliberate pass-through, so spinning the cursor across a
-    page never trips it. 1 s per phase is ~14 `loop()` ticks — under ~140 ms it would
-    read as a stutter rather than a swap.
+    page never trips it. 2 s per phase is ~29 `loop()` ticks — under ~140 ms it would
+    read as a stutter rather than a swap. It shipped at 1 s and was slowed to 2 s on
+    hardware: calmer, and long enough to actually read the number.
   - Bounded by the existing 15 s idle-out (`MENU_IDLE_MS`), which is deliberately
     left alone: the cycle runs for a 12 s window, then the editor suspends to the
-    display mode. Cost is one 32×21 cell push per second (9.5 ms measured), on a
+    display mode. Cost is one 32×21 cell push every 2 s (9.5 ms measured), on a
     surface that is idle by definition.
   - `'#103'` is 4 glyphs = the full 32 px cell, the same hard limit labels face — but
     the adjacency here is text-against-*bar* (neighbouring bars are inset from their
