@@ -990,6 +990,57 @@ slot_bytes = [0] * NUM_SLOTS        # PSRAM bytes the loaded sample occupies (mo
 # filled. Cleared the moment the slot is loaded or cleared.
 slot_missing = [None] * NUM_SLOTS
 
+# A user-given label for a pad ('' = unnamed), set from the slot editor's Name row.
+# It is what the Kit parameters list shows in place of the sample's filename, so a
+# pad can read as its ROLE ('kick') rather than as whatever file happens to be on it
+# -- which is the whole point, since the file name is often neither short nor yours.
+# Travels with a kit (see _capture_kit), because a name describes that kit's pad
+# layout; loading another kit brings its names, not the last one's.
+SLOT_NAME_MAX = 8        # longest slot name the name-entry screen accepts. Fits the
+                         # list row with room to spare: '<note> [12345678]' is 14 of
+                         # the 18 columns MENU_LABEL_MAX allows.
+slot_names = [''] * NUM_SLOTS
+
+
+def _clean_name(s):
+    # One place that decides what a slot name may be: a string, trimmed, capped.
+    # Applied to anything arriving from outside (settings file, kit snapshot, the
+    # name-entry screen), so no other code has to re-check.
+    try:
+        return str(s).strip()[:SLOT_NAME_MAX]
+    except Exception:
+        return ''
+
+
+def _restore_names():
+    # Merge saved slot names over the blanks, same shape as _restore_params: a
+    # settings file from before names existed simply has none, and a short/long list
+    # is padded/ignored rather than being fatal.
+    try:
+        saved = _settings.get('names') or []
+    except Exception:
+        saved = []
+    for i in range(min(NUM_SLOTS, len(saved))):
+        slot_names[i] = _clean_name(saved[i])
+
+
+_restore_names()
+
+
+def save_slot_names():
+    # Persisted on commit only -- naming is a menu action, never a per-detent one.
+    _set_setting('names', slot_names)
+
+
+def slot_display(i):
+    # What the Kit parameters list shows for a pad: its NAME in brackets if it has
+    # one, else the sample label (filename, '!wanted' for a missing sample, or '-').
+    # The brackets are what make a name read as a label rather than as a filename
+    # that happens to be short.
+    if slot_names[i]:
+        return '[%s]' % slot_names[i]
+    return slot_label(i)
+
 
 # ---------------------------------------------------------------------------
 # Per-slot parameters. Every slot carries a small dict of playback settings,
@@ -1159,10 +1210,11 @@ def mark_kit_dirty():
 
 
 def _capture_kit():
-    # The save payload: paths + params, copied so later edits can't reach back into
-    # a stored kit.
+    # The save payload: paths + params + pad names, copied so later edits can't
+    # reach back into a stored kit.
     return {'slots': wanted_paths(),
-            'params': [dict(p) for p in slot_params]}
+            'params': [dict(p) for p in slot_params],
+            'names': list(slot_names)}
 
 
 def _find_kit(name):
@@ -1192,7 +1244,8 @@ def _empty_kit_entry():
     # a new kit" means -- there is no separate menu item for it.
     return {'name': EMPTY_KIT_NAME,
             'slots': [None] * NUM_SLOTS,
-            'params': [_default_params() for _ in range(NUM_SLOTS)]}
+            'params': [_default_params() for _ in range(NUM_SLOTS)],
+            'names': [''] * NUM_SLOTS}
 
 
 def _sorted_kits():
@@ -1221,6 +1274,15 @@ def _kit_params(entry):
                     p[k] = saved[i][k]
         out.append(p)
     return out
+
+
+def _kit_names(entry):
+    # A kit's pad names, padded to NUM_SLOTS and cleaned -- so a kit saved before
+    # names existed (or by a build with more slots) opens with blanks rather than
+    # failing, exactly like _kit_params does for the params.
+    saved = entry.get('names') or []
+    return [_clean_name(saved[i]) if i < len(saved) else ''
+            for i in range(NUM_SLOTS)]
 
 
 KIT_HEADLINE_MAX = 11    # 16 columns across the panel, less 'CH11' and a gap
@@ -2229,7 +2291,10 @@ class _SlotEditor:
     def __init__(self, slot):
         self.slot = slot
         self.title = 'SLOT %s' % note_name(slot_note(slot))
-        self.rows = ([('sample',)]
+        # 'Name' leads: it is what the pad is CALLED, so it reads as the heading for
+        # everything under it -- and it is the row you want first when setting a kit
+        # up. Then the sample, then the numeric params, then Clear.
+        self.rows = ([('name',), ('sample',)]
                      + [('param', s[0]) for s in PARAM_SPEC]
                      + [('clear',)])
         self.idx = 0
@@ -2284,7 +2349,9 @@ class _SlotEditor:
 
     def _activate(self, menu):
         tag = self.rows[self.idx][0]
-        if tag == 'sample':
+        if tag == 'name':
+            menu._open_slot_name(self.slot)
+        elif tag == 'sample':
             menu._open_browser(self.slot)
         elif tag == 'clear':
             menu._clear_slot(self.slot)
@@ -2339,6 +2406,9 @@ class _SlotEditor:
     # -- render --
     def _row_text(self, ri):
         tag = self.rows[ri][0]
+        if tag == 'name':
+            # '-' for unnamed, matching slot_label's own empty marker.
+            return 'Name:   ' + (slot_names[self.slot] or '-')
         if tag == 'sample':
             return 'Sample: ' + slot_label(self.slot)
         if tag == 'clear':
@@ -2432,15 +2502,25 @@ def _glyph_ok(d, x, y, col):
 
 
 class _NameLevel:
-    # Kit-name entry pushed on the menu stack. `name` is the string committed so
-    # far; `sel` indexes _NAME_RING for the character in the active slot. Hold
-    # cancels the whole name.
-    __slots__ = ('name', 'sel', 'full')
+    # Name entry pushed on the menu stack. `name` is the string committed so far;
+    # `sel` indexes _NAME_RING for the character in the active slot. Hold cancels
+    # the whole name.
+    #
+    # Used for two things now -- naming a KIT (the original) and naming a PAD -- so
+    # the title, the length cap and what OK does are all arguments. Everything else
+    # (the ring, the in-place active slot, the one-row incremental redraw) is shared,
+    # which is the point: one text-entry screen, so both feel identical.
+    __slots__ = ('name', 'sel', 'full', 'title', 'maxlen', 'on_ok')
 
-    def __init__(self):
-        self.name = ''
+    def __init__(self, title='NAME KIT', maxlen=KIT_NAME_MAX, name='', on_ok=None):
+        # `name` seeds the field: kit entry starts blank, but RE-naming a pad starts
+        # from its current name so a tweak is a couple of DELs, not a retype.
+        self.name = name[:maxlen]
         self.sel = 0
         self.full = True
+        self.title = title
+        self.maxlen = maxlen
+        self.on_ok = on_ok       # f(menu, name) -- None = the kit save flow
 
     def invalidate(self):
         self.full = True
@@ -2457,12 +2537,15 @@ class _NameLevel:
         if click:
             item = _NAME_RING[self.sel]
             if item == 'OK':
-                menu._commit_name(self)
+                if self.on_ok:
+                    self.on_ok(menu, self.name.strip())
+                else:
+                    menu._commit_name(self)
             elif item == 'DEL':
                 if self.name:
                     self.name = self.name[:-1]
                 menu.dirty = True
-            elif len(self.name) < KIT_NAME_MAX:
+            elif len(self.name) < self.maxlen:
                 self.name += item
                 # Leave the candidate where it is, which makes double letters and
                 # near-neighbours (a/b, o/p) a single click apart.
@@ -2500,7 +2583,7 @@ class _NameLevel:
             d = amyboard.display
             if self.full:
                 d.fill(0)
-                _draw_menu_row(d, 2, 't', ('NAME KIT', ''))
+                _draw_menu_row(d, 2, 't', (self.title, ''))
                 self._draw_line(d)
                 self.full = False
                 _show()
@@ -2613,7 +2696,7 @@ class SketchMenu:
         # cheapest work is work that does not happen twice.
         items = []
         for i in range(NUM_SLOTS):
-            items.append(('%s %s' % (note_name(slot_note(i)), slot_label(i)),
+            items.append(('%s %s' % (note_name(slot_note(i)), slot_display(i)),
                           self._slot_opener(i)))
         return _MenuLevel('KIT PARAMETERS', items)
 
@@ -2648,6 +2731,26 @@ class SketchMenu:
                 self.stack[si] = self._slots_level
                 break
 
+    def _open_slot_name(self, i):
+        # The slot editor's Name row: the SAME entry screen the kit save flow uses,
+        # seeded with the pad's current name and capped at SLOT_NAME_MAX.
+        self._push_level(_NameLevel('NAME %s' % note_name(slot_note(i)),
+                                    SLOT_NAME_MAX, slot_names[i],
+                                    (lambda menu, name, i=i:
+                                     menu._commit_slot_name(i, name))))
+
+    def _commit_slot_name(self, i, name):
+        # OK on the pad-name screen. An EMPTY name is a valid answer here (unlike the
+        # kit flow, which ignores it): it clears the label, so the list falls back to
+        # showing the sample. Persisted immediately -- naming is a menu action, one
+        # write, not a per-detent one -- and the kit is marked dirty because the name
+        # is part of the kit snapshot.
+        slot_names[i] = _clean_name(name)
+        save_slot_names()
+        mark_kit_dirty()
+        self._pop()                   # back to the slot editor, its Name row updated
+        self._refresh_slots_list()    # and the list behind it
+
     def _open_browser(self, i):
         # Open the sample browser for slot i (from the editor's 'Sample:' row).
         self._browse_slot = i
@@ -2655,12 +2758,16 @@ class SketchMenu:
 
     def _clear_slot(self, i):
         # Empty a slot and reset its params to defaults, so a reused pad starts
-        # neutral rather than inheriting the last sample's tuning.
+        # neutral rather than inheriting the last sample's tuning. The NAME goes with
+        # it: 'Clear slot' means the pad is empty, and a leftover '[kick]' on an empty
+        # pad would be the only thing in that row -- a label for nothing.
         unload_slot(i)
         slot_params[i] = _default_params()
+        slot_names[i] = ''
         rebuild_engine()              # drop the freed osc from the patch + map
         self._save_slots()
         save_slot_params()
+        save_slot_names()
         mark_kit_dirty()
         self._refresh_slots_list()    # update the label under the editor
         self._show_toast('SLOT CLEARED')
@@ -3183,10 +3290,11 @@ def apply_kit(entry):
     # whatever the last kit left there.
     global _restore_queue, _restore_total, _restore_title
     params = _kit_params(entry)          # merged before anything is torn down, so a
-                                         # malformed kit can't leave us half-applied
+    names = _kit_names(entry)            # malformed kit can't leave us half-applied
     for i in range(NUM_SLOTS):
         unload_slot(i)                   # also clears any stale '!missing' marker
         slot_params[i] = params[i]
+        slot_names[i] = names[i]         # the kit's pad labels replace the old ones
     rebuild_engine()                     # silent-but-valid engine while samples load
     saved = entry.get('slots') or []
     wanted = [saved[i] if i < len(saved) else None for i in range(NUM_SLOTS)]
@@ -3204,6 +3312,7 @@ def apply_kit(entry):
     # a blocking moment, so the ~150ms is free.
     _set_setting('slots', wanted)
     save_slot_params()
+    save_slot_names()
     flush_settings()
 
 

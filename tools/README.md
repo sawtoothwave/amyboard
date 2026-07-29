@@ -167,6 +167,20 @@ inline, and that a sample which has moved leaves a labelled empty pad — refuse
 the `stat` as `GONE`, with the wanted path still persisted so putting the card back
 brings it home.
 
+**Pad names** are covered too: that Name is the editor's first row, that the screen
+opens capped at `SLOT_NAME_MAX` and seeded with the current name (so a rename is an
+edit, not a retype), that an empty name *clears* the label (unlike the kit flow,
+which ignores empties), that the Kit parameters list shows `[name]` in place of the
+sample, that clearing a pad clears its name, and that a name round-trips through a
+kit — including a kit saved *before* names existed opening with blanks rather than
+failing.
+
+> **Stub gotcha (fixed 2026-07-28):** this harness silently stopped running at
+> commit 91cac5a, when the sketch began using `amy.SYNTH_FLAGS_*`; the stub had no
+> such attributes, so `load()` raised before a single check ran. If you add an `amy`
+> API to the sketch, add it to `_install_stubs()` in the same change — an
+> `AttributeError` at exec time reads like a broken tool, not a missing stub.
+
 - **Proves:** which gesture lands which value, when the commit fires, that a commit
   is never silently lost, what order panel regions go out in, and what a kit
   actually stores and restores.

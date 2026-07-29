@@ -86,6 +86,12 @@ def _install_stubs():
     amy.load_sample_bytes = lambda *a, **k: None
     amy.unload_sample = lambda *a, **k: None
     amy.PCM = 10                                    # AMY's PCM wave constant
+    # Real values from AMY's src/amy.h -- the sketch ORs these into KIT_SYNTH_FLAGS,
+    # so getting them wrong here would let a flags bug through. (Added 2026-07-28:
+    # the sketch started using the named constants in 91cac5a and this stub still
+    # had only the bare numbers' worth of nothing, which broke `load()` outright.)
+    amy.SYNTH_FLAGS_NOTES_VIA_MIDI = 1
+    amy.SYNTH_FLAGS_IGNORE_NOTE_OFFS = 2
 
     amyboard = types.ModuleType('amyboard')
     amyboard.display = _FakeDisplay()
@@ -878,6 +884,108 @@ def main():
         NOW[0] += 70
         bl.render(NOW[0])
     check(PUSHES == [], 'and 20 ticks later it has sent nothing more')
+
+    print('\n--- naming a pad')
+    # A name is a LABEL for the pad, so the checks are about where it shows and what
+    # it survives -- not about the character ring, which is the kit flow's, already
+    # covered above, and shared verbatim.
+    slot_names = ns['slot_names']
+    ring = ns['_NAME_RING']
+    NMAX = ns['SLOT_NAME_MAX']
+    for i in range(ns['NUM_SLOTS']):
+        slot_names[i] = ''
+    menu, ed = _open_editor(ns)
+    check(ed.rows[0][0] == 'name', 'Name is the FIRST row of the slot editor')
+    check(ed._row_text(0).startswith('Name:') and ed._row_text(0).endswith('-'),
+          'and reads as unnamed until you set it')
+
+    ed.idx = 0
+    ed.handle(menu, 0, True, False)                     # click Name
+    lvl = menu.cur
+    check(isinstance(lvl, ns['_NameLevel']), 'clicking it opens the name screen')
+    check(lvl.maxlen == NMAX and lvl.name == '',
+          'capped at %d chars, seeded with the pad\'s current (empty) name' % NMAX)
+    check(ns['note_name'](ns['slot_note'](0)) in lvl.title,
+          'titled for the pad being named (%r)' % lvl.title)
+
+    for ch in 'kick':
+        lvl.sel = ring.index(ch)
+        lvl.handle(menu, 0, True, False)
+    ns['_writes'].clear()
+    lvl.sel = ring.index('OK')
+    lvl.handle(menu, 0, True, False)
+    check(slot_names[0] == 'kick', 'OK commits the name to the pad')
+    check(menu.cur is ed, 'and drops back to the slot editor')
+    check(ed._row_text(0) == 'Name:   kick', 'whose Name row now shows it')
+    check(ns['_kit_dirty'] is True, 'the kit is marked modified (a name is kit state)')
+    check(ns['_writes'] == [] and settle(ns) is True and ns['_writes'] == ['write'],
+          'ONE flash write, and only once the pads are quiet')
+
+    menu.open()
+    menu._open_slots()
+    rows = [it[0] for it in menu.cur.items]
+    check(rows[0].endswith('[kick]'),
+          'the Kit parameters list shows the NAME in brackets: %r' % rows[0])
+    check('kick.wav' not in rows[0] and 'kick' in rows[0].split('[')[1],
+          'in place of the sample name, not alongside it')
+    check(rows[1].endswith('snare'), 'an unnamed pad still shows its sample: %r' % rows[1])
+
+    menu2, ed2 = _open_editor(ns)
+    ed2.idx = 0
+    ed2.handle(menu2, 0, True, False)
+    check(menu2.cur.name == 'kick',
+          're-opening the screen seeds the current name (edit, not retype)')
+    long = 'abcdefghij'
+    for ch in long:
+        menu2.cur.sel = ring.index(ch)
+        menu2.cur.handle(menu2, 0, True, False)
+    check(len(menu2.cur.name) == NMAX,
+          'the %d-char cap holds (%r)' % (NMAX, menu2.cur.name))
+    while menu2.cur.name:                               # DEL back to empty and OK
+        menu2.cur.sel = ring.index('DEL')
+        menu2.cur.handle(menu2, 0, True, False)
+    menu2.cur.sel = ring.index('OK')
+    menu2.cur.handle(menu2, 0, True, False)
+    check(slot_names[0] == '', 'an empty name CLEARS the label (unlike the kit flow)')
+    menu2.open()
+    menu2._open_slots()
+    check('kick' in menu2.cur.items[0][0],
+          'so the list falls back to the sample name')
+
+    print('\n--- a pad name travels with the kit')
+    slot_names[0] = 'kick'
+    slot_names[1] = 'snare'
+    menu.open()
+    menu._do_save('named')
+    on_disk = json.load(open(ns['KITS_FILE']))
+    saved = [k for k in on_disk if k['name'] == 'named'][0]
+    check(saved['names'][:2] == ['kick', 'snare'], 'the kit on disk stores the names')
+    menu.open()
+    menu._load_kit(0)                                   # EMPTY
+    drain_restore()
+    check(slot_names[:2] == ['', ''], 'loading EMPTY clears them, like every pad')
+    lst = ns['_kit_load_list']()
+    idx = [i for i, k in enumerate(lst) if k['name'] == 'named'][0]
+    menu.open()
+    menu._load_kit(idx)
+    drain_restore()
+    check(slot_names[:2] == ['kick', 'snare'], 'and loading the kit brings them back')
+    check(ns['_settings'].get('names', [])[:2] == ['kick', 'snare'],
+          'persisted with the kit\'s pads, so a reboot keeps them')
+
+    legacy = {'name': 'old', 'slots': [None] * ns['NUM_SLOTS'],
+              'params': [ns['_default_params']() for _ in range(ns['NUM_SLOTS'])]}
+    check(ns['_kit_names'](legacy) == [''] * ns['NUM_SLOTS'],
+          'a kit saved BEFORE names existed opens with blanks, not an error')
+
+    print('\n--- clearing a pad clears its name')
+    slot_names[0] = 'kick'
+    menu.open()
+    menu._clear_slot(0)
+    check(slot_names[0] == '', 'no label is left behind on an empty pad')
+    menu.open()
+    menu._do_delete('named')
+    ns['load_slot'](0, kick)        # put the pad back: later sections play from it
 
     print('\n--- kits: delete removes the snapshot, not what is playing')
     menu.open()
