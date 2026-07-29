@@ -155,6 +155,79 @@ def check(cond, what):
         FAILED.append(what)
 
 
+def hover_checks(ns):
+    """Hover CC reveal: rest on a cell and its bar alternates with the CC number.
+
+    Timing is driven off the level's own hover clock, so the sim ages that clock
+    rather than sleeping -- the phase is a pure function of elapsed time, which is
+    exactly what makes that possible.
+    """
+    print('\n--- Hover CC reveal')
+    import time as _t
+    REVEAL, CYCLE = ns['HOVER_REVEAL_MS'], ns['HOVER_CYCLE_MS']
+    menu = ns['SketchMenu']()
+    menu.open()
+    lvl = ns['_GridLevel']('VCF')
+    menu.stack.append(lvl)
+    tick(menu, lvl)                                  # settle: full draw
+    cell = lvl.cells[lvl.idx]
+
+    def age(ms):
+        """Pretend the cursor has been resting here for `ms`."""
+        lvl.hover_at = _t.ticks_ms() - ms
+
+    def frame():
+        PUSHES.clear()
+        menu._edit_last_render = 0
+        lvl.render(menu)                             # NOT tick(): must not force dirty
+        return {(p[1], p[3]) for p in PUSHES if p[0] == 'WIN'}
+
+    age(REVEAL - 500)
+    check(not frame() and not lvl.hover_shown,
+          'below %d ms of dwell nothing happens (a cursor passing through is safe)'
+          % REVEAL)
+
+    age(REVEAL + 100)
+    pushed = frame()
+    check(lvl.hover_shown and (cell[1], cell[2]) in pushed and len(pushed) == 1,
+          'at %d ms the CC appears, pushing exactly ONE cell (%d of them)'
+          % (REVEAL, len(pushed)))
+
+    check(not frame(), 'and it does not redraw again within the same phase')
+
+    age(REVEAL + CYCLE + 100)
+    pushed = frame()                                 # render first -- it is the render
+    check(not lvl.hover_shown and (cell[1], cell[2]) in pushed,   # that flips the phase
+          'a cycle later the bar is back, in one cell push')
+    age(REVEAL + 2 * CYCLE + 100)
+    frame()
+    check(lvl.hover_shown, 'and it alternates (on again the cycle after)')
+
+    # An input mid-reveal must put the bar back immediately, not at the next phase.
+    menu.handle(1, False, False)
+    check(not lvl.hover_shown and lvl.dirty,
+          'moving the cursor cancels the reveal at once')
+
+    # Selected cells never reveal -- you are turning the value and watching the bar.
+    lvl.editing = True
+    age(REVEAL + 100)
+    frame()
+    check(not lvl.hover_shown, 'a SELECTED cell never reveals (it would fight the edit)')
+    lvl.editing = False
+
+    # What actually gets drawn: '#<cc>' in place of the bar, for the focused param.
+    p = lvl.params[lvl.idx]
+    drawn = []
+    d = ns['amyboard'].display
+    prev_text = d.text
+    d.text = lambda s, x, y, c: drawn.append(s)
+    age(REVEAL + 100)
+    frame()
+    d.text = prev_text
+    check('#%d' % p.cc in drawn,
+          "the cell draws '#%d' (the param's real CC), not a label or a value" % p.cc)
+
+
 def preset_apply_checks(ns):
     """A preset is a COMPLETE patch: loading one lands on the same sound whatever
     played before it.
@@ -417,6 +490,7 @@ def main():
             ms += 9.5
     check(ms < 69.0, 'worst-case frame = %.1f ms, inside the ~69 ms loop() tick' % ms)
 
+    hover_checks(ns)
     preset_apply_checks(ns)
     scan_checks(ns)
 

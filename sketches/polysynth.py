@@ -2961,7 +2961,7 @@ def _grid_disp(p, v):
     return str(v)
 
 
-def _draw_grid_cell(d, x0, ctop, label, val01, bipolar, state):
+def _draw_grid_cell(d, x0, ctop, label, val01, bipolar, state, reveal=None):
     # (x0, ctop) is the cell's absolute top-left, straight from _grid_layout -- the
     # caller no longer derives it from the cursor index, because section headers make
     # position depend on the run structure above the cell, not just its ordinal.
@@ -2991,6 +2991,15 @@ def _draw_grid_cell(d, x0, ctop, label, val01, bipolar, state):
     d.text(label, max(x0, lx), ctop + 2, fg)
     bx = cxc - GRID_BAR_W // 2
     by = ctop + 11        # 1px tighter to the label than it was, to fund GRID_SECT_TOP
+    if reveal:
+        # Hover reveal (see HOVER_REVEAL_MS): the CC number takes the bar's place for
+        # a beat. Drawn 1px ABOVE the bar band because the glyph cell is 8px and the
+        # bar is only 6 -- from ctop+10 it spans rows 10..17, clearing the cursor rule
+        # at ctop+GRID_CELL_H-2. Floored at x0 like the label: '#103' is 4 glyphs = a
+        # full 32px cell with nothing to spare, and +1 would spill into the neighbour.
+        rx = cxc - (len(reveal) * CHAR_W) // 2
+        d.text(reveal, max(x0, rx), by - 1, fg)
+        return
     d.fill_rect(bx, by, GRID_BAR_W, 1, barout)
     d.fill_rect(bx, by + GRID_BAR_H - 1, GRID_BAR_W, 1, barout)
     d.fill_rect(bx, by, 1, GRID_BAR_H, barout)
@@ -3074,6 +3083,27 @@ GRID_EXT_MAX = 2        # Max externally-changed (MIDI/CC) cells repainted per t
                         # -- the real case -- is caught up in a single tick.
 
 
+# Hover CC reveal. Rest the cursor on a cell (without selecting it) and after
+# HOVER_REVEAL_MS its value BAR starts alternating with the param's CC number, so
+# you can map an E16 knob without leaving the grid or consulting docs/CC_MAPPING.md.
+#
+# Why these numbers:
+# - 3 s is longer than any deliberate pass-through: spinning the cursor across a
+#   page never trips it, so it only ever appears when you have actually stopped.
+# - 1 s per phase is ~14 loop() ticks. loop() arrives every ~69 ms, so anything
+#   under ~140 ms would render as a stutter rather than a swap; 1 s reads calm and
+#   costs one 32x21 cell push per second (9.5 ms MEASURED, see GRID_EXT_MAX) --
+#   about 1% of the audio budget, on a surface that is idle by definition.
+# - The reveal starts ON at 3 s (bar, then #CC, then bar...), so the information
+#   appears the moment the dwell is recognised.
+#
+# MENU_IDLE_MS (15 s) is deliberately NOT touched: the editor still idles out to
+# the display mode, which bounds the cycle to a 12 s window. That was the user's
+# call -- an animation that runs forever would keep the panel busy indefinitely.
+HOVER_REVEAL_MS = 3000
+HOVER_CYCLE_MS = 1000
+
+
 class _GridLevel:
     # A Param Control group shown as the knob grid. `idx` is the cursor position in
     # `params` (flat, all of the group's params); `editing` distinguishes cursor
@@ -3081,7 +3111,7 @@ class _GridLevel:
     # values come from param_values, so no per-param value is cached here.
     __slots__ = ('group', 'params', 'cells', 'heads', 'npages', 'cc_idx', 'ext',
                  'idx', 'editing', 'entry_value', 'dirty', 'full', 'prev_idx',
-                 'prev_page', 'prev_hdisp')
+                 'prev_page', 'prev_hdisp', 'hover_at', 'hover_shown')
 
     def __init__(self, group):
         self.group = group
@@ -3103,6 +3133,27 @@ class _GridLevel:
         self.prev_idx = 0
         self.prev_page = 0
         self.prev_hdisp = None   # last header string drawn; None = never drawn
+        self.hover_at = time.ticks_ms()   # when the cursor last moved (hover clock)
+        self.hover_shown = False          # is the CC reveal currently on screen?
+
+    def _reveal(self, now):
+        # Is the CC number showing this instant? Pure function of the hover clock, so
+        # the phase can't drift: it is recomputed from elapsed time every tick rather
+        # than toggled by a counter that a skipped frame would desync.
+        if self.editing:
+            return False         # selected = you're turning it; a swapping readout
+                                 # would fight the value you're watching
+        el = time.ticks_diff(now, self.hover_at)
+        if el < HOVER_REVEAL_MS:
+            return False
+        return ((el - HOVER_REVEAL_MS) // HOVER_CYCLE_MS) % 2 == 0
+
+    def _touch(self):
+        # Any input restarts the dwell: the reveal is for a cell you've settled on.
+        self.hover_at = time.ticks_ms()
+        if self.hover_shown:
+            self.hover_shown = False
+            self.dirty = True    # the CC is on screen -- put the bar back
 
     def note_cc(self, cc):
         # An external CC moved a param: mark its cell stale for the next render.
@@ -3118,6 +3169,7 @@ class _GridLevel:
         if self.editing:
             self.editing = False
             self.dirty = True
+            self._touch()        # start the dwell fresh on the cell you just left
 
     def handle(self, menu, delta, click, back):
         # SELECTED (editing): turn adjusts live; single click commits (keeps value,
@@ -3125,6 +3177,8 @@ class _GridLevel:
         # to the param default (stays editing); HOLD reverts to the entry value and
         # exits. CURSOR: turn moves cell-to-cell; click selects (snapshots the value
         # for revert); hold pops back to the group chooser.
+        if delta or click or back:
+            self._touch()
         if self.editing:
             p = self.params[self.idx]
             if back:                             # hold: revert + exit editing
@@ -3172,9 +3226,16 @@ class _GridLevel:
         # otherwise redraw only the changed cell(s) + header. The value is applied
         # live in handle(), so sound tracks every detent even when a redraw is
         # throttled to the next frame.
+        now = time.ticks_ms()
+        # The hover reveal is the ONLY self-starting redraw in the menu -- with the
+        # encoder untouched nothing else marks us dirty -- so its phase is checked
+        # BEFORE the dirty gate below, not after it.
+        reveal = self._reveal(now)
+        if reveal != self.hover_shown:
+            self.hover_shown = reveal
+            self.dirty = True
         if not (menu.dirty or self.dirty):
             return
-        now = time.ticks_ms()
         page = self.cells[self.idx][0]
         full = self.full or menu._needs_clear or (page != self.prev_page)
         if not full and time.ticks_diff(now, menu._edit_last_render) < EDIT_REFRESH_MS:
@@ -3188,6 +3249,11 @@ class _GridLevel:
             fv = int(param_values.get(fp.cc, fp.default))
             hdisp = _grid_disp(fp, fv)
             if full:
+                # Opening the group, resuming from idle or turning a page all count as
+                # arriving somewhere new: restart the dwell so the CC can't be mid-cycle
+                # on a cell you have not actually rested on yet.
+                self.hover_at = now
+                self.hover_shown = False
                 d.fill(0)
                 _draw_grid_header(d, self.group.upper(), hdisp)
                 for hpage, hy, hsegs in self.heads:
@@ -3240,7 +3306,9 @@ class _GridLevel:
                     st = ('selected' if self.editing else 'cursor') if gi == self.idx else 'none'
                     v = int(param_values.get(p.cc, p.default))
                     _draw_grid_cell(d, cx, cy, p.grid,
-                                    clamp(v, 0, 127) / 127.0, p.bipolar, st)
+                                    clamp(v, 0, 127) / 127.0, p.bipolar, st,
+                                    '#%d' % p.cc if (st == 'cursor' and self.hover_shown)
+                                    else None)
                     # Push exactly the cell we redrew -- its rect comes from the layout,
                     # so section headers above it shift the window automatically and
                     # never get repainted (they can't change without a full redraw).

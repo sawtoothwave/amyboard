@@ -45,7 +45,9 @@ python3 -m venv venv && ./venv/bin/pip install pillow
 ./venv/bin/python tools/grid_preview.py path/to/other_sketch.py
 ```
 
-Writes one true 128×128 PNG per group per page, plus a `sheet.png` contact strip.
+Writes one true 128×128 PNG per group per page, a `hover_cc.png` showing the hover CC
+reveal on its worst case (the widest CC number, in an edge cell with neighbours), plus
+a `sheet.png` contact strip.
 Needs Pillow; nothing else. Iterate on layout here rather than burning ~20s deploy
 cycles — and, more to the point, **look at it before believing arithmetic**. It has
 already caught a spacing bug that a clean-looking calculation missed.
@@ -100,6 +102,13 @@ that every `PARAMS` row drives its full map→store→send pipeline through `han
 without raising (the table calls `to_val`/`update` through variables, which
 `arity_check.py` cannot see — this is the arity net for those), and that the
 worst-case frame stays inside the ~69ms `loop()` tick.
+
+`hover_checks` covers the **hover CC reveal**: that a dwell under 3 s does nothing, that
+the reveal then costs exactly one cell push per phase (and doesn't redraw within a
+phase), that it alternates, that any input cancels it at once, that a selected cell
+never reveals, and that what lands on the panel is `#<cc>`. It ages the level's hover
+clock rather than sleeping — the phase is a pure function of elapsed time, which is what
+makes that possible.
 
 `preset_apply_checks` covers **preset loading**: that a param the snapshot predates
 resets to its default instead of inheriting the last patch's value (the portamento

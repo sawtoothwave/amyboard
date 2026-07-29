@@ -124,7 +124,14 @@ if len(params) != n_rows:
 FOCUS_VALUE = {'Osc': 'Unison', 'VCF': '127', 'LFO': '0.20 Hz', 'VCA': '0', 'FX': '0.0dB'}
 
 
-def render(group, cursor=0, editing_idx=None, page=0):
+# CC name -> number, so the hover reveal (which draws '#<cc>') can be previewed. The
+# parser above keeps _Param's cc column as the SYMBOL ('CC_CUTOFF'); resolve it here
+# from the module-level constants rather than duplicating the numbers.
+CC_NUMS = {m.group(1): int(m.group(2))
+           for m in re.finditer(r"^(CC_[A-Z0-9_]+)\s*=\s*(\d+)", src, re.M)}
+
+
+def render(group, cursor=0, editing_idx=None, page=0, reveal=False):
     ps = [p for p in params if p.group == group]
     cells, heads, npages = ns['_grid_layout'](ps)
     fb = FakeFB()
@@ -143,7 +150,9 @@ def render(group, cursor=0, editing_idx=None, page=0):
         if editing_idx is not None and i == editing_idx:
             st = 'selected'
         ns['_draw_grid_cell'](fb, cx, cy, p.grid,
-                              p.default / 127.0, p.bipolar, st)
+                              p.default / 127.0, p.bipolar, st,
+                              ('#%d' % CC_NUMS[p.cc]) if (reveal and st == 'cursor')
+                              else None)
     ns['_draw_grid_pages'](fb, page, npages)
     return fb.image(), npages
 
@@ -167,6 +176,17 @@ if __name__ == '__main__':
     img.save(os.path.join(out, 'Osc_selected.png'))
     imgs.append(('Osc_selected', img))
     print('Osc_selected -> Osc_selected.png')
+    # Hover CC reveal, on the WORST case: the widest CC number ('#103' fills all 32px
+    # of the cell), with neighbours drawn either side so the adjacency is real.
+    worst = max(params, key=lambda p: CC_NUMS[p.cc])
+    wps = [p for p in params if p.group == worst.group]
+    wi = wps.index(worst)
+    wpage = ns['_grid_layout'](wps)[0][wi][0]
+    img, _ = render(worst.group, wi, None, wpage, reveal=True)
+    img.save(os.path.join(out, 'hover_cc.png'))
+    imgs.append(('hover_cc', img))
+    print('hover CC #%d on %s/%s -> hover_cc.png'
+          % (CC_NUMS[worst.cc], worst.group, worst.grid))
     sheet = Image.new('L', (len(imgs) * (W + 6) + 6, H + 12), 30)
     for i, (_, im) in enumerate(imgs):
         sheet.paste(im, (6 + i * (W + 6), 6))
