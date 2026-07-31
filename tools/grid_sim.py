@@ -419,8 +419,8 @@ def about_checks(ns):
     menu = SketchMenu()
     menu.open()
     labels = [lbl for lbl, _ in menu.cur.items]
-    check(labels.index('About') == labels.index('Resume playing') - 1,
-          'About sits directly above Resume playing on the root')
+    check(labels.index('About') == labels.index('Exit menu') - 1,
+          'About sits directly above Exit menu on the root')
 
     dict(menu.cur.items)['About']()             # open it the way a click does
     check(isinstance(menu.cur, AboutLevel), 'clicking About pushes the card')
@@ -498,8 +498,13 @@ def scan_checks(ns):
           'root menu still fits one page (%d of %d rows, no pagination)'
           % (len(root.items), ns['MENU_VISIBLE']))
     labels = [lbl for lbl, _ in root.items]
-    check(labels.index('Scan presets') == labels.index('Load preset') + 1,
-          'Scan presets sits directly after Load preset on the root')
+    # Root order is a UX decision, so it is pinned rather than left to drift.
+    # Scan Presets used to sit directly after Load (same list, so they read as a
+    # pair); it moved below Delete on 2026-07-31 at the user's request.
+    check(labels == ['Param control', 'Save as preset', 'Load preset',
+                     'Delete preset', 'Scan presets', 'Display mode',
+                     'About', 'Exit menu'],
+          'root menu order is %s' % labels)
 
     dict(root.items)['Scan presets']()          # open it the way a click does
     lvl = menu.cur

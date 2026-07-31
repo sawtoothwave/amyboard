@@ -829,7 +829,7 @@ def main():
     menu.open()
     check([it[0] for it in menu.cur.items] == [
         'Kit parameters', 'Save kit', 'Load kit', 'Delete kit',
-        'MIDI base note', 'Display mode', 'Resume playing'], 'root items, in order')
+        'MIDI base note', 'Display mode', 'Exit menu'], 'root items, in order')
     check(len(menu.cur.items) <= ns['MENU_VISIBLE'], 'and still one page')
 
     print('\n--- display modes: pick one, and it sticks across a reboot')

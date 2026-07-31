@@ -59,7 +59,7 @@ VERSION_DATE = '2026_07_30'
 #               device menu with or without the wrapper. It replicates the
 #               wrapper's hold-ladder MINUS the global-escape rung: a hold at our
 #               root menu simply does nothing (there is no wrapper to escape to);
-#               leave the root via "Resume Playing" or the idle timeout.
+#               leave the root via "Exit Menu" or the idle timeout.
 #
 # Detection is free: `launcher` is defined iff the wrapper injected it.
 STANDALONE_SEESAW_ADDR   = 0x36     # Adafruit Seesaw rotary encoder + push button
@@ -147,7 +147,7 @@ class _StandaloneLauncher:
             #   depth >= 2 (submenu): pop one level back toward the root.
             #   depth == 0 (playing): open our menu (delivered as a click).
             #   depth == 1 (root menu): nothing -- there is no wrapper to escape
-            #                           to; leave via "Resume Playing" / timeout.
+            #                           to; leave via "Exit Menu" / the idle timeout.
             if self.menu_depth >= 2:
                 self.back = True
             elif self.menu_depth == 0:
@@ -3605,11 +3605,11 @@ class SketchMenu:
             ('Param control', self._open_params),
             ('Save as preset', self._start_save),
             ('Load preset', self._open_load),
-            ('Scan presets', self._open_scan),
             ('Delete preset', self._open_delete),
+            ('Scan presets', self._open_scan),
             ('Display mode', self._open_display),
             ('About', self._open_about),
-            ('Resume playing', self.close),
+            ('Exit menu', self.close),
         ])
 
     def _open_about(self):

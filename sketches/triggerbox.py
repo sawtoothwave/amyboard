@@ -60,7 +60,7 @@ import amy, amyboard, time, json, os, gc
 #               self-contained, shareable single sketch. It replicates the
 #               wrapper's hold-ladder MINUS the global-escape rung: a hold at our
 #               root menu does nothing (there is no wrapper to escape to); leave
-#               the root via "Resume Playing" or the idle timeout.
+#               the root via "Exit Menu" or the idle timeout.
 #
 # Detection is free: `launcher` is defined iff the wrapper injected it.
 STANDALONE_SEESAW_ADDR   = 0x36     # Adafruit Seesaw rotary encoder + push button
@@ -148,7 +148,7 @@ class _StandaloneLauncher:
             #   depth >= 2 (submenu): pop one level back toward the root.
             #   depth == 0 (playing): open our menu (delivered as a click).
             #   depth == 1 (root menu): nothing -- there is no wrapper to escape
-            #                           to; leave via "Resume Playing" / timeout.
+            #                           to; leave via "Exit Menu" / the idle timeout.
             if self.menu_depth >= 2:
                 self.back = True
             elif self.menu_depth == 0:
@@ -2681,7 +2681,7 @@ class SketchMenu:
             ('Delete kit', self._open_delete),
             ('MIDI base note', self._open_base_note),
             ('Display mode', self._open_display),
-            ('Resume playing', self.close),
+            ('Exit menu', self.close),
         ]
         return _MenuLevel('TRIGGERBOX', items)
 

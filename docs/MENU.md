@@ -37,8 +37,16 @@ name-entry → sub-menu → sketch (root) menu → GLOBAL menu
 
 A hold out of a sketch's **root** menu goes straight to the global menu — it does
 not stop at "playing," so it never flashes the display mode on the way out.
-"Playing" is the closed-menu base state, re-entered by a **Resume Playing** menu
-item (a click) or the menu's **idle timeout**.
+"Playing" is the closed-menu base state, re-entered by the root's **Exit Menu**
+item (a click). The **idle timeout** does *not* close the menu — it suspends it,
+which looks identical (the display mode takes the screen back) but keeps the
+stack, so the next input returns you where you left off rather than to the root.
+See the Idle timeout note below.
+
+Nothing about "playing" is about audio: notes keep sounding and MIDI keeps
+arriving the whole time a menu is up. The menu only ever owns the OLED, which is
+why the root item is *Exit Menu* and not "Resume Playing" — it was renamed on
+2026-07-31 because the old label implied a pause that never happens.
 
 ## Global launcher menu (`wrapper_sketch.py`)
 
@@ -88,11 +96,11 @@ ARCTOR
 ├─ Param Control     → Osc · VCF · LFO · VCA · FX → each a sectioned knob grid
 ├─ Save As Preset    → Overwrite current · Save as New · Cancel  (see Presets)
 ├─ Load Preset       → INIT (built-in) + saved presets
-├─ Scan Presets      → the same list, but scrolling LOADS as it goes (see Presets)
 ├─ Delete Preset     → saved presets (INIT is not deletable)
+├─ Scan Presets      → the same list, but scrolling LOADS as it goes (see Presets)
 ├─ Display Mode      → CC Monitor · Screensaver   (see DISPLAY_MODES.md)
 ├─ About             → version + credits card; ANY gesture dismisses
-└─ Resume Playing
+└─ Exit Menu
 ```
 
 > The root is now at **exactly `MENU_VISIBLE` (8) items**, so it still fits one
@@ -118,7 +126,7 @@ ARCTOR
   is kept (which level you're on and the cursor position, or an editor's value),
   and the next input (turn, click, or hold) resumes you exactly where you were.
   A hold only escapes to the global menu from an *active* (non-suspended) root.
-  Closing to playing happens only on explicit action (Resume Playing, or backing
+  Closing to playing happens only on explicit action (Exit Menu, or backing
   out past the root).
 - **Audio-safe rendering:** menu draws use row-level diffing (a cursor move
   repaints only two rows) and a progressive banded framebuffer flush on full
@@ -237,7 +245,7 @@ Presets / Delete Preset**).
   Control goes to the root exactly as it does when you enter Param Control the
   normal way (leaving the scan underneath made a hold read as a trapdoor back into
   scanning). **Hold** from the scan itself also goes back to the root (the preset
-  stays loaded either way); the way out to *playing* is the root's Resume Playing or
+  stays loaded either way); the way out to *playing* is the root's Exit Menu or
   the idle timeout. What Param
   Control shows is **live state** (`param_values`), not the saved snapshot — so a
   MIDI CC that arrived while that preset was up is already reflected in the grid,
@@ -272,6 +280,6 @@ doesn't inject a `launcher`, the sketch builds an internal `_StandaloneLauncher`
 that reads the Seesaw encoder directly and fills the *same* `launcher.*` fields,
 so all the menu code is identical in both modes. It replicates the hold-ladder
 **minus the global-escape rung**: a hold at the Arctor root menu does nothing
-(there's no wrapper to escape to) — leave the root via **Resume Playing** or the
+(there's no wrapper to escape to) — leave the root via **Exit Menu** or the
 idle timeout. The reader is only instantiated when the wrapper is absent, so the
 two never contend for the encoder, and wrapped behavior is unchanged.
