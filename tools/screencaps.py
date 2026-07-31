@@ -170,6 +170,31 @@ def main():
     menu.handle(0, False, True)
     menu.handle(0, False, True)            # back to root
 
+    # Every parameter group, every page -- one image per screen you can actually
+    # land on. Named rather than numbered ON PURPOSE: the numbered captures above
+    # are already linked from arctor.md, and inserting these into that sequence
+    # would renumber everything after them and silently break those links.
+    print('\n--- Every parameter page')
+    groups = ns['PARAM_GROUPS']
+    for g in groups:
+        menu.stack = [menu._root()]
+        dict(menu.cur.items)['Param control']()
+        dict(menu.cur.items)[g]()
+        lvl = menu.cur
+        npages = max(c[0] for c in lvl.cells) + 1
+        for pg in range(npages):
+            # Put the cursor on the first cell OF THIS PAGE, so each capture shows
+            # the page it names rather than paging back to wherever idx last was.
+            lvl.idx = next(i for i, c in enumerate(lvl.cells) if c[0] == pg)
+            lvl.editing = False
+            lvl.hover_shown = False
+            lvl.hover_at = _t.ticks_ms()
+            name = 'grid-%s' % g.lower()
+            if npages > 1:
+                name += '-p%d' % (pg + 1)
+            clear(); paint(); _snap(fb, name, shots)
+    menu.stack = [menu._root()]
+
     print('\n--- Presets')
     dict(menu.cur.items)['Save as preset']()
     clear(); paint(); _snap(fb, '09-save-chooser', shots)
