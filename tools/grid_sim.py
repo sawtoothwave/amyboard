@@ -275,6 +275,43 @@ def preset_apply_checks(ns):
           'previous patch' % (len(set(seen)), len(PARAMS)))
 
 
+def display_mode_checks(ns):
+    """The mode registry, and what happens to a board that saved a retired name.
+
+    Removing a mode is a data-compatibility event: the chosen mode persists to
+    flash BY NAME, so a board that saved 'Oscilloscope' (removed 2026-07-31) must
+    fall back rather than fault or come up with no mode at all. That path only
+    runs at boot on a board nobody has, which is exactly why it needs a test.
+    """
+    print('\n--- Display modes')
+    names = [m.name for m in ns['DISPLAY_MODES']]
+    check(names == ['CC Monitor', 'Screensaver'],
+          'the registry is %s' % names)
+    check('Oscilloscope' not in names and 'OscilloscopeMode' not in ns,
+          'the Oscilloscope placeholder is gone, class and all')
+
+    saved = ns['_settings'].get('display_mode')
+    for name, want in (('Oscilloscope', 'CC Monitor'),   # retired -> default
+                       ('nonsense', 'CC Monitor'),       # corrupt -> default
+                       ('Screensaver', 'Screensaver')):  # valid    -> restored
+        ns['_settings']['display_mode'] = name
+        ns['active_display_mode'] = ns['CC_MONITOR_MODE']
+        ns['_restore_display_mode']()
+        got = ns['active_display_mode'].name
+        check(got == want, 'a board that saved %-14r comes up on %r' % (name, got))
+    if saved is None:
+        ns['_settings'].pop('display_mode', None)
+    else:
+        ns['_settings']['display_mode'] = saved
+
+    # Every mode the menu can reach must actually be selectable.
+    menu = ns['SketchMenu']()
+    menu.open()
+    dict(menu.cur.items)['Display mode']()
+    check([l for l, _ in menu.cur.items] == names,
+          'the Display Mode menu lists exactly the registry')
+
+
 def colour_scale_checks(ns):
     """Colour constants must be LEVELS 0-15, not 0-255 intensities.
 
@@ -645,6 +682,7 @@ def main():
     hover_checks(ns)
     preset_apply_checks(ns)
     scan_checks(ns)
+    display_mode_checks(ns)
     colour_scale_checks(ns)
     flash_store_checks(ns)
     about_checks(ns)

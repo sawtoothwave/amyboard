@@ -70,11 +70,13 @@ the raw 0-127. An unmapped CC (e.g. the raw mod wheel, CC 1) shows its number.
 A minimal screensaver: a small dot drifting around the panel, pushing only the
 band of rows spanning its old+new position each step (audio-safe).
 
-### Oscilloscope (`'Oscilloscope'`) — stub
-
-Placeholder. A real scope needs a tap into AMY's output samples, which isn't wired
-up yet; the mode is selectable for completeness but only shows a "not available
-yet" notice.
+> **Removed 2026-07-31: Oscilloscope.** It was a placeholder that drew "not
+> available yet" and idled — a real scope needs a tap into AMY's output samples,
+> which isn't wired up. A menu entry leading nowhere costs a user more than it
+> gives, so it came out. A board that had saved `'Oscilloscope'` as its mode falls
+> back to the CC monitor: `_restore_display_mode()` matches by name and keeps the
+> default when there's no match. Re-add it as a mode class when there's something
+> behind it — nothing else has to change.
 
 ## Boot & persistence
 

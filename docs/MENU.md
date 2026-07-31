@@ -90,7 +90,7 @@ ARCTOR
 ├─ Load Preset       → INIT (built-in) + saved presets
 ├─ Scan Presets      → the same list, but scrolling LOADS as it goes (see Presets)
 ├─ Delete Preset     → saved presets (INIT is not deletable)
-├─ Display Mode      → CC Monitor · Screensaver · Oscilloscope   (see DISPLAY_MODES.md)
+├─ Display Mode      → CC Monitor · Screensaver   (see DISPLAY_MODES.md)
 ├─ About             → version + credits card; ANY gesture dismisses
 └─ Resume Playing
 ```

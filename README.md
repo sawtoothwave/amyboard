@@ -99,7 +99,7 @@ Presets and the selected display mode persist to `/user/arctor_presets.json` and
 - [Architecture](docs/ARCHITECTURE.md) - High-level system design
 - [Menu & Navigation](docs/MENU.md) - On-device menus, gesture model, launcher↔sketch contract
 - [WiFi & WebREPL](docs/WIFI.md) - Menu-toggled, auto-on-boot WiFi + WebREPL for wireless access
-- [Display Modes](docs/DISPLAY_MODES.md) - Pluggable OLED display modes (CC Monitor, Screensaver, Oscilloscope)
+- [Display Modes](docs/DISPLAY_MODES.md) - Pluggable OLED display modes (CC Monitor, Screensaver)
 - [CC Mapping](docs/CC_MAPPING.md) - CC → parameter map and live behavior
 - [MIDI Mapping](docs/MIDI_MAPPING.md) - Control surface roles and channel assignment
 - [Firmware Notes](docs/FIRMWARE_NOTES.md) - Firmware gotchas: audio test, grab_midi_notes, boot-loop recovery

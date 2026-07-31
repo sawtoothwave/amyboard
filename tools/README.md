@@ -48,6 +48,26 @@ python3 -m venv venv && ./venv/bin/pip install pillow
 Writes one true 128×128 PNG per group per page, a `hover_cc.png` showing the hover CC
 reveal on its worst case (the widest CC number, in an edge cell with neighbours), plus
 a `sheet.png` contact strip.
+## `screencaps.py` — render every unique screen for the docs
+
+```sh
+./venv/bin/python tools/screencaps.py       # -> docs/screens/*.png + _sheet.png
+```
+
+Twenty 128×128 PNGs covering the three display modes, the menu, all four knob-grid
+states, the preset workflows and the About card — plus a contact sheet. These are
+**release assets** (they live in `docs/screens/`, not `preview_out/`), meant to be
+committed and linked from `arctor.md`.
+
+Same fidelity contract as the other previewers, extended to the whole app: it execs
+the real sketch through `grid_sim`'s stubs, swaps `amyboard.display` for a framebuf
+that records pixels, then drives the actual `SketchMenu` and `DisplayMode`s. Nothing
+re-implements a screen, so a layout change in the sketch shows up here on the next
+run. Re-run it after any UI change and re-commit whatever moved.
+
+Two things it cannot capture: OLED bloom/contrast, and anything mid-animation (the
+screensaver dot is caught at one arbitrary step).
+
 ## `about_preview.py` — render the About card offline at 128×128
 
 ```sh

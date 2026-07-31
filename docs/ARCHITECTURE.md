@@ -64,7 +64,7 @@ The CC map is in [docs/CC_MAPPING.md](CC_MAPPING.md); the e16 page/knob layout i
 
 - Re-enable the on-device MIDI-channel picker once the firmware `machine.reset()` audio bug is fixed, or via a live no-reset approach
 - CV I/O integration for Eurorack modulation sources
-- Oscilloscope display mode (needs an AMY output-sample tap)
+- Oscilloscope display mode (needs an AMY output-sample tap; the placeholder mode was removed 2026-07-31)
 
 ## Development Approach
 

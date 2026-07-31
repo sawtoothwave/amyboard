@@ -1867,41 +1867,21 @@ class ScreensaverMode(DisplayMode):
             amyboard.display_refresh()
 
 
-class OscilloscopeMode(DisplayMode):
-    # Placeholder: a real scope needs a tap into AMY's output samples, which is
-    # not wired up yet. Selectable so the menu is complete, but it only shows a
-    # one-time notice and idles (no per-frame work, no bus load).
-    name = 'Oscilloscope'
-
-    def __init__(self):
-        self.drawn = False
-
-    def on_activate(self):
-        global _display_last_render
-        self.drawn = False
-        _begin_clear()
-        _display_last_render = time.ticks_ms()
-
-    def render(self, now):
-        if self.drawn:
-            return
-        self.drawn = True
-        try:
-            d = amyboard.display
-            d.text('OSCILLOSCOPE', 0, 44, DISPLAY_TEXT_COLOR)
-            d.text('not available yet', 0, 64, MENU_C_UNSEL)
-            if not _push_rows(40, 79):
-                amyboard.display_refresh()
-        except Exception:
-            pass
-
-
 # Available display modes. The on-device menu (see SketchMenu) indexes this list
 # to let the user pick which one drives the OLED.
+#
+# There was a third, 'Oscilloscope', removed 2026-07-31. It was only ever a
+# placeholder that drew "not available yet" and idled -- a real scope needs a tap
+# into AMY's output samples, which is not wired up. A menu entry that leads
+# nowhere costs a user more than it gives. Re-add it as a mode class here when
+# there is something behind it; nothing else has to change.
+#
+# A board that saved 'Oscilloscope' as its display mode is safe:
+# _restore_display_mode() matches by NAME and keeps the default when there is no
+# match, so it falls back to the CC monitor and the next pick overwrites it.
 CC_MONITOR_MODE = CCMonitorMode()
 SCREENSAVER_MODE = ScreensaverMode()
-OSCILLOSCOPE_MODE = OscilloscopeMode()
-DISPLAY_MODES = [CC_MONITOR_MODE, SCREENSAVER_MODE, OSCILLOSCOPE_MODE]
+DISPLAY_MODES = [CC_MONITOR_MODE, SCREENSAVER_MODE]
 
 # The mode currently driving the OLED. Defaults to the CC monitor; swap it with
 # set_display_mode() (no menu yet, so this is the only active mode for now).
