@@ -1,4 +1,4 @@
-# AMYboard Sketch
+# AMYboard Sketch -- ARCTOR
 # DESCRIPTION: 2-oscillator (A/B) analog-style synth matching the frozen CC map.
 #   Stepped musical tuning per osc, 6-way wave buckets (no wavetable/PCM/ALGO),
 #   resonant filter with VCF envelope + key tracking, VCA envelope, plus a
@@ -8,8 +8,37 @@
 #   handled via midi.add_callback. (CV in/out support was attempted and removed --
 #   see CV_attempt.md for what we learned.)
 #   See docs/CC_MAPPING.md for the authoritative control map.
+#
+# ---------------------------------------------------------------------------
+# BEFORE YOU RUN THIS -- the two things that will otherwise look like bugs
+# ---------------------------------------------------------------------------
+# FIRMWARE: needs the AMYboard build of 2026-07-27 or later. Portamento/glide
+#   (CC 34) is sent per-oscillator with AMY's bare 'm' keyword, which older
+#   builds do not carry -- on those, Glide silently does nothing while every
+#   other control works. Check with: import os; os.uname().version
+#
+# MIDI CHANNEL: fixed at 12. Notes arrive on ch12 because AMY auto-routes MIDI
+#   channel N to synth N and this instrument lives on synth 12; CCs are filtered
+#   to the same channel. There is no on-device channel picker. To move it you
+#   must edit BOTH coupled spots -- `SYNTH = 12` and the CC filter's `!= 11`
+#   (zero-indexed, so 11 == channel 12) -- and they must agree.
+#
+# INSTALLING: this file is self-contained; it needs nothing else from the repo.
+#   Two ways to run it, and it detects which by itself (see the launcher note
+#   below): copy it to /user/sketches/ to pick it from the global launcher, or
+#   copy it to /user/current/sketch.py to boot straight into it with no launcher
+#   at all. VERIFIED on hardware both ways, 2026-07-30.
+# ---------------------------------------------------------------------------
 
 import amy, amyboard, midi, math, time, json
+
+# --- Identity ---------------------------------------------------------------
+# The instrument's name and version, shown on the menu root and the About screen.
+# SETTINGS_FILE / PRESETS_FILE below are named from this too; see _LEGACY_* there
+# for how a board written by the pre-rename build keeps its saved presets.
+SKETCH_NAME  = 'ARCTOR'
+VERSION      = '1.0'
+VERSION_DATE = '2026_07_30'
 
 # --- Launcher integration ---------------------------------------------------
 # This sketch always talks to a "launcher-shaped" input object (the global
@@ -140,17 +169,24 @@ except NameError:
 # reboot/reload) remembering user choices like the selected display mode. Writes
 # happen only on explicit selection -- never per frame -- so flash wear is a
 # non-issue. Stage 3 (MIDI channel) reuses this same store.
-SETTINGS_FILE = '/user/polysynth_settings.json'
+SETTINGS_FILE = '/user/arctor_settings.json'
+
+
+def _read_json(path):
+    # Missing file, unreadable flash or malformed JSON all mean "no stored value"
+    # -- a fresh board is the common case, not an error, and neither is worth
+    # failing a boot over. Callers type-check what comes back.
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def _load_settings():
-    try:
-        with open(SETTINGS_FILE) as f:
-            d = json.load(f)
-        if isinstance(d, dict):
-            return d
-    except Exception:
-        pass
+    d = _read_json(SETTINGS_FILE)
+    if isinstance(d, dict):
+        return d
     return {}
 
 
@@ -471,7 +507,27 @@ DISPLAY_LINE_H      = 12      # vertical pixels per TEXT line (8px glyph + 4px l
 DISPLAY_ENTRY_H     = 24      # a parameter group's two 12px text lines (gap is added between)
 DISPLAY_ENTRY_Y     = tuple(i * (128 - DISPLAY_ENTRY_H) // (DISPLAY_MAX_ENTRIES - 1)
                             for i in range(DISPLAY_MAX_ENTRIES))   # (0, 34, 69, 104)
-DISPLAY_TEXT_COLOR  = 255     # full-brightness grayscale
+# --- COLOUR SCALE (read before touching any colour in this file) ------------
+# Every colour argument to amyboard.display is a LEVEL 0-15, NOT a 0-255 intensity.
+# The panel is 4bpp and MicroPython's GS4_HMSB framebuf masks the value with
+# `col & 0x0f`, so the LOW nibble is what lands on screen and anything above 15 is
+# silently folded. VERIFIED on hardware 2026-07-30 by drawing text at a spread of
+# values and reading the nibbles back out of display._hw.buffer:
+#
+#     255 -> 15    244 ->  4    205 -> 13    215 ->  7
+#     110 -> 14    100 ->  4     20 ->  4      8 ->  8
+#
+# Text is legible down to level 1 (checked by eye on the real panel), so the full
+# range is usable. This file long passed 0-255 values, which is why 255 ("white")
+# worked by luck -- 255 & 15 == 15 -- while 110 ("dim") rendered at level 14, one
+# step off white. That is what made the About card and the menu list read flat.
+# tools/grid_preview.py masked the TOP nibble until the same date, which is why no
+# offline preview ever caught it.
+#
+# STILL ON THE 0-255 SCALE: the GRID_C_* block. Left alone deliberately -- re-tuning
+# 11 constants changes how the instrument looks, which is a design call, not a bug
+# fix. Their real levels are listed there.
+DISPLAY_TEXT_COLOR  = 15      # full brightness (level, not intensity)
 DISPLAY_WIDTH       = 128     # panel width in pixels
 DISPLAY_CHAR_W      = 8       # font cell width, for right-aligning the value column
 
@@ -1188,22 +1244,18 @@ def _apply_patch(d):
 # and held notes are never cut (no voice reallocation). One JSON file holds an
 # ordered list of {'name', 'cc'} entries; the whole file is rewritten on save
 # (tiny, so flash wear is a non-issue -- writes happen only on an explicit save).
-PRESETS_FILE = '/user/polysynth_presets.json'
+PRESETS_FILE = '/user/arctor_presets.json'
 PRESET_NAME_MAX = 12      # longest preset name the name-entry screen accepts
 MAX_PRESETS = 32          # generous backstop so a runaway can't fill flash
 
 
 def _load_presets():
-    try:
-        with open(PRESETS_FILE) as f:
-            d = json.load(f)
-        if isinstance(d, list):
-            # Keep only well-formed entries so one bad record can't break the list.
-            return [p for p in d
-                    if isinstance(p, dict) and isinstance(p.get('name'), str)
-                    and isinstance(p.get('cc'), dict)]
-    except Exception:
-        pass
+    d = _read_json(PRESETS_FILE)
+    if isinstance(d, list):
+        # Keep only well-formed entries so one bad record can't break the list.
+        return [p for p in d
+                if isinstance(p, dict) and isinstance(p.get('name'), str)
+                and isinstance(p.get('cc'), dict)]
     return []
 
 
@@ -1837,7 +1889,7 @@ class OscilloscopeMode(DisplayMode):
         try:
             d = amyboard.display
             d.text('OSCILLOSCOPE', 0, 44, DISPLAY_TEXT_COLOR)
-            d.text('not available yet', 0, 64, 110)
+            d.text('not available yet', 0, 64, MENU_C_UNSEL)
             if not _push_rows(40, 79):
                 amyboard.display_refresh()
         except Exception:
@@ -2302,6 +2354,12 @@ EDIT_REFRESH_MS = 16     # Min gap between editor redraws -- currently INERT, an
 EDIT_DBLCLICK_MS = 400   # two clicks within this window = double-click (reset);
                          # a single click's exit is deferred this long to detect it
 
+# Menu list colours, on the 0-15 LEVEL scale (see the COLOUR SCALE note above).
+# The unselected row was 110, i.e. level 14 -- one step off the selected row's 15,
+# which is why a list read as a flat block with only the '>' marking the cursor.
+MENU_C_SEL   = 15        # selected row (and its '>' marker)
+MENU_C_UNSEL = 6         # unselected rows
+
 # Encoder acceleration. The launcher hands us the detent COUNT this tick, so a
 # fast spin already arrives as a bigger delta; we amplify that so rapid turns
 # cover ground while a single detent stays 1:1 for fine adjustment. Applied in
@@ -2323,9 +2381,9 @@ def _draw_menu_row(d, y, kind, payload):
         # Title row: left-aligned header text, plus an optional right-aligned
         # marker.
         left, right = payload
-        d.text(left, 0, y, 255)
+        d.text(left, 0, y, MENU_C_SEL)
         if right:
-            d.text(right, DISPLAY_WIDTH - len(right) * CHAR_W, y, 255)
+            d.text(right, DISPLAY_WIDTH - len(right) * CHAR_W, y, MENU_C_SEL)
     elif kind == 'q':
         # Page indicator -- the SAME dash/dots marks the knob grid uses
         # (_draw_page_dots), vertically centred in this row so the two surfaces
@@ -2335,10 +2393,10 @@ def _draw_menu_row(d, y, kind, payload):
     else:
         sel, label = payload
         if sel:
-            d.text('>', 0, y, 255)
-            d.text(label[:MENU_LABEL_MAX], 12, y, 255)
+            d.text('>', 0, y, MENU_C_SEL)
+            d.text(label[:MENU_LABEL_MAX], 12, y, MENU_C_SEL)
         else:
-            d.text(label[:MENU_LABEL_MAX], 12, y, 110)
+            d.text(label[:MENU_LABEL_MAX], 12, y, MENU_C_UNSEL)
 
 
 # ---------------------------------------------------------------------------
@@ -2496,7 +2554,7 @@ class _ScanLevel(_MenuLevel):
     #            then edit it. The scan level is REPLACED, not stacked under, so
     #            Param Control sits directly on the root and a hold out of it behaves
     #            exactly as it does when you enter Param Control the normal way --
-    #            back to POLYSYNTH. (Keeping the scan underneath meant a hold dropped
+    #            back to the ARCTOR root. (Keeping the scan underneath meant a hold dropped
     #            you back into scanning, which reads as a trapdoor.) What the grid
     #            shows is LIVE state (param_values), not the saved snapshot -- so any
     #            MIDI CC that arrived while this preset was up is already reflected
@@ -2652,9 +2710,9 @@ class _NameLevel:
         total = (len(name) + 1) * CHAR_W        # committed chars + active slot
         sx = clamp((DISPLAY_WIDTH - total) // 2, 0, max(0, DISPLAY_WIDTH - total))
         if name:
-            d.text(name, sx, y, 255)            # committed chars, normal
+            d.text(name, sx, y, MENU_C_SEL)      # committed chars, normal
         ax = sx + len(name) * CHAR_W            # active slot origin
-        d.fill_rect(ax, y, CHAR_W, CHAR_H, 255)  # knockout background (white)
+        d.fill_rect(ax, y, CHAR_W, CHAR_H, MENU_C_SEL)  # knockout background (white)
         if item == 'DEL':
             _glyph_del(d, ax, y, 0)
         elif item == 'OK':
@@ -2675,7 +2733,7 @@ class _NameLevel:
             d = amyboard.display
             if full:
                 d.fill(0)
-                d.text('NAME PRESET', 0, EDIT_TITLE_Y, 255)
+                d.text('NAME PRESET', 0, EDIT_TITLE_Y, MENU_C_SEL)
                 self._draw_line(d)
                 self.full = False
                 menu._needs_clear = False
@@ -2687,6 +2745,115 @@ class _NameLevel:
                 amyboard.display_refresh()
         except Exception as e:
             _render_fault('_NameLevel.render', e)
+
+
+# ---------------------------------------------------------------------------
+# About. A static credits/version card, pushed on the menu stack like any other
+# level. It draws 1x text edge to edge (x=0) rather than through _MenuLevel,
+# because a menu ITEM row is indented 12px and 12px leading -- 14 usable chars
+# and 12px per line -- which cannot hold this text. Full width at CHAR_W=8 gives
+# 16 chars per line, and 11 rows at a 10px pitch plus two 7px block gaps end at
+# y=126 of 128.
+#
+# BOTH budgets are tight and BOTH are hand-set, so if you edit this text, re-run
+# tools/about_preview.py -- it renders the card at true 1x off this very code and
+# reports the extent plus any line over 16 chars. Over-long lines do not wrap;
+# they are silently clipped at the panel edge. An earlier draft kept every word
+# ("Version 1.0" and "2025_07_30" on their own rows, plus a "more info at"
+# label) and did fit -- at a 9px pitch, i.e. 1px of leading, which rendered as an
+# unreadable wall. The wording below is the version that buys real leading.
+# ---------------------------------------------------------------------------
+ABOUT_LINE_H = 10        # 8px glyph + 2px leading
+ABOUT_GAP    = 7         # extra pixels where a block gap ('' line) falls
+ABOUT_TOP_Y  = 0         # SAME y as a list page's title row (_MenuLevel.render starts
+                         # its title at 0), so the header does not hop when you click
+                         # in from the root -- both screens head with the word ARCTOR,
+                         # which made a 2px shift very visible. The grid header (y=1)
+                         # and name entry (EDIT_TITLE_Y=2) are each a pixel or two
+                         # lower; they are not reached from a same-titled screen.
+ABOUT_MAX_CH = DISPLAY_WIDTH // CHAR_W    # 16 -- the hard per-line character budget
+
+# Colours here are LEVELS 0-15, not 0-255 intensities -- see the COLOUR SCALE note
+# at DISPLAY_TEXT_COLOR. Confirmed legible on hardware down to level 1; 6 sits well
+# clear of that floor while reading obviously subordinate to the 15 lines.
+ABOUT_C_BRIGHT = 15      # the thing being credited
+ABOUT_C_DIM    = 6       # its label
+
+
+def _about_lines():
+    # (text, bright). '' starts a block gap instead of a row. Dim = the label,
+    # bright = the thing being credited, so the card scans without any rules.
+    # NB the version row is 'v1.0  2026_07_30' = exactly 16 chars: a two-digit
+    # minor ('v1.10') would push it over and lose the last date digit.
+    return (
+        (SKETCH_NAME, True),
+        ('v%s  %s' % (VERSION, VERSION_DATE), False),
+        ('', False),
+        ('designer:', False),
+        ('sawtoothwave', True),
+        ('modified from', False),
+        ('AMY code by', False),
+        ('bwhitman & dpwe', True),
+        ('', False),
+        # github.com/sawtoothwave/amyboard/blob/main/arctor.md -- the /blob/main/
+        # form, so it resolves in a browser as typed rather than 404ing. Wrapped at
+        # '/' boundaries to stay inside the 16-char budget; still 4 rows, so the
+        # card's height is unchanged. Concatenating these four in order must
+        # reproduce the URL exactly -- grid_sim asserts that.
+        ('github.com/', True),
+        ('sawtoothwave/', True),
+        ('amyboard/blob/', True),
+        ('main/arctor.md', True),
+    )
+
+
+def _about_extent():
+    # Bottom-most pixel row the card occupies; > 128 means the text no longer
+    # fits and something has to be cut.
+    y = ABOUT_TOP_Y
+    for text, _ in _about_lines():
+        y += ABOUT_GAP if not text else ABOUT_LINE_H
+    return y
+
+
+class _AboutLevel:
+    # Static: nothing here changes with input, so it paints once and then only
+    # repaints when the menu asks for a clear (returning from an overlay).
+    #
+    # ANY input dismisses it -- turn, click or hold alike. This is the one level
+    # that breaks the universal turn=scroll / click=in / hold=out model, and
+    # deliberately: there is nothing here to scroll and nothing to drill into, so
+    # every gesture means the same thing ("I'm done reading"). A turn that did
+    # nothing would read as a hang on a screen that gives no other feedback.
+    __slots__ = ('title',)
+
+    def __init__(self):
+        self.title = 'ABOUT'      # SketchMenu/grid_sim identify levels by .title
+
+    def handle(self, menu, delta, click, back):
+        if delta or click or back:
+            menu._pop()
+
+    def render(self, menu):
+        if not (menu.dirty or menu._needs_clear):
+            return
+        menu.dirty = False
+        try:
+            d = amyboard.display
+            d.fill(0)
+            y = ABOUT_TOP_Y
+            for text, bright in _about_lines():
+                if not text:
+                    y += ABOUT_GAP
+                    continue
+                d.text(text[:ABOUT_MAX_CH], 0, y,
+                       ABOUT_C_BRIGHT if bright else ABOUT_C_DIM)
+                y += ABOUT_LINE_H
+            menu._needs_clear = False
+            menu._panel_dirty_to = 128     # the card owns the full screen
+            _begin_flush(0, 127)
+        except Exception as e:
+            _render_fault('_AboutLevel.render', e)
 
 
 # ---------------------------------------------------------------------------
@@ -2775,11 +2942,25 @@ GRID_BAR_H = 6          # bar height (px), thinned from 8 -> fewer lit OLED pixe
                         # cut the current-coupled audio noise. Fill is GRID_BAR_H-4
                         # tall (2px here); lower further if more reduction is needed.
 
-# Grid grayscale levels (0-255), in one place so brightness can be tuned by ear.
-# Bright OLED pixels draw more current, which couples audible noise into the audio
-# path (its tone shifts as the highlight lights up). Currently at the original
-# bright values -- first noise lever is thinning the bars (above); dimming these is
-# the next lever if needed.
+# Grid colours. !! THESE ARE STILL WRITTEN ON THE 0-255 SCALE AND SO DO NOT MEAN
+# WHAT THEY SAY !! The framebuf masks to the low nibble (see the COLOUR SCALE note
+# near DISPLAY_TEXT_COLOR), so the level each one actually paints is `value & 15`:
+#
+#   LABEL    215 ->  7     BAR_OUT  110 -> 14     BAR_FILL 205 -> 13
+#   TICK     150 ->  6     CURSOR   255 -> 15     KNOCK    255 -> 15
+#   SECT     200 ->  8     SECT_RUL  70 ->  6     HDR_NAME 210 ->  2
+#   HDR_VAL  255 -> 15     PAGE_OFF  20 ->  4
+#
+# Two of those invert their intent: the "unfocused bar outline" (14) paints BRIGHTER
+# than the "unfocused bar fill" (13), and the header group name (2) is far dimmer
+# than "dimmer than its live value" implies. Left as-is ON PURPOSE -- rewriting 11
+# constants changes how the instrument looks on every screen, which is a design call
+# to make deliberately with eyes on the panel, not a bug fix to slip into a rename.
+# When that happens: pick levels 0-15 directly, and delete this block comment.
+#
+# Original rationale, still valid: bright OLED pixels draw more current, which
+# couples audible noise into the audio path (its tone shifts as the highlight lights
+# up). First noise lever is thinning the bars (above); dimming these is the next.
 GRID_C_LABEL    = 215   # unfocused cell label
 GRID_C_BAR_OUT  = 110   # unfocused bar outline
 GRID_C_BAR_FILL = 205   # unfocused bar fill
@@ -3440,15 +3621,19 @@ class SketchMenu:
 
     def _root(self):
         # Preset actions live directly on the root now (no "Presets" submenu).
-        return _MenuLevel('POLYSYNTH', [
+        return _MenuLevel(SKETCH_NAME, [
             ('Param control', self._open_params),
             ('Save as preset', self._start_save),
             ('Load preset', self._open_load),
             ('Scan presets', self._open_scan),
             ('Delete preset', self._open_delete),
             ('Display mode', self._open_display),
+            ('About', self._open_about),
             ('Resume playing', self.close),
         ])
+
+    def _open_about(self):
+        self._push_level(_AboutLevel())
 
     def _open_params(self):
         # First level of Param Control: the categories (Osc/Filter/Env/LFO/FX).
@@ -3500,7 +3685,7 @@ class SketchMenu:
     def _commit_name(self, lvl):
         # Called when the user clicks OK. Empty names are ignored (stay editing).
         # Otherwise confirm: "SAVE?" (or "OVERWRITE?" if the name already exists)
-        # with Yes/No. Yes saves + returns to the polysynth menu; No -- or a hold --
+        # with Yes/No. Yes saves + returns to the Arctor menu; No -- or a hold --
         # pops back to the name-entry screen. A new name at the cap is blocked.
         name = lvl.name.strip()
         if not name:
@@ -3526,7 +3711,7 @@ class SketchMenu:
             ]))
 
     def _do_save(self, name):
-        # Persist, flash a "PRESET SAVED!" toast, and drop to the main polysynth
+        # Persist, flash a "PRESET SAVED!" toast, and drop to the main Arctor
         # menu (the toast auto-dismisses to it -- see render()). On success this
         # name becomes the session's "current" preset (the Overwrite target).
         global _current_preset_name
@@ -3662,7 +3847,7 @@ class SketchMenu:
             d.fill(0)
             w = len(msg) * CHAR_W
             sx = clamp((DISPLAY_WIDTH - w) // 2, 0, max(0, DISPLAY_WIDTH - w))
-            d.text(msg, sx, 60, 255)
+            d.text(msg, sx, 60, MENU_C_SEL)
             self._panel_dirty_to = 128   # toast owned the full screen
             _begin_flush(0, 127)
         except Exception as e:

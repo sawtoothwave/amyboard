@@ -9,15 +9,43 @@ This project provides a few different pieces of code designed to add some cool f
 
 ## Individual AMY instrument sketches
 
-- **Polysynth:** A 2-oscillator, analog-style, 6-voice polysynth with MIDI CC control over all critical functions. By default, Polysynth is preconfigured to "just work" with a [screen](https://www.adafruit.com/product/5297?gad_source=1&gad_campaignid=23986111167&gbraid=0AAAAADx9JvS2lB1lX_Ft_-n0t6ivycl2x&gclid=CjwKCAjw6rfSBhAqEiwA_yocptUVmj3G4L9UGqaPX8xZzAYFERMJMN3gjPKZAO3HPVFmfF6dC9cI-RoCM88QAvD_BwE) and [click encoder](https://www.adafruit.com/product/5880) (connected via I2C) for navigation, parameter control, and saving/loading presets. If all you have is an AMYboard with none of those I2C peripheral parts, you can still use the synthesizer and control its parameters using an external MIDI controller (more details **HERE**).
+- **Arctor:** A 2-oscillator, analog-style, 6-voice polysynth with MIDI CC control over all critical functions. By default, Arctor is preconfigured to "just work" with a [screen](https://www.adafruit.com/product/5297?gad_source=1&gad_campaignid=23986111167&gbraid=0AAAAADx9JvS2lB1lX_Ft_-n0t6ivycl2x&gclid=CjwKCAjw6rfSBhAqEiwA_yocptUVmj3G4L9UGqaPX8xZzAYFERMJMN3gjPKZAO3HPVFmfF6dC9cI-RoCM88QAvD_BwE) and [click encoder](https://www.adafruit.com/product/5880) (connected via I2C) for navigation, parameter control, and saving/loading presets. If all you have is an AMYboard with none of those I2C peripheral parts, you can still use the synthesizer and control its parameters using an external MIDI controller (more details **HERE**).
 - **More to come (maybe).**
+
+### Running Arctor
+
+`sketches/arctor.py` is **self-contained** — one file, no other part of this repo
+required at runtime. It imports only firmware modules (`amy`, `amyboard`, `midi`)
+and the standard library. Two ways to install it, and it detects which by itself:
+
+| Copy it to | You get |
+|---|---|
+| `/user/sketches/arctor.py` | pick it from the onboard sketch loader; hold backs out to the global menu |
+| `/user/current/sketch.py` | boots straight into Arctor, no launcher; it reads the encoder itself |
+
+Both paths verified on hardware 2026-07-30. From this repo:
+`python deploy_auto.py --sketch sketches/arctor.py --activate`
+
+**Two things to know before you file a bug:**
+
+- **Firmware:** needs the AMYboard build of **2026-07-27 or later**. Portamento
+  (CC 34) uses AMY's per-oscillator `'m'` keyword, absent from older builds — on
+  those, Glide silently does nothing and everything else works. Check with
+  `import os; os.uname().version`.
+- **MIDI channel is fixed at 12** and there is no on-device picker. AMY auto-routes
+  MIDI channel N to synth N, and this instrument lives on synth 12. Changing it
+  means editing two coupled constants in the sketch (`SYNTH` and the CC filter),
+  which must agree.
+
+Presets and the selected display mode persist to `/user/arctor_presets.json` and
+`/user/arctor_settings.json`, both created on first save.
 
 
 
 
 ### Scrap content below
 
-- **`sketches/01_polysynth.py`** is the canonical instrument: a 2-oscillator (A/B)
+- **`sketches/arctor.py`** is the canonical instrument: a 2-oscillator (A/B)
   analog-style synth with 6-voice polyphony, a shared resonant filter (VCF
   envelope + key tracking), a VCA envelope, and a per-voice LFO routed to vibrato
   (global), PWM, filter cutoff and per-oscillator tremolo. Parameters update live
@@ -32,11 +60,11 @@ This project provides a few different pieces of code designed to add some cool f
   [docs/FIRMWARE_NOTES.md](docs/FIRMWARE_NOTES.md).)
 - **On-device control** via a rotary encoder + button (click in / hold out / turn
   to scroll): a slim global launcher plus each sketch's own menu — see
-  [docs/MENU.md](docs/MENU.md). The polysynth menu offers **Param Control** (edit
+  [docs/MENU.md](docs/MENU.md). The Arctor menu offers **Param Control** (edit
   all 28 synth parameters as 0-127 sliders), **Presets** (save / name / load /
   delete patches to flash), and a selectable, persisted OLED **display mode**
   ([docs/DISPLAY_MODES.md](docs/DISPLAY_MODES.md)); the mod wheel drives vibrato.
-  Run without the launcher, the polysynth reads its own encoder too, so it works
+  Run without the launcher, Arctor reads its own encoder too, so it works
   as a **self-contained single file**.
 - Additional synth-graph references live in `amy_patch_examples/` (notably
   `sketch_5osc_analog.py`).
@@ -60,8 +88,8 @@ This project provides a few different pieces of code designed to add some cool f
   readback. See `DEPLOYMENT_COMMAND.txt`. Typical loop:
 
   ```
-  python deploy_auto.py --sketch sketches/01_polysynth.py            # deploy + verify
-  python deploy_auto.py --sketch sketches/01_polysynth.py --activate # deploy + boot into it
+  python deploy_auto.py --sketch sketches/arctor.py            # deploy + verify
+  python deploy_auto.py --sketch sketches/arctor.py --activate # deploy + boot into it
   ```
 
 

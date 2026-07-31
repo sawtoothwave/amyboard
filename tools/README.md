@@ -1,6 +1,6 @@
 # tools/
 
-Dev tooling for the sketches (mostly polysynth; `triggerbox_sim.py` covers the
+Dev tooling for the sketches (mostly Arctor; `triggerbox_sim.py` covers the
 triggerbox). Nothing here ships to the board — these are host-side checks and a
 display harness. (Deploy scripts live at the repo root:
 `deploy_auto.py`, `board_serial.py`, `deploy_wifi.py`.)
@@ -14,7 +14,7 @@ reaches the board. `--no-check` skips the gate; don't (see `docs/AGENTS.md`).
 Run it by hand any time:
 
 ```sh
-python3 tools/arity_check.py                       # defaults to sketches/01_polysynth.py
+python3 tools/arity_check.py                       # defaults to sketches/arctor.py
 python3 tools/arity_check.py wrapper_sketch.py
 ```
 
@@ -48,6 +48,19 @@ python3 -m venv venv && ./venv/bin/pip install pillow
 Writes one true 128×128 PNG per group per page, a `hover_cc.png` showing the hover CC
 reveal on its worst case (the widest CC number, in an edge cell with neighbours), plus
 a `sheet.png` contact strip.
+## `about_preview.py` — render the About card offline at 128×128
+
+```sh
+./venv/bin/python tools/about_preview.py           # -> tools/preview_out/about.png
+```
+
+Same fidelity contract as `grid_preview.py` (real code, real font, real greys). The
+card is hand-wrapped to **16 characters** and packed to **126 of 128 pixel rows**, and
+neither budget is enforced at runtime — an over-long line is silently clipped at the
+panel edge and an over-tall card just runs off the bottom. This prints the extent and
+names any line over budget, so **run it after editing the About text or `VERSION`**.
+`tools/grid_sim.py` asserts both budgets too, so a deploy gate catches it either way.
+
 Needs Pillow; nothing else. Iterate on layout here rather than burning ~20s deploy
 cycles — and, more to the point, **look at it before believing arithmetic**. It has
 already caught a spacing bug that a clean-looking calculation missed.
@@ -83,7 +96,7 @@ matches fewer rows than the table holds.
 ## `grid_sim.py` — run the real menu code on the host
 
 ```sh
-python3 tools/grid_sim.py                          # defaults to sketches/01_polysynth.py
+python3 tools/grid_sim.py                          # defaults to sketches/arctor.py
 ```
 
 Exits non-zero on failure. Stubs `amy` / `amyboard` / `midi` (and adds MicroPython's

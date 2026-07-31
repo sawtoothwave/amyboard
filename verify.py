@@ -29,7 +29,7 @@ from board_serial import BoardSerialSession, detect_port
 # the LAUNCHER (wrapper_sketch.py), not a sketch. So --sketch is almost always
 # wrapper_sketch.py. It is REQUIRED: it used to default to a root sketch.py, a
 # leftover from before the launcher existed (back when /user/current/sketch.py WAS
-# the polysynth). That default compared the launcher against an old synth and could
+# Arctor). That default compared the launcher against an old synth and could
 # never match. Sketches themselves live in /user/sketches/ and are verified by
 # deploy_auto.py at deploy time.
 BOARD_BOOT_FILE = '/user/current/sketch.py'

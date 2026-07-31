@@ -5,11 +5,11 @@ read but not write the large exFAT SD card, so flash is the canonical, directly
 writable location. The wrapper launcher loads from /user/sketches first.
 
 Deploy a sketch to flash and verify it byte-for-byte:
-    python deploy_auto.py --sketch sketches/01_polysynth.py
-  -> writes /user/sketches/01_polysynth.py
+    python deploy_auto.py --sketch sketches/arctor.py
+  -> writes /user/sketches/arctor.py
 
 Deploy AND boot straight into it (fast iteration loop):
-    python deploy_auto.py --sketch sketches/01_polysynth.py --activate
+    python deploy_auto.py --sketch sketches/arctor.py --activate
   -> also sets /user/launcher_state to the sketch and resets the board
 
 (Re)deploy the global wrapper launcher (the firmware boot file). Rarely needed:

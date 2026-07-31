@@ -1,4 +1,4 @@
-"""Render the polysynth knob grid offline at TRUE 128x128.
+"""Render Arctor's knob grid offline at TRUE 128x128.
 
 Fidelity:
   - geometry: exact. We exec the sketch's real _grid_layout/_draw_grid_* against a
@@ -15,7 +15,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'sketches', 'polysynth.py')
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'sketches', 'arctor.py')
 src = open(SRC).read()
 
 W = H = 128
@@ -41,8 +41,22 @@ for fname, end in (('_grid_layout', '\ndef _draw_grid_section'),
 
 
 def q(c):
-    """Panel is 4-bit: keep the top nibble, expand back to 0..255 for viewing."""
-    return (int(c) >> 4) * 17
+    """Quantise a colour the way the BOARD does, then expand for viewing.
+
+    MicroPython's GS4_HMSB framebuf masks the colour to its LOW nibble
+    (`col & 0x0f`) -- colour here is a 0..15 level, not a 0..255 intensity.
+    VERIFIED on hardware 2026-07-30 by drawing text at a spread of values and
+    reading the nibbles back out of `display._hw.buffer`: 255 -> 15, 110 -> 14,
+    244 -> 4, 215 -> 7, 20 -> 4.
+
+    This used to take the TOP nibble (`c >> 4`), which is what a 0..255 intensity
+    would imply and is wrong. That single line is why every preview this project
+    ever rendered showed tones the panel was not drawing -- notably the About
+    card's "dim" 110, which previewed as a mid-grey but renders one step off white.
+    Any constant above 15 is a bug at the call site; the mask hides it, so the
+    assert does not fire on it -- see the note at ABOUT_C_DIM in the sketch.
+    """
+    return (int(c) & 0x0F) * 17
 
 
 class FakeFB:
@@ -160,8 +174,10 @@ def render(group, cursor=0, editing_idx=None, page=0, reveal=False):
 if __name__ == '__main__':
     out = os.path.join(HERE, 'preview_out')
     os.makedirs(out, exist_ok=True)
+    # Clear only OUR stale PNGs -- a blanket wipe also deleted about_preview.py's
+    # card, so whichever tool ran second silently owned the directory.
     for f in os.listdir(out):
-        if f.endswith('.png'):
+        if f.endswith('.png') and not f.startswith('about'):
             os.remove(os.path.join(out, f))
     imgs = []
     for group in ('Osc', 'VCF', 'LFO', 'VCA', 'FX'):

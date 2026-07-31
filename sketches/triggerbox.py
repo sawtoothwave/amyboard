@@ -8,7 +8,7 @@
 #   sequencer, no patterns: notes in, samples out.
 #
 #   KITS: the eight pads and their tuning can be saved as a named kit in internal
-#   flash and recalled from the menu (modelled on the polysynth's presets). A kit
+#   flash and recalled from the menu (modelled on Arctor's presets). A kit
 #   stores sample PATHS, not audio, so loading one re-reads the card -- and a pad
 #   whose file has since moved comes back labelled '!name' rather than silently
 #   empty. base_note is NOT part of a kit: it belongs to your controller, not to
@@ -42,7 +42,7 @@
 import amy, amyboard, time, json, os, gc
 
 # --- Launcher integration ---------------------------------------------------
-# Identical contract to polysynth.py: this sketch always talks to a
+# Identical contract to arctor.py: this sketch always talks to a
 # "launcher-shaped" input object (the global `launcher`). It CONSUMES abstract
 # encoder events -- launcher.delta (detents), launcher.click (short press),
 # launcher.back (hold = pop one of our menu levels) -- and REPORTS
@@ -808,7 +808,7 @@ _last_browse = None     # last directory list_dir() walked (debug only)
 # the USB CDC; if no host is reading that port the buffer fills and the write
 # blocks -- and USB MIDI shares the same USB stack, so a stalled CDC write delays
 # note delivery while our Python sits there looking innocent. It also explains why
-# polysynth is clean: it does not print.
+# Arctor is clean: it does not print.
 #
 # So debug output goes to a RAM ring and is read over the REPL like everything
 # else. _dbg() allocates one string; that is the whole cost.
@@ -1051,7 +1051,7 @@ def slot_display(i):
 # key just takes its default) -- and a file that still carries scrubbed params
 # (decay/loop/reverse) just ignores those unknown keys.
 #
-# ONE spec table drives everything (like polysynth's PARAMS): the engine wiring,
+# ONE spec table drives everything (like Arctor's PARAMS): the engine wiring,
 # the editor UI, value clamping, and the on-screen formatting all read from here,
 # so a param is defined in exactly one place. Each entry is
 #   (key, label, default, lo, hi, step, formatter)
@@ -1139,7 +1139,7 @@ def save_slot_paths():
 
 # ---------------------------------------------------------------------------
 # Kits. A named snapshot of the whole box -- which sample sits on each pad and how
-# it is tuned -- saved to internal flash. Modelled directly on the polysynth's
+# it is tuned -- saved to internal flash. Modelled directly on Arctor's
 # presets (_load_presets / _save_preset / _sorted_presets over there), including
 # the write-protected virtual entry at the top of the Load list, so the two
 # sketches behave identically under the same gestures.
@@ -1187,7 +1187,7 @@ def _write_kits():
     #
     # SYNCHRONOUS, unlike the settings file's deferred writes: saving or deleting a
     # kit is an explicit menu action you navigated to, which is exactly the case the
-    # user's tolerance model calls fine to block on. (The polysynth's _write_presets
+    # user's tolerance model calls fine to block on. (Arctor's _write_presets
     # is the same.) If kits ever get written from somewhere that ISN'T an explicit
     # action, that decision needs revisiting -- this file is bigger than settings.
     try:
@@ -1250,7 +1250,7 @@ def _empty_kit_entry():
 
 def _sorted_kits():
     # Saved kits in display order: alphabetical, case-insensitive (so 'brushes' and
-    # 'Brushes' sort together), matching the polysynth's preset lists.
+    # 'Brushes' sort together), matching Arctor's preset lists.
     return sorted(_kits, key=lambda k: k.get('name', '').lower())
 
 
@@ -1584,7 +1584,7 @@ def init_engine():
 # the panel's ~240ms full refresh can't keep up with even a slow drum part, so the
 # flash was dropped; the monitor is now a static slot map, redrawn only on change.)
 # ---------------------------------------------------------------------------
-# Display infrastructure. Lifted from polysynth.py: all drawing happens from
+# Display infrastructure. Lifted from arctor.py: all drawing happens from
 # loop() -- never from the MIDI callback -- and is fully wrapped so a display
 # fault can never disturb audio/MIDI.
 # ---------------------------------------------------------------------------
@@ -1672,9 +1672,9 @@ def _push_rows(y0, y1):
 # Two things follow. First, display_refresh() is a real full blit (drawing first
 # does not change its cost -- that is the check that proves it is not just skipping
 # a clean framebuffer), and at ~3MB/s it is clearly SPI, not the 400kHz I2C every
-# comment in this file and polysynth assumed. Second, WINDOWING IS A PESSIMIZATION
+# comment in this file and Arctor assumed. Second, WINDOWING IS A PESSIMIZATION
 # HERE: our Python-level write_data is ~8x slower for 12 rows than the firmware's
-# blit is for all 128. Polysynth windows every push and caps rows-per-refresh to
+# blit is for all 128. Arctor windows every push and caps rows-per-refresh to
 # protect its note timing; do not copy that here without re-measuring, and note its
 # own 19ms/band figure agrees with our 24ms -- what it never compared against was
 # display_refresh(). See [[panel-is-fast-flush-unneeded]].
@@ -1767,7 +1767,7 @@ def _show(y0=0, y1=127):
     #   bus, and the firmware blocks on it before calling loop() again. The gap log
     #   caught exactly that: 184-193ms windows where we were NOT CALLED, our own
     #   code accounting for 6-8ms of them, every one on a tick that had rendered.
-    #   8192 bytes at 400kHz is ~190ms. Polysynth budgets the same figure and only
+    #   8192 bytes at 400kHz is ~190ms. Arctor budgets the same figure and only
     #   ever pushes changed rows, which is why it stays smooth.
     #
     # An earlier bench "proved" a full blit cost 3ms and I deleted the windowing on
@@ -1883,7 +1883,7 @@ MON_ROWS     = 4            # rows per column (NUM_SLOTS split across 2 columns)
 class DisplayMode:
     # What the panel shows while you are PLAYING. (The menu owns the screen
     # whenever it is open; these only ever run in the gaps.) Ported from
-    # polysynth.py's DisplayMode so both sketches pick a mode the same way, and
+    # arctor.py's DisplayMode so both sketches pick a mode the same way, and
     # the choice persists across reboots.
     #
     # The contract is two methods and one rule: on_activate() means "the panel is
@@ -1942,7 +1942,7 @@ class SlotMonitor(DisplayMode):
 
 
 class ScreensaverMode(DisplayMode):
-    # A small dot drifting around the panel, ported from the polysynth's. Only the
+    # A small dot drifting around the panel, ported from Arctor's. Only the
     # band spanning the dot's old and new position is pushed per step, so the panel
     # bus is held for a couple of rows rather than a full frame -- the whole reason
     # a screensaver is safe to run under a playing instrument at all.
@@ -2084,7 +2084,7 @@ EDIT_DBLCLICK_MS = 400       # two clicks within this window = double-click (res
                              # default); a single click's exit is deferred this long
                              # so the second click has a chance to arrive
 
-# Encoder acceleration, ported from polysynth. The launcher hands us the detent
+# Encoder acceleration, ported from Arctor. The launcher hands us the detent
 # COUNT for this tick, so a fast spin already arrives as a bigger delta; we amplify
 # that so rapid turns cover ground while a single detent stays 1:1 for fine work.
 # Applied in the sketch (not the launcher) so it works wrapped AND standalone.
@@ -2102,7 +2102,7 @@ def _accel(delta):
     return delta * min(a, ENC_ACCEL_CAP)  # faster spins step quadratically further
 
 
-# Page-indicator brightness, matching polysynth's shared grid/menu marks so the two
+# Page-indicator brightness, matching Arctor's shared grid/menu marks so the two
 # sketches read identically. The panel is 4-bit (top nibble): the current page is a
 # full-brightness dash, every other page a level-1 dot -- the dimmest still-visible
 # step (below ~16 is fully off, which would hide the "another page exists" cue).
@@ -2111,7 +2111,7 @@ GRID_C_PAGE_OFF = 20     # inactive page: dim 2x2 dot
 
 
 def _draw_page_dots(d, y, page, npages):
-    # THE page indicator, ported verbatim from polysynth so the two read the same:
+    # THE page indicator, ported verbatim from Arctor so the two read the same:
     # current page = a bright full-width DASH, every other page = a dim 2x2 DOT,
     # laid out as a CENTRED row at `y`. Callers guard npages < 2.
     w, h, gap = 5, 2, 4
@@ -2157,7 +2157,7 @@ class _MenuLevel:
     # ~69 ms tick) -- the dominant term in menu lag; a two-row flush is ~2 bands.
     #
     # `accel` opts a level into encoder acceleration. It is OFF by default (short
-    # lists want 1:1, and polysynth keeps its own menu scroll 1:1 for the same
+    # lists want 1:1, and Arctor keeps its own menu scroll 1:1 for the same
     # reason); the long lists -- the sample browser, which can be hundreds of files,
     # and the 128-entry base-note picker -- turn it on so a fast spin gets there.
     __slots__ = ('title', 'items', 'idx', 'start', 'accel',
@@ -2268,7 +2268,7 @@ class _MenuLevel:
 class _SlotEditor:
     # The per-slot editor -- one screen owning a single slot. Unlike _MenuLevel
     # (a list of click-actions), its param rows are EDITABLE: click a param to enter
-    # edit mode, then (matching polysynth's grid editor) turn = adjust the value
+    # edit mode, then (matching Arctor's grid editor) turn = adjust the value
     # live and hear it immediately, single click = commit and exit, DOUBLE click =
     # reset that param to its default and keep editing, hold = exit WITHOUT saving
     # (back to the value the row had when editing began). Two plain action rows
@@ -2474,7 +2474,7 @@ class _SlotEditor:
 
 
 # ---------------------------------------------------------------------------
-# Name entry, ported from the polysynth (its _NAME_RING / _NameLevel) so naming a
+# Name entry, ported from Arctor (its _NAME_RING / _NameLevel) so naming a
 # kit here feels exactly like naming a preset there. One encoder, one row: turning
 # scrolls a character through the active slot, clicking commits it. The two special
 # tokens act instead of appending -- DEL backspaces, OK confirms -- and draw as
@@ -2530,7 +2530,7 @@ class _NameLevel:
             menu._pop()
             return
         if delta:
-            # Accelerated, like the polysynth's ring: one detent still steps one
+            # Accelerated, like Arctor's ring: one detent still steps one
             # character, a flick crosses the alphabet.
             self.sel = clamp(self.sel + _accel(delta), 0, len(_NAME_RING) - 1)
             menu.dirty = True
@@ -2671,7 +2671,7 @@ class SketchMenu:
     # -- Menu tree -----------------------------------------------------------
 
     def _root(self):
-        # Flat, like the polysynth's root: the kit actions sit directly on it rather
+        # Flat, like Arctor's root: the kit actions sit directly on it rather
         # than behind a 'Kits' submenu, so saving is two clicks from playing. Six
         # rows -- still one page, with room for Display mode when it lands.
         items = [
@@ -2959,12 +2959,12 @@ class SketchMenu:
         return go
 
     # -- Kit workflows -------------------------------------------------------
-    # Ported from the polysynth's preset menu (_start_save / _commit_name /
+    # Ported from Arctor's preset menu (_start_save / _commit_name /
     # _open_load / _delete_menu over there) so both sketches answer the same
     # gestures: Save offers Overwrite when a kit is already current, Load and Delete
     # list alphabetically, and anything destructive confirms first.
     #
-    # ONE difference, forced by the panel code: the polysynth puts the kit name in
+    # ONE difference, forced by the panel code: Arctor puts the kit name in
     # the confirm HEADER using embedded newlines, but this sketch's _draw_menu_row
     # draws a title with a single d.text(), which renders '\n' as a glyph rather
     # than a line break. So the name goes on an unclickable row instead --

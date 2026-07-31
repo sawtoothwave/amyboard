@@ -1,4 +1,4 @@
-"""Run the polysynth's REAL menu code on the host, with the board stubbed out.
+"""Run Arctor's REAL menu code on the host, with the board stubbed out.
 
 Why: some behaviour cannot be checked any other way. The grid's response to an
 incoming MIDI CC needs a MIDI source; the board has no REPL while the sketch is
@@ -19,7 +19,7 @@ import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'sketches', '01_polysynth.py')
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, 'sketches', 'arctor.py')
 
 PUSHES = []          # (kind, x0, x1, y0, y1) recorded per panel write
 
@@ -103,7 +103,7 @@ def _install_stubs():
 
 def load(path=SRC):
     _install_stubs()
-    ns = {'__name__': 'polysynth_sim'}
+    ns = {'__name__': 'arctor_sim'}
     exec(compile(open(path).read(), path, 'exec'), ns)
     return ns
 
@@ -275,6 +275,158 @@ def preset_apply_checks(ns):
           'previous patch' % (len(set(seen)), len(PARAMS)))
 
 
+def colour_scale_checks(ns):
+    """Colour constants must be LEVELS 0-15, not 0-255 intensities.
+
+    The GS4_HMSB framebuf masks colour with `col & 0x0f`, so a 0-255 value renders
+    at `value & 15` and the mask hides the mistake completely -- 255 works by luck
+    (255 & 15 == 15) while 110 lands on 14, one step off white. That is what made
+    the About card and the menu list read as flat blocks, and nothing caught it:
+    the board cannot be eyeballed from a test, and grid_preview.py was masking the
+    TOP nibble, so its PNGs showed tones the panel never drew. This check is the
+    tripwire that would have.
+    """
+    print('\n--- Colour scale (0-15 levels)')
+    GRID_EXEMPT = ('GRID_C_LABEL', 'GRID_C_BAR_OUT', 'GRID_C_BAR_FILL', 'GRID_C_TICK',
+                   'GRID_C_CURSOR', 'GRID_C_KNOCK', 'GRID_C_SECT', 'GRID_C_SECT_RUL',
+                   'GRID_C_HDR_NAME', 'GRID_C_HDR_VAL', 'GRID_C_PAGE_OFF')
+    bad = [(k, v) for k, v in ns.items()
+           if isinstance(v, int) and not isinstance(v, bool)
+           and (k.endswith('_COLOR') or '_C_' in k)
+           and k not in GRID_EXEMPT and not 0 <= v <= 15]
+    check(not bad, 'every colour constant is a 0-15 level (offenders: %s)' % (bad or 'none'))
+
+    # The grid block is knowingly still on the old scale. Assert that it has not
+    # QUIETLY been half-converted -- a mix would be worse than either scale.
+    grid = [(k, ns[k]) for k in GRID_EXEMPT if k in ns]
+    check(all(v > 15 or v in (0, 255) or v == ns['GRID_C_PAGE_OFF'] for _, v in grid),
+          'the GRID_C_* block is still uniformly on the 0-255 scale (documented, '
+          'not yet re-tuned): %s' % [(k, v, v & 15) for k, v in grid])
+
+    check(ns['ABOUT_C_BRIGHT'] - ns['ABOUT_C_DIM'] >= 4,
+          'About bright/dim are >=4 levels apart (%d vs %d) -- the old 15-vs-14 gap '
+          'is what read flat' % (ns['ABOUT_C_BRIGHT'], ns['ABOUT_C_DIM']))
+    check(ns['MENU_C_SEL'] - ns['MENU_C_UNSEL'] >= 4,
+          'menu selected/unselected are >=4 levels apart (%d vs %d)'
+          % (ns['MENU_C_SEL'], ns['MENU_C_UNSEL']))
+    check(ns['ABOUT_C_DIM'] >= 1 and ns['MENU_C_UNSEL'] >= 1,
+          'neither dim level is 0 (level 0 is off; text is legible down to 1, '
+          'checked by eye on the panel 2026-07-30)')
+
+
+def flash_store_checks(ns):
+    """The two flash stores load, and degrade instead of failing a boot.
+
+    A malformed or missing store must never stop the synth coming up -- a board
+    that boots silent because one JSON went bad is far worse than one that boots
+    with no presets. Driven by swapping _read_json for a fake filesystem, so the
+    real logic runs.
+
+    This replaces an earlier pair of legacy-fallback checks. Up to 2026-07-30 the
+    sketch also read the pre-rename /user/polysynth_*.json when the current file
+    was absent, so a board running the old build kept its patch library across the
+    rename. That bridge was removed once the board's files were copied to the new
+    names; a board that never made the crossing will come up with no presets, its
+    old file still on flash under the old name.
+    """
+    print('\n--- Flash stores')
+    real_read = ns['_read_json']
+    P, S = ns['PRESETS_FILE'], ns['SETTINGS_FILE']
+
+    check('arctor' in P and 'arctor' in S and 'polysynth' not in P + S,
+          'both stores are on the arctor names (%s, %s)' % (P, S))
+    check(not any(k.startswith('_LEGACY') for k in ns),
+          'no legacy-path constants remain in the sketch')
+
+    def fake(fs):
+        ns['_read_json'] = lambda path: fs.get(path)
+
+    fake({P: [{'name': 'bass', 'cc': {'74': 11}}, {'name': 'pad', 'cc': {'74': 99}}]})
+    check([p['name'] for p in ns['_load_presets']()] == ['bass', 'pad'],
+          'saved presets load')
+
+    fake({})
+    check(ns['_load_presets']() == [] and ns['_load_settings']() == {},
+          'a fresh board loads empty, not a fault')
+
+    fake({P: {'not': 'a list'}, S: ['not', 'a dict']})
+    check(ns['_load_presets']() == [] and ns['_load_settings']() == {},
+          'a malformed store degrades to empty rather than crashing boot')
+
+    fake({P: [{'name': 'ok', 'cc': {'74': 1}}, {'bad': 'record'}, {'name': 5, 'cc': {}}]})
+    check([p['name'] for p in ns['_load_presets']()] == ['ok'],
+          'one bad record does not take the whole list down')
+
+    fake({S: {'display_mode': 'Screensaver', 'current_preset': 'agne'}})
+    check(ns['_load_settings']() == {'display_mode': 'Screensaver',
+                                     'current_preset': 'agne'},
+          'settings load (display mode + current preset survive a reboot)')
+
+    ns['_read_json'] = real_read
+
+
+def about_checks(ns):
+    """About: the static credits card.
+
+    Two things can silently break it and neither is visible from reading the
+    code. (1) The TEXT budget -- the card is hand-wrapped to 16 chars and packed
+    to 126 of 128 pixel rows, so an edit to the wording or to VERSION overflows
+    the panel or clips a line, and the board just draws it wrong. (2) The root
+    menu is now at exactly MENU_VISIBLE items, so adding one more paginates the
+    main menu (About would land alone on page 2). Both are caught here.
+    """
+    print('\n--- About')
+    SketchMenu = ns['SketchMenu']
+    AboutLevel = ns['_AboutLevel']
+
+    menu = SketchMenu()
+    menu.open()
+    labels = [lbl for lbl, _ in menu.cur.items]
+    check(labels.index('About') == labels.index('Resume playing') - 1,
+          'About sits directly above Resume playing on the root')
+
+    dict(menu.cur.items)['About']()             # open it the way a click does
+    check(isinstance(menu.cur, AboutLevel), 'clicking About pushes the card')
+
+    lines = ns['_about_lines']()
+    over = [t for t, _ in lines if len(t) > ns['ABOUT_MAX_CH']]
+    check(not over, 'every line fits the %d-char panel width (else clipped): %r'
+          % (ns['ABOUT_MAX_CH'], over))
+    ext = ns['_about_extent']()
+    check(ext <= 128, 'the card fits the panel vertically (%d of 128 px)' % ext)
+
+    # The URL is split across rows purely to fit 16 chars; the rows joined back
+    # together must still be the real link. A wrap that drops or duplicates a
+    # character produces a card that looks fine and sends people to a 404.
+    URL = 'github.com/sawtoothwave/amyboard/blob/main/arctor.md'
+    texts = [t for t, _ in lines]
+    start = texts.index('github.com/')
+    joined = ''.join(texts[start:])
+    check(joined == URL, 'the wrapped URL rows rejoin to the real link (got %r)' % joined)
+    check('/blob/main/' in joined,
+          'it is the /blob/main/ form, which resolves in a browser as typed')
+
+    PUSHES.clear()
+    menu.dirty = True
+    menu.cur.render(menu)
+    check(('FLUSH', 0, 127, 0, 127) in PUSHES,
+          'it paints as one full-screen flush (it owns the panel while up)')
+    check(menu._panel_dirty_to == 128,
+          'and declares the full screen dirty, so the NEXT level clears all of it')
+
+    # EVERY gesture dismisses -- the one level that breaks turn=scroll/click=in/
+    # hold=out, because there is nothing to scroll or drill into here.
+    for label, (delta, click, back) in (('a turn', (3, False, False)),
+                                        ('a reverse turn', (-1, False, False)),
+                                        ('a click', (0, True, False)),
+                                        ('a hold', (0, False, True))):
+        if not isinstance(menu.cur, AboutLevel):
+            dict(menu.cur.items)['About']()
+        menu.handle(delta, click, back)
+        check(menu.is_open and not isinstance(menu.cur, AboutLevel),
+              '%s dismisses the card back to the root' % label)
+
+
 def scan_checks(ns):
     """Scan Presets: the level that loads as you scroll.
 
@@ -349,7 +501,7 @@ def scan_checks(ns):
     check(menu.is_open and menu.cur.title == 'PARAM CONTROL',
           'a click opens Param Control on the scanned preset')
     check(not any(isinstance(l, ScanLevel) for l in menu.stack)
-          and menu.stack[0].title == 'POLYSYNTH' and len(menu.stack) == 2,
+          and menu.stack[0].title == 'ARCTOR' and len(menu.stack) == 2,
           'it REPLACES the scan level, sitting directly on the root (no trapdoor '
           'back into scanning on a hold)')
     check(writes == [('current_preset', landed)],
@@ -365,7 +517,7 @@ def scan_checks(ns):
 
     menu.handle(0, False, True)                 # hold: out of the grid...
     menu.handle(0, False, True)                 # ...out of Param Control
-    check(menu.cur.title == 'POLYSYNTH',
+    check(menu.cur.title == 'ARCTOR',
           'a hold out of Param Control lands on the root, exactly as it does when '
           'you enter it the normal way')
     check(writes == [('current_preset', landed)],
@@ -493,6 +645,9 @@ def main():
     hover_checks(ns)
     preset_apply_checks(ns)
     scan_checks(ns)
+    colour_scale_checks(ns)
+    flash_store_checks(ns)
+    about_checks(ns)
 
     print('\n%s' % ('ALL CHECKS PASSED' if not FAILED else 'FAILURES:\n  ' + '\n  '.join(FAILED)))
     return 1 if FAILED else 0

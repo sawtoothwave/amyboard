@@ -86,13 +86,13 @@ See [CC_MAPPING.md](CC_MAPPING.md) for complete MIDI CC assignments and default 
 
 ## AMYboard Sketch
 
-The AMYboard runs `sketches/01_polysynth.py` which:
+The AMYboard runs `sketches/arctor.py` which:
 1. Listens to MIDI CCs on channel 12
 2. Maps them to AMY synthesizer parameters live (no voice reset on change)
 3. Plays channel-12 notes on a 6-voice polyphonic synth
 4. Also supports CV1 (1V/oct pitch) and CV2 (gate) for monophonic CV play
 
-To deploy: `python deploy_auto.py --sketch sketches/01_polysynth.py` writes it to
+To deploy: `python deploy_auto.py --sketch sketches/arctor.py` writes it to
 internal flash (`/user/sketches/`), which the wrapper launcher loads from. See
 `DEPLOYMENT_COMMAND.txt`. (Sketches go to flash, not the SD card, which the board
 can read but not write.)
@@ -106,9 +106,9 @@ can read but not write.)
 
 ### Settings don't persist across power cycles
 1. Verify `/user/` directory exists on AMYboard
-2. Check for write permission issues in `sketches/01_polysynth.py`
+2. Check for write permission issues in `sketches/arctor.py`
 3. Look at `amyboard_state.json` on the device
 
 ### Wrong frequency mappings
-1. Edit the frequency range in `sketches/01_polysynth.py` function `cc_to_freq()`
+1. Edit the frequency range in `sketches/arctor.py` function `cc_to_freq()`
 2. Adjust default CC values in `e16-config/amyboard.json`

@@ -82,7 +82,7 @@ def check_file(path):
 
 
 def main(argv):
-    path = argv[1] if len(argv) > 1 else 'sketches/01_polysynth.py'
+    path = argv[1] if len(argv) > 1 else 'sketches/arctor.py'
     with open(path) as f:
         tree = ast.parse(f.read(), path)
     sigs = signatures(tree)

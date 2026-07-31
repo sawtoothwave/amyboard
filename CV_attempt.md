@@ -1,7 +1,7 @@
 # CV Input Attempt — Findings & Postmortem
 
 **Goal:** make the AMYboard's CV inputs usable as a 1V/oct pitch + gate input for
-the polysynth sketch (`sketches/01_polysynth.py`) — a headline use case for a
+the Arctor sketch (`sketches/arctor.py`) — a headline use case for a
 Eurorack module.
 
 **Outcome:** removed for now. After extensive iteration we could not make CV pitch

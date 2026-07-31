@@ -30,19 +30,19 @@
         - blank
 
 
-- polysynth menu
+- Arctor menu
     - param control
     <!-- click to display parameter list -->
         - parameter list
         <!-- click to display parameter list --> 
         - parameter list
-            <!-- display list of params, turn encoder to highlight param, click to select it for modification or hold to exit param control and return to polysynth menu -->
+            <!-- display list of params, turn encoder to highlight param, click to select it for modification or hold to exit param control and return to Arctor menu -->
             - modify parameter
         <!-- turn encoder to change parameter value; values update real-time as knob turns; click or hold to move up one level back to the parameter list -->
     - midi channel
         - 
     - save preset
         - [alphanumeric entry one character at a time: encoder scrolls through a-z (all lowercase, 0-9, space, delete; confirm saves the name]
-            <!-- if a user puts in the same name as an existing preset, display "overwrite?" prompt; click for yes, overwrites and returns to polysynth menu; hold cancels and returns to polysynth menu -->
+            <!-- if a user puts in the same name as an existing preset, display "overwrite?" prompt; click for yes, overwrites and returns to Arctor menu; hold cancels and returns to Arctor menu -->
     - load preset
         

@@ -16,7 +16,7 @@ bug is in this repo's code.
     settings, wifi.json). This is the normal way to update.
   - **esptool writing the whole image** (`esptool.py write_flash 0x0
     amyboard-full-AMYBOARD.bin`) — **WIPES `/user`.** The launcher,
-    `/user/sketches`, `polysynth_presets.json`, `triggerbox_kits.json` and the rest
+    `/user/sketches`, `arctor_presets.json`, `triggerbox_kits.json` and the rest
     are all erased. Redeploy afterward (launcher to `/user/current/sketch.py`, then
     the sketch with `--activate`), and restore the JSON state files by hand.
   Reserve the full flash for actual recovery. An earlier version of this file said
@@ -128,7 +128,7 @@ roughly **1.5ms per pixel row**, so a 12px menu row is ~18ms and a full frame is
 - **Never defer the DRAWING**, only the pushing. Deferring draws is what made the
   triggerbox cursor appear to vanish mid-scroll: input kept moving it while the panel
   showed neither position.
-- polysynth has always done this (see its display header) and stays smooth; triggerbox
+- Arctor has always done this (see its display header) and stays smooth; triggerbox
   regressed by replacing it with full-frame blits on the strength of a return-time
   benchmark, and spent a session rediscovering the above.
 

@@ -4,7 +4,7 @@ All MIDI is received on **channel 12 only**. AMY maps synth number N to MIDI
 channel N, so the engine lives on synth 12 and auto-routes channel-12 note-on/off
 directly. `init_synth()` zeroes the voice count of every other synth (including
 the firmware's default synth on channel 1), so notes on any channel but 12 stay
-silent. Control Changes are handled in `sketches/01_polysynth.py` via
+silent. Control Changes are handled in `sketches/arctor.py` via
 `midi.add_callback(midi_cb)`, filtered to the same channel.
 
 **Notes require `grab_midi_notes=1`.** `init_synth()` sets
@@ -54,13 +54,13 @@ control surface.
 
 - Each CC updates only its own parameter live, so moving a control never resets
   voices or cuts held notes.
-- CC value ranges are implementation choices in `sketches/01_polysynth.py` and can be retuned
+- CC value ranges are implementation choices in `sketches/arctor.py` and can be retuned
   without changing the frozen CC assignments.
 - Onboard OLED + encoder navigation is implemented (see [MENU.md](MENU.md) and
   [DISPLAY_MODES.md](DISPLAY_MODES.md)).
 - On-device **Param Control** edits all 47 CC-mapped parameters directly from the
   encoder — no control surface needed. It is grouped into Osc / VCF / LFO / VCA / FX,
-  with VCF and VCA each led by an **Env** sub-menu (polysynth menu → Param Control;
+  with VCF and VCA each led by an **Env** sub-menu (Arctor menu → Param Control;
   see [MENU.md](MENU.md)).
 - Implemented: master effects (EQ / chorus / echo / reverb), master output level,
   velocity→filter and velocity→amp depth, per-envelope curve shapes, mod-wheel

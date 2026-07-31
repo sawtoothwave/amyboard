@@ -26,7 +26,7 @@ Controllers → MIDI → AMYboard → Audio Output
 
 ### Core Components
 
-**sketches/01_polysynth.py (Main Control Loop)**
+**sketches/arctor.py (Main Control Loop)**
 - The canonical "last good" instrument implementation; future enhancements build on it. (Root `sketch.py` is a scratch staging copy used while deploying/experimenting.)
 - A 2-oscillator (A/B) analog-style synth with 6-voice polyphony, matching the CC map in [docs/CC_MAPPING.md](CC_MAPPING.md).
 - Per-voice oscillator graph: a `SILENT` filter-head (osc 0) chained to Osc A (osc 1) chained to Osc B (osc 2), plus a silent per-voice LFO (osc 3) used as the `mod_source` for the head, Osc A and Osc B. AMY sums A and B into the silent head, then applies one shared filter and the VCA envelope to that sum, so the filter affects both oscillators equally.
@@ -36,14 +36,14 @@ Controllers → MIDI → AMYboard → Audio Output
 - MIDI channel-12 notes are auto-routed to synth 12 by AMY (synth number N == MIDI channel N); CCs are handled via `midi.add_callback(midi_cb)`, filtered to channel 12. CV1 provides 1V/oct monophonic pitch and CV2 a gate, polled from `loop()`.
 - To stay channel-12-only, `init_synth()` zeroes the voice count of every synth except 12, removing the default instrument the firmware allocates on synth 1 (channel 1); a voiceless synth cannot sound. It also sets `grab_midi_notes=1` on synth 12 — required for note forwarding on current firmware (see [FIRMWARE_NOTES.md](FIRMWARE_NOTES.md)). Channel is fixed at 12 for now (the on-device picker is deferred — see [MIDI_MAPPING.md](MIDI_MAPPING.md)).
 - Each CC updates only its parameter live, so turning a knob never resets voices or cuts off held notes.
-- Display is driven by a pluggable, sketch-owned display mode selectable from the on-device menu (see [DISPLAY_MODES.md](DISPLAY_MODES.md)); the selection persists to `/user/polysynth_settings.json`.
-- **Param Control**: an on-device editor (polysynth menu → Param Control) exposes every synth parameter as a cell in a per-group **knob grid** (Osc / VCF / LFO / VCA / FX), 4 columns wide and cut into labelled sections. A click selects a cell and turning adjusts it live with encoder acceleration, driving the same CC path as the E16 knobs; double-click resets to the patch default, hold reverts; a selected cell reflects incoming MIDI for that CC. See [MENU.md](MENU.md) and [CC_MAPPING.md](CC_MAPPING.md).
+- Display is driven by a pluggable, sketch-owned display mode selectable from the on-device menu (see [DISPLAY_MODES.md](DISPLAY_MODES.md)); the selection persists to `/user/arctor_settings.json`.
+- **Param Control**: an on-device editor (Arctor menu → Param Control) exposes every synth parameter as a cell in a per-group **knob grid** (Osc / VCF / LFO / VCA / FX), 4 columns wide and cut into labelled sections. A click selects a cell and turning adjusts it live with encoder acceleration, driving the same CC path as the E16 knobs; double-click resets to the patch default, hold reverts; a selected cell reflects incoming MIDI for that CC. See [MENU.md](MENU.md) and [CC_MAPPING.md](CC_MAPPING.md).
 - **Self-contained**: the sketch reads its own encoder when run without the wrapper, so it works as a single shareable file (full menu + parameter editor) with or without the launcher.
 
 **wrapper_sketch.py (Global launcher)**
 - The permanent boot program (deployed to `/user/current/sketch.py`); it shows a global menu or runs a chosen sketch and drives that sketch's `loop()`.
 - The global menu is an **in-memory overlay** over the running sketch: `Resume` returns instantly with no audio dropout; only `Load Sketch` resets the board (required to tear down the previous sketch's MIDI callback).
-- The launcher is the encoder reader **when it is present** and feeds each sketch abstract input (`launcher.delta/.click/.back`) while reading `launcher.menu_depth`. This is what lets one universal gesture — click in / hold out / turn scroll — span both the launcher and each sketch's own menu. A sketch run **without** the launcher (copied on as its own boot file) can read the encoder itself instead — the polysynth does, so it stays fully usable as a single file. The two never read the encoder at once. Full details in [MENU.md](MENU.md).
+- The launcher is the encoder reader **when it is present** and feeds each sketch abstract input (`launcher.delta/.click/.back`) while reading `launcher.menu_depth`. This is what lets one universal gesture — click in / hold out / turn scroll — span both the launcher and each sketch's own menu. A sketch run **without** the launcher (copied on as its own boot file) can read the encoder itself instead — Arctor does, so it stays fully usable as a single file. The two never read the encoder at once. Full details in [MENU.md](MENU.md).
 
 **OXI E16 Configuration**
 - `e16-config/amyboard.json`: Source definition (pages 4, 8, 12)
@@ -70,6 +70,6 @@ The CC map is in [docs/CC_MAPPING.md](CC_MAPPING.md); the e16 page/knob layout i
 
 Prioritizes clarity and simplicity:
 - Keep the CC baseline fixed unless intentionally revised
-- Treat `sketches/01_polysynth.py` as the canonical baseline and extend it rather than rebuilding from scratch
+- Treat `sketches/arctor.py` as the canonical baseline and extend it rather than rebuilding from scratch
 - Prefer explicit Python-defined synth graphs over hidden autogenerated patch state
 - Keep deployment verification separate from synth experimentation

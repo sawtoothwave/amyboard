@@ -4,7 +4,7 @@ The AMYboard is navigated with a single **rotary encoder + push button** (Adafru
 Seesaw, front-panel I2C). There are two menu layers:
 
 - the **global launcher menu** (owned by `wrapper_sketch.py`), and
-- each sketch's **own menu** (e.g. the polysynth's, in `sketches/01_polysynth.py`).
+- each sketch's **own menu** (e.g. Arctor's, in `sketches/arctor.py`).
 
 This doc describes the implemented behavior. (`docs/MENU_SKETCHING.md` is the
 original hand-drawn design sketch and may differ.)
@@ -22,6 +22,12 @@ One rule everywhere: **click goes IN, hold backs OUT, turn scrolls.**
 From **playing** (no menu open) the three obvious gestures — **turn, click, or a
 short hold** — all open the sketch's own menu. Because hold auto-repeats,
 *continuing* to hold from playing escalates outward to the global menu.
+
+**The one documented exception** is Arctor's **About** card: *every* gesture —
+turn, click or hold — dismisses it. It is a dead end with nothing to scroll and
+nothing to drill into, so all three inputs mean the same thing ("done reading"),
+and a turn that did nothing would read as a hang on a screen with no other
+feedback. Any future read-only screen should follow the same rule.
 
 The back-out ladder, deepest → shallowest:
 
@@ -73,20 +79,27 @@ consume input via these fields, **not read the encoder directly** (one reader
 only) — *except* as a self-contained fallback when the wrapper is absent (see
 below); the two never read the encoder at the same time.
 
-## Polysynth menu (`sketches/01_polysynth.py`)
+## Arctor menu (`sketches/arctor.py`)
 
 Opened by turn/click/short-hold while playing. Structure:
 
 ```
-POLYSYNTH
+ARCTOR
 ├─ Param Control     → Osc · VCF · LFO · VCA · FX → each a sectioned knob grid
 ├─ Save As Preset    → Overwrite current · Save as New · Cancel  (see Presets)
 ├─ Load Preset       → INIT (built-in) + saved presets
 ├─ Scan Presets      → the same list, but scrolling LOADS as it goes (see Presets)
 ├─ Delete Preset     → saved presets (INIT is not deletable)
 ├─ Display Mode      → CC Monitor · Screensaver · Oscilloscope   (see DISPLAY_MODES.md)
+├─ About             → version + credits card; ANY gesture dismisses
 └─ Resume Playing
 ```
+
+> The root is now at **exactly `MENU_VISIBLE` (8) items**, so it still fits one
+> page with no page indicator. One more entry paginates the main menu — adding a
+> ninth item is a design decision, not a free change. `tools/grid_sim.py` asserts
+> this, and the same file asserts the About card's 16-char/128-px text budget;
+> `tools/about_preview.py` renders that card at true 1x for eyeballing.
 
 - **List scrolling** is 1:1 with encoder detents and **clamps at the ends** (no
   wrap-around — Scan Presets is the one exception, and deliberately so: there the
@@ -188,7 +201,7 @@ editing (shown knocked out / reverse-video):
 
 ### Presets
 
-Presets are named patch snapshots in internal flash (`/user/polysynth_presets.json`).
+Presets are named patch snapshots in internal flash (`/user/arctor_presets.json`).
 The actions live directly on the root menu (**Save As Preset / Load Preset / Scan
 Presets / Delete Preset**).
 
@@ -253,12 +266,12 @@ Presets / Delete Preset**).
 
 ### Standalone mode (no wrapper)
 
-The polysynth is a **self-contained single file**: dropped on a board as its own
+Arctor is a **self-contained single file**: dropped on a board as its own
 boot sketch (no `wrapper_sketch.py`), it drives its own menu. When the wrapper
 doesn't inject a `launcher`, the sketch builds an internal `_StandaloneLauncher`
 that reads the Seesaw encoder directly and fills the *same* `launcher.*` fields,
 so all the menu code is identical in both modes. It replicates the hold-ladder
-**minus the global-escape rung**: a hold at the polysynth root menu does nothing
+**minus the global-escape rung**: a hold at the Arctor root menu does nothing
 (there's no wrapper to escape to) — leave the root via **Resume Playing** or the
 idle timeout. The reader is only instantiated when the wrapper is absent, so the
 two never contend for the encoder, and wrapped behavior is unchanged.

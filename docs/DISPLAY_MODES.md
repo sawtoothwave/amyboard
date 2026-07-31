@@ -3,15 +3,15 @@
 The AMYboard OLED (firmware-owned `amyboard.display`) is driven by a pluggable
 **display mode**. Exactly one mode is active at a time and owns what the screen
 shows. The active mode is held in `active_display_mode` in
-`sketches/01_polysynth.py` and is switched with `set_display_mode()`.
+`sketches/arctor.py` and is switched with `set_display_mode()`.
 
-Modes are **selected on-device** via the polysynth menu → **Display Mode** (see
+Modes are **selected on-device** via the Arctor menu → **Display Mode** (see
 [MENU.md](MENU.md)), and the choice is **persisted** across reboots (see
 "Persistence" below).
 
 ## Architecture
 
-A display mode is a subclass of `DisplayMode` (in `sketches/01_polysynth.py`)
+A display mode is a subclass of `DisplayMode` (in `sketches/arctor.py`)
 implementing three methods:
 
 | Method | Called from | Responsibility |
@@ -81,17 +81,17 @@ yet" notice.
 - **Boot banner.** On power-up the firmware boot banner is left visible for
   `BOOT_CLEAR_MS` (3 s), then the panel is wiped once before the active mode takes
   over.
-- **Idle timeout.** While the polysynth menu is open, `MENU_IDLE_MS` (10 s) with
+- **Idle timeout.** While the Arctor menu is open, `MENU_IDLE_MS` (10 s) with
   no encoder input **suspends** it: the active display mode takes back the screen
   while the menu keeps its place, and the next encoder input resumes the menu
   where you left it (see [MENU.md](MENU.md)).
 - **Persistence.** Picking a mode writes its name to
-  `/user/polysynth_settings.json`; `_restore_display_mode()` re-selects it at boot
+  `/user/arctor_settings.json`; `_restore_display_mode()` re-selects it at boot
   (matched by name, so reordering the list is safe; unknown/missing → default).
 
 ## Adding a mode
 
-1. Subclass `DisplayMode` in `sketches/01_polysynth.py` and implement `on_cc`,
+1. Subclass `DisplayMode` in `sketches/arctor.py` and implement `on_cc`,
    `render`, and `on_activate`, following the audio-safety rules above (draw via
    `_push_rows()`, clear via `_begin_clear()`, keep `on_cc` cheap).
 2. Add an instance to the `DISPLAY_MODES` list — it appears in the Display Mode

@@ -30,10 +30,10 @@ sites. --no-check skips it; you almost never want to.
 
 Examples:
     # Deploy a sketch to flash and verify (does not auto-boot it):
-    python deploy_auto.py --sketch sketches/01_polysynth.py
+    python deploy_auto.py --sketch sketches/arctor.py
 
     # Deploy a sketch AND boot straight into it (sets launcher_state, resets):
-    python deploy_auto.py --sketch sketches/01_polysynth.py --activate
+    python deploy_auto.py --sketch sketches/arctor.py --activate
 
     # (Re)deploy the global wrapper launcher to the firmware boot file:
     python deploy_auto.py --sketch wrapper_sketch.py --dest /user/current/sketch.py --loaded launcher-loaded.py
@@ -281,7 +281,7 @@ def parse_args():
     parser.add_argument('--sketch', required=True,
                         help='Local file to deploy (REQUIRED -- no default: the board hosts '
                              'many sketches, so guessing one would silently deploy the wrong '
-                             'thing. e.g. sketches/01_polysynth.py)')
+                             'thing. e.g. sketches/arctor.py)')
     parser.add_argument('--dest', default=None,
                         help='Board destination path. Defaults to %s/<basename>.' % SKETCH_DEST_DIR)
     parser.add_argument('--loaded', default=None,
