@@ -205,7 +205,7 @@ In param control mode:
 
 Arctor comes with 7 "factory" presets. The first in the list is INIT, a "default" that can't be overwritten and serves as a jumping-off point for creating your own sounds. The other 6&mdash;`pad1`, `stab1`, `noisy pwm`, `cave 5ths`, `sawverb` and `bass1`&mdash;are ordinary presets that you can overwrite, rename or delete however you want. Arctor can hold a total of 32 presets, not counting INIT.
 
-n.b.: the 6 are only put on your board the first time you run Arctor, i.e. when there's no preset file there yet. That's deliberate: it means Arctor never re-adds a preset you deliberately deleted, and never quietly rebuilds them on top of a library you've spent time on. The flip side is that **deleting them is a one-way door from the board itself**&mdash;there's no "restore factory presets" in the menu. If you want them back, delete `/user/arctor_presets.json` from a computer and restart, or copy them out of [arctor.py](https://github.com/sawtoothwave/amyboard/blob/v1.0/sketches/arctor.py) (they're in the `FACTORY_PRESETS` block near the top).
+n.b.: The 6 factory presets are only put on your board the first time you run Arctor, i.e. when there's no preset file there yet. That's deliberate: it means Arctor never re-adds a preset you deliberately deleted, and never rebuilds them on top of a library you've spent time on. The flip side is that **deleting them is a one-way door from the board itself**&mdash;there's no "restore factory presets" in the menu. If you want them back, delete `/user/arctor_presets.json` from a computer and restart, or copy them out of [arctor.py](https://github.com/sawtoothwave/amyboard/blob/v1.0/sketches/arctor.py) (they're in the `FACTORY_PRESETS` block near the top).
 
 When you select **save as preset**, Arctor will capture the current state of every parameter and give you the opportunity to either overwrite your current preset or **save as** with a new name. A preset name can be up to 12 characters: a–z, 0–9, space. After the characters comes a ⌫ that deletes the previous letter, and a ✓ to confirm save. If you enter the name of an existing preset, Arctor will ask you if you want to overwrite the current preset. If you change your mind, hold the encoder to cancel out of the save flow at any point&mdash;your parameters will stay how you had them set; you just won't save them into memory.
 
@@ -251,7 +251,7 @@ Activates the selected display mode instantly, rather than waiting for the 15-se
 
 | Date | Updates |
 | --- | --- |
-| 2026_08_01 | Initial release. |
+| 2026_08_02 | Initial release. |
 
 ### CC Table
 
