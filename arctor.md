@@ -1,6 +1,6 @@
 # Arctor 
 
-Arctor is a 2-oscillator, analog-style, 6-voice polysynth (with MIDI CC control over all parameters) designed as a sketch for [AMYboard](https://www.amyboard.com).
+**Arctor is a 2-oscillator, analog-style, 6-voice polysynth (with MIDI CC control over all parameters) designed as a sketch for [AMYboard](https://www.amyboard.com).** It heavily leverages the stock AMYboard virtual analog synthesizer, but adds a few sound design features and quality-of-life functions.
 
 Arctor is free to [download](https://github.com/sawtoothwave/amyboard/blob/v1.0/sketches/arctor.py) and modify however you like. Read on for all the info!
 
