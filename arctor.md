@@ -69,6 +69,7 @@ I'm not affiliated with or able to troubleshoot AMYboard or AMY itself, so I can
 - CV I/O isn't yet implemented; SPDIF I/O isn't either, but I don't know if it'll ever be.
 - Arctor might hiccup for a moment upon saving/deleting a preset.
 - Setting pitch-based LFO destination depth often creates a "zippering" effect when you first engage it. Haven't been able to quite figure this out.
+- Arctor is extremely verbose, comment-laden code because it was developed by this guy named Claude who has a lot to say.
 
 ### Future improvements
 
