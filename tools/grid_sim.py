@@ -378,28 +378,136 @@ def flash_store_checks(ns):
     def fake(fs):
         ns['_read_json'] = lambda path: fs.get(path)
 
-    fake({P: [{'name': 'bass', 'cc': {'74': 11}}, {'name': 'pad', 'cc': {'74': 99}}]})
+    # Presets go through open() directly rather than _read_json, because only the
+    # open() call can tell "never saved" from "saved but corrupt" -- see
+    # factory_seed_checks. So they are faked at the file layer, not the JSON one.
+    fake_files(ns, {P: '[{"name": "bass", "cc": {"74": 11}}, '
+                       '{"name": "pad", "cc": {"74": 99}}]'})
     check([p['name'] for p in ns['_load_presets']()] == ['bass', 'pad'],
           'saved presets load')
 
-    fake({})
-    check(ns['_load_presets']() == [] and ns['_load_settings']() == {},
-          'a fresh board loads empty, not a fault')
-
-    fake({P: {'not': 'a list'}, S: ['not', 'a dict']})
+    fake_files(ns, {P: '{"not": "a list"}'})
+    fake({S: ['not', 'a dict']})
     check(ns['_load_presets']() == [] and ns['_load_settings']() == {},
           'a malformed store degrades to empty rather than crashing boot')
 
-    fake({P: [{'name': 'ok', 'cc': {'74': 1}}, {'bad': 'record'}, {'name': 5, 'cc': {}}]})
+    fake_files(ns, {P: '[{"name": "ok", "cc": {"74": 1}}, {"bad": "record"}, '
+                       '{"name": 5, "cc": {}}]'})
     check([p['name'] for p in ns['_load_presets']()] == ['ok'],
           'one bad record does not take the whole list down')
 
+    real_files(ns)
     fake({S: {'display_mode': 'Screensaver', 'current_preset': 'agne'}})
     check(ns['_load_settings']() == {'display_mode': 'Screensaver',
                                      'current_preset': 'agne'},
           'settings load (display mode + current preset survive a reboot)')
 
     ns['_read_json'] = real_read
+
+
+def fake_files(ns, files):
+    """Back the sketch's `open` with a dict of path -> file text.
+
+    Module globals shadow builtins, so assigning ns['open'] reaches the real
+    _load_presets without modifying it. A path that is NOT in the dict raises
+    OSError, exactly as flash does for a file that was never written -- and that
+    distinction is the whole factory-seed rule, so it has to be modelled here
+    rather than stubbed away at the JSON layer.
+    """
+    import io
+
+    def _open(path, mode='r'):
+        if path not in files:
+            raise OSError(2, 'ENOENT')
+        return io.StringIO(files[path])
+
+    ns['open'] = _open
+
+
+def real_files(ns):
+    ns.pop('open', None)          # back to the builtin
+
+
+def factory_seed_checks(ns):
+    """The six baked-in presets, and the three-way rule that seeds them.
+
+    The three branches are not interchangeable and each one protects something:
+    seeding on ABSENT is the out-of-the-box experience; NOT seeding on a valid
+    empty file is what makes "I deleted all six" stick across a reboot; NOT
+    seeding on a corrupt file is what stops one bad flash read from repopulating
+    factory presets over a real library, which the very next save would then
+    write over -- silent loss of everything the user made.
+
+    Also validates the generated block itself. tools/export_presets.py checks
+    this at export time, but the block is source that can be hand-edited, and a
+    stale CC fails silently: _apply_preset skips CCs it doesn't know, so the
+    preset just sounds subtly wrong.
+    """
+    print('\n--- Factory presets')
+    FACTORY = ns['FACTORY_PRESETS']
+    P = ns['PRESETS_FILE']
+    names = [p['name'] for p in FACTORY]
+
+    check(len(FACTORY) == 6, 'six factory presets are baked in (%d)' % len(FACTORY))
+    check(len(names) == len(set(names)), 'their names are unique: %s' % ', '.join(names))
+    check(len(FACTORY) <= ns['MAX_PRESETS'],
+          'they fit MAX_PRESETS (%d of %d, leaving %d free)'
+          % (len(FACTORY), ns['MAX_PRESETS'], ns['MAX_PRESETS'] - len(FACTORY)))
+
+    ring = set(ns['_NAME_RING'][:-2])
+    bad = [n for n in names if set(n) - ring]
+    check(not bad, 'every name is typeable on the device name editor (offenders: %s)'
+          % (bad or 'none'))
+    long = [n for n in names if len(n) > ns['PRESET_NAME_MAX']]
+    check(not long, 'every name is within the %d-char cap (offenders: %s)'
+          % (ns['PRESET_NAME_MAX'], long or 'none'))
+    check(not [n for n in names if n.upper() == ns['INIT_PRESET_NAME']],
+          'none of them is named INIT (that name is reserved for the built-in)')
+
+    known = {str(p.cc) for p in ns['PARAMS']}
+    stale = sorted({k for p in FACTORY for k in p['cc'] if k not in known})
+    check(not stale, 'every factory CC still exists in PARAMS (stale: %s)'
+          % (stale or 'none'))
+    partial = [p['name'] for p in FACTORY if set(p['cc']) != known]
+    check(not partial,
+          'each stores all %d params, so none loads with surprise defaults '
+          '(incomplete: %s)' % (len(known), partial or 'none'))
+    oor = [(p['name'], k, v) for p in FACTORY for k, v in p['cc'].items()
+           if not (isinstance(v, int) and 0 <= v <= 127)]
+    check(not oor, 'every value is an int 0-127 (offenders: %s)' % (oor or 'none'))
+
+    # -- the three-way rule -------------------------------------------------
+    fake_files(ns, {})                       # nothing on flash at all
+    seeded = ns['_load_presets']()
+    check([p['name'] for p in seeded] == names,
+          'ABSENT -> a fresh board comes up with the factory pack')
+
+    fake_files(ns, {P: '[]'})
+    check(ns['_load_presets']() == [],
+          'VALID BUT EMPTY -> stays empty; deleting all six sticks across a reboot')
+
+    fake_files(ns, {P: '{"truncated": '})
+    check(ns['_load_presets']() == [],
+          'CORRUPT -> empty, and NOT reseeded (a reseed here would be overwritten '
+          'by the next save, losing the real library)')
+
+    fake_files(ns, {P: '[{"name": "mine", "cc": {"74": 3}}]'})
+    check([p['name'] for p in ns['_load_presets']()] == ['mine'],
+          'a real library is used as-is, with no factory presets merged in')
+
+    # -- the seed is a copy, not the constant -------------------------------
+    fake_files(ns, {})
+    first = ns['_load_presets']()
+    first[0]['name'] = 'CLOBBERED'
+    first[0]['cc'][sorted(first[0]['cc'])[0]] = 999
+    second = ns['_load_presets']()
+    check(second[0]['name'] == names[0] and FACTORY[0]['name'] == names[0],
+          'editing a seeded preset does not rewrite the constant (still %r)'
+          % FACTORY[0]['name'])
+    check(second[0]['cc'] == FACTORY[0]['cc'],
+          'and the cc map is deep-copied, not shared')
+
+    real_files(ns)
 
 
 def about_checks(ns):
@@ -901,6 +1009,7 @@ def main():
     display_mode_checks(ns)
     colour_scale_checks(ns)
     flash_store_checks(ns)
+    factory_seed_checks(ns)
     about_checks(ns)
 
     print('\n%s' % ('ALL CHECKS PASSED' if not FAILED else 'FAILURES:\n  ' + '\n  '.join(FAILED)))

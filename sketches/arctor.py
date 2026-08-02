@@ -1249,8 +1249,133 @@ PRESET_NAME_MAX = 12      # longest preset name the name-entry screen accepts
 MAX_PRESETS = 32          # generous backstop so a runaway can't fill flash
 
 
+# --- Factory presets --------------------------------------------------------
+# Six starter sounds baked into the source, seeded onto a board that has never
+# saved a preset. Stored in the SAME shape as the flash file (string CC keys), so
+# seeding is a copy and _apply_preset needs no special case. Once seeded they are
+# ordinary presets: overwrite, rename and delete all work on them with zero
+# special-casing, and INIT is untouched and costs no slot (a new user has 26 of
+# MAX_PRESETS free).
+#
+# There is deliberately NO "restore factory presets" menu item. That keeps the
+# root menu at exactly 8 rows (no pagination), at the cost of making deletion a
+# one-way door without a computer -- an accepted trade, documented in arctor.md.
+#
+# The block below is GENERATED from a board's preset file by
+# tools/export_presets.py; edit the sounds on hardware and re-run it rather than
+# hand-tuning numbers here.
+
+# BEGIN GENERATED FACTORY PRESETS -- tools/export_presets.py
+FACTORY_PRESETS = (
+    {
+        'name': 'pad1',
+        'cc': {
+            '20': 60, '21': 40, '22': 64, '23': 127, '24': 70, '25': 43, '26': 64,
+            '27': 127, '28': 0, '29': 48, '30': 64, '31': 48, '32': 0, '33': 0, '34': 0,
+            '40': 0, '41': 34, '42': 25, '43': 31, '44': 38, '45': 48, '46': 48,
+            '71': 0, '72': 74, '73': 59, '74': 127, '75': 25, '76': 83, '77': 0,
+            '78': 0, '79': 127, '80': 0, '81': 0, '82': 68, '83': 0, '84': 47, '85': 64,
+            '86': 64, '87': 64, '90': 0, '91': 64, '92': 44, '95': 0, '96': 43,
+            '97': 40, '98': 0, '100': 0, '101': 108, '102': 64, '103': 99,
+        },
+    },
+    {
+        'name': 'stab1',
+        'cc': {
+            '20': 64, '21': 45, '22': 64, '23': 84, '24': 72, '25': 43, '26': 64,
+            '27': 85, '28': 0, '29': 48, '30': 121, '31': 47, '32': 0, '33': 0, '34': 0,
+            '40': 5, '41': 52, '42': 25, '43': 31, '44': 67, '45': 48, '46': 79,
+            '71': 73, '72': 79, '73': 0, '74': 42, '75': 60, '76': 83, '77': 0, '78': 0,
+            '79': 0, '80': 0, '81': 0, '82': 0, '83': 0, '84': 67, '85': 64, '86': 64,
+            '87': 64, '90': 32, '91': 64, '92': 44, '95': 32, '96': 43, '97': 11,
+            '98': 84, '100': 0, '101': 108, '102': 64, '103': 99,
+        },
+    },
+    {
+        'name': 'noisy pwm',
+        'cc': {
+            '20': 64, '21': 34, '22': 65, '23': 101, '24': 65, '25': 127, '26': 64,
+            '27': 29, '28': 0, '29': 48, '30': 110, '31': 38, '32': 63, '33': 0,
+            '34': 0, '40': 0, '41': 60, '42': 25, '43': 83, '44': 38, '45': 47,
+            '46': 48, '71': 45, '72': 53, '73': 0, '74': 92, '75': 71, '76': 46,
+            '77': 0, '78': 0, '79': 20, '80': 0, '81': 0, '82': 0, '83': 57, '84': 84,
+            '85': 64, '86': 64, '87': 64, '90': 21, '91': 83, '92': 44, '95': 0,
+            '96': 43, '97': 40, '98': 0, '100': 0, '101': 108, '102': 64, '103': 99,
+        },
+    },
+    {
+        'name': 'cave 5ths',
+        'cc': {
+            '20': 71, '21': 3, '22': 45, '23': 127, '24': 83, '25': 17, '26': 2,
+            '27': 34, '28': 32, '29': 95, '30': 64, '31': 38, '32': 63, '33': 0,
+            '34': 0, '40': 0, '41': 56, '42': 25, '43': 83, '44': 38, '45': 48,
+            '46': 48, '71': 45, '72': 53, '73': 0, '74': 127, '75': 71, '76': 51,
+            '77': 0, '78': 0, '79': 20, '80': 0, '81': 0, '82': 0, '83': 42, '84': 37,
+            '85': 64, '86': 64, '87': 64, '90': 36, '91': 70, '92': 44, '95': 0,
+            '96': 43, '97': 40, '98': 0, '100': 42, '101': 108, '102': 64, '103': 99,
+        },
+    },
+    {
+        'name': 'sawverb',
+        'cc': {
+            '20': 64, '21': 52, '22': 64, '23': 110, '24': 71, '25': 95, '26': 64,
+            '27': 69, '28': 8, '29': 126, '30': 112, '31': 47, '32': 68, '33': 79,
+            '34': 2, '40': 0, '41': 38, '42': 25, '43': 31, '44': 32, '45': 79,
+            '46': 47, '71': 43, '72': 53, '73': 0, '74': 57, '75': 25, '76': 58,
+            '77': 0, '78': 0, '79': 127, '80': 8, '81': 0, '82': 0, '83': 0, '84': 42,
+            '85': 64, '86': 64, '87': 64, '90': 46, '91': 82, '92': 44, '95': 0,
+            '96': 69, '97': 48, '98': 0, '100': 95, '101': 112, '102': 8, '103': 89,
+        },
+    },
+    {
+        'name': 'bass1',
+        'cc': {
+            '20': 31, '21': 52, '22': 64, '23': 83, '24': 31, '25': 0, '26': 64,
+            '27': 67, '28': 0, '29': 48, '30': 127, '31': 15, '32': 62, '33': 45,
+            '34': 28, '40': 0, '41': 52, '42': 25, '43': 31, '44': 38, '45': 47,
+            '46': 111, '71': 56, '72': 40, '73': 0, '74': 80, '75': 81, '76': 54,
+            '77': 0, '78': 0, '79': 99, '80': 0, '81': 0, '82': 0, '83': 0, '84': 47,
+            '85': 74, '86': 59, '87': 95, '90': 19, '91': 64, '92': 44, '95': 0,
+            '96': 43, '97': 40, '98': 0, '100': 0, '101': 108, '102': 64, '103': 99,
+        },
+    },
+)
+# END GENERATED FACTORY PRESETS
+
+
+def _factory_presets():
+    # A fresh, private copy every time. The seed is written into _presets, which
+    # save/delete then mutate in place -- handing out the constant itself would
+    # let the first edit rewrite the factory pack in RAM.
+    return [{'name': p['name'], 'cc': dict(p['cc'])} for p in FACTORY_PRESETS]
+
+
 def _load_presets():
-    d = _read_json(PRESETS_FILE)
+    # Three-way, and the distinctions ARE the design:
+    #
+    #   file ABSENT       -> seed the factory presets (a board that has never
+    #                        saved anything: the fresh-out-of-the-box case)
+    #   file present, OK  -> use it, EVEN IF IT IS EMPTY. "I deleted all six"
+    #                        has to stick across reboots, so [] is a real answer,
+    #                        not a missing one.
+    #   file present, bad -> empty list, do NOT seed. One transient flash read
+    #                        failure must never repopulate factory presets over a
+    #                        real library, because the next save would write that
+    #                        over the top of it -- silent data loss.
+    #
+    # Hence the open() is separated from the parse: _read_json() collapses both
+    # failures into None, which cannot tell "absent" from "corrupt". Only open()
+    # raising counts as absent.
+    try:
+        f = open(PRESETS_FILE)
+    except Exception:
+        return _factory_presets()
+    try:
+        d = json.load(f)
+    except Exception:
+        d = None
+    finally:
+        f.close()
     if isinstance(d, list):
         # Keep only well-formed entries so one bad record can't break the list.
         return [p for p in d

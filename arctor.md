@@ -78,9 +78,10 @@ Improvements I'm hoping to make to Arctor in future versions:
   - get Arctor working on other MIDI channels besides 12 (and let users set the MIDI channel on the board, without a computer)
   - implement real wet/dry mixes for the effects (though this might not be possible without firmware updates)
   - get CV I/O working (I'm not planning on implementing SPDIF I/O, but I might if anyone expresses interest)
+- add a monophonic mode for basses/leads
 - improve menu snappiness
 - maybe some more display modes
-- utilizing the click encoder's LED, perhaps for mode identification
+- utilize the click encoder's LED, perhaps for mode identification
 
 Let me know if there's anything else you think would be cool!
 
@@ -202,7 +203,9 @@ In param control mode:
 ![delete](docs/screens/15-delete-preset.png)
 ![delete confirmation](docs/screens/16-delete-confirm.png)
 
-Arctor comes with 7 "factory" presets. The first in the list is INIT, a "default" that can't be overwritten and serves as a jumping-off point for creating your own sounds. You can delete or overwrite the other 6 however you want. Arctor can hold a total of 32 presets, not counting INIT.
+Arctor comes with 7 "factory" presets. The first in the list is INIT, a "default" that can't be overwritten and serves as a jumping-off point for creating your own sounds. The other 6&mdash;`pad1`, `stab1`, `noisy pwm`, `cave 5ths`, `sawverb` and `bass1`&mdash;are ordinary presets that you can overwrite, rename or delete however you want. Arctor can hold a total of 32 presets, not counting INIT.
+
+n.b.: the 6 are only put on your board the first time you run Arctor, i.e. when there's no preset file there yet. That's deliberate: it means Arctor never re-adds a preset you deliberately deleted, and never quietly rebuilds them on top of a library you've spent time on. The flip side is that **deleting them is a one-way door from the board itself**&mdash;there's no "restore factory presets" in the menu. If you want them back, delete `/user/arctor_presets.json` from a computer and restart, or copy them out of [arctor.py](https://github.com/sawtoothwave/amyboard/blob/v1.0/sketches/arctor.py) (they're in the `FACTORY_PRESETS` block near the top).
 
 When you select **save as preset**, Arctor will capture the current state of every parameter and give you the opportunity to either overwrite your current preset or **save as** with a new name. A preset name can be up to 12 characters: a–z, 0–9, space. After the characters comes a ⌫ that deletes the previous letter, and a ✓ to confirm save. If you enter the name of an existing preset, Arctor will ask you if you want to overwrite the current preset. If you change your mind, hold the encoder to cancel out of the save flow at any point&mdash;your parameters will stay how you had them set; you just won't save them into memory.
 
@@ -212,25 +215,9 @@ Presets are saved on your board, not inside arctor.py, so updating Arctor or upg
 
 ![scan presets](docs/screens/14-scan-presets.png)
 
-The Scan Preset function *looks* just like the Load Preset menu, but it **automatically loads presets as you scroll through the list**. This is handy for browsing/auditioning your presets without having to keep clicking "load" on each one. Clicking on a preset in scan mode will give you the option of opening it in param control, duplicating it, or deleting it. 
+The Scan Preset function *looks* just like the Load Preset menu, but it **automatically loads presets as you scroll through the list**. This is handy for browsing/auditioning your presets without having to keep clicking "load" on each one. Clicking on a preset in scan mode will give you the option of opening it in param control, duplicating it, or deleting it&mdash;afterwards, you'll be dropped back into the scan mode. 
 
 n.b.: Unlike the standard "load preset" mode, "scan presets" will loop back to the beginning of the list when you hit the end, rather than stopping at the end of the list.
-
-### Acting on a preset you've found
-
-![scan actions](docs/screens/scan-actions.png)
-
-Click the encoder on whatever you've landed on and Arctor offers three things to do with it. The preset keeps playing the whole time, so you're always acting on the sound you're hearing. Hold the encoder (or pick **cancel**) to go back to scanning where you left off.
-
-**Open** takes you into param control for that preset&mdash;find a sound by ear, then go straight to editing it. This is the one that ends the scan: holding the encoder from param control returns you to the main Arctor menu, exactly as if you'd entered param control the normal way.
-
-**Duplicate** makes a copy under a new name, leaving the original untouched. It's a copy of the *saved* preset, so anything you've nudged by MIDI since loading it isn't baked in. Arctor pre-fills the name with the next free number&mdash;`bass` becomes `bass2`, and a second copy becomes `bass3`&mdash;and starts you on the ✓, so one more click accepts it. Turn counter-clockwise to get back to ⌫ and the letters if you'd rather type something else. If the name is already using all 12 characters, there's no room for a number, so Arctor steps the last letter instead (`brassbrassb` becomes `brassbrassc`).
-
-![duplicate name entry](docs/screens/scan-duplicate-name.png)
-
-**Delete** goes straight to the usual confirmation. Once it's gone you're dropped back into scanning with the next preset in the list selected *and playing*, so you can keep going down the list deleting as you audition. Deleting the last preset in the list leaves you on the new last one.
-
-n.b.: INIT can't be deleted, so it only offers open and duplicate. Duplicating INIT is a handy way to start a new sound from the defaults without overwriting anything.
 
 ## Display mode
 
