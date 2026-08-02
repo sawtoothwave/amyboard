@@ -2,7 +2,7 @@
 
 Arctor is a 2-oscillator, analog-style, 6-voice polysynth (with MIDI CC control over all parameters) designed as a sketch for [AMYboard](https://www.amyboard.com).
 
-Arctor is free to download and modify however you like. Read on for all the info!
+Arctor is free to [download](https://github.com/sawtoothwave/amyboard/blob/v1.0/sketches/arctor.py) and modify however you like. Read on for all the info!
 
 ## Contents
 
@@ -35,13 +35,13 @@ Arctor is at its best if you add a [screen](https://www.adafruit.com/product/529
 - adjust its parameters without an external MIDI controller, and
 - save up to 32 presets.
 
-To learn how to connect the screen and encoder, check [the AMYboard accessories page](https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/accessories.md), and then come back here!
+(For info on how to connect the screen and encoder, check [the AMYboard accessories page](https://github.com/shorepine/tulipcc/blob/main/docs/amyboard/accessories.md).)
 
 ## Installation
 
 Anyone with an AMYboard can install Arctor for free, using one of the following options.
 
-#### Option 1: From the AMYboard online editor at amyboard.com
+### Option 1: From the AMYboard online editor at amyboard.com
 - Visit [the AMYboard online editor](https://www.amyboard.com/editor/?tab=patch) and follow the instructions to make sure your board is connected and in "control" mode. At this point, you can either:
   - Find Arctor from the AMYboard World tab, and install it that way, or
   - Install Arctor manually:
@@ -50,7 +50,7 @@ Anyone with an AMYboard can install Arctor for free, using one of the following 
     - Copy/paste the entirety of arctor.py into the **sketch.py** window
     - Click "write to your AMYboard"
 
-#### Option 2: Directly, via your development tool
+### Option 2: Directly, via your development tool
 If you're using development tools or a coding environment, you can download [arctor.py](https://github.com/sawtoothwave/amyboard/blob/v1.0/sketches/arctor.py) and use AMYboard's REPL environment over USB or wifi to send it to your board.
 
 ## Support and credits
@@ -93,7 +93,7 @@ And thanks to **you** for trying Arctor. I hope it's inspiring and useful to you
 
 # Using Arctor
 
-Okay, let's explore Arctor. This guide assumes you have a screen/encoder as described above.
+Okay, let's explore Arctor. **This guide assumes you have a screen/encoder as described above.** If you don't, you won't be able to navigate the menus or use the features described below, but you _will_ still be able to use an external controller to send [MIDI CC's](#cc-table) to Arctor's audio engine.
 
 ## Main menu
 
@@ -104,17 +104,17 @@ Arctor's main menu displays all its functions. Generally speaking, **click** to 
 ## Param control
 ![param control menu](docs/screens/04-param-groups.png)
 
-This is where you can edit Arctor's sound. The first thing you'll see is a list of subcategories for Arctor's oscillators, filter (VCF), LFO, VCA, and built-in effects.
+This is where you can edit Arctor's sound directly on the module, even if you don't have an external MIDI controller. The first thing you'll see is a list of subcategories for Arctor's oscillators, filter (VCF), LFO, VCA, and built-in effects.
 
 In param control mode:
 - The cursor will display the current parameter a little brighter than the others.
 - Clicking into it will highlight that parameter on a white background, and you can then turn the encoder to adjust the parameter value.
 - Click to confirm the adjustment, double-click to return to the INIT default for that parameter, or hold to cancel editing and return to the most recently-stored value for that parameter.
 
-*A couple notes about using MIDI CC with Arctor:*
+*A couple notes about sending MIDI CC to Arctor:*
 
-1. CC data you send into Arctor will be reflected in real-time on the corresponding parameter(s). Saving as Arctor preset captures the current state of every parameter, including adjustments from external CC data. If you're editing a sound via an external MIDI controller, your DAW, etc., saving the preset on the AMYboard itself will capture all of those modifications. 
-2. If you leave the cursor idle on a parameter for a few seconds, it will display its corresponding CC number, to make it easy to assign a controller to it. You can also consult the complete CC table in the [appendix](#appendix).
+1. CC data you send into Arctor will be reflected in real-time on the corresponding parameter(s). Saving an Arctor preset captures the current state of every parameter, including adjustments from external CC data. So if you're using external MIDI to modify an Arctor sound, saving will capture everything you changed. 
+2. To make external MIDI assignment easier, Arctro will display a parameter's corresponding CC number if you just leave the cursor idle on that parameter for a few seconds. (You can also consult the complete CC table in the [appendix](#appendix).)
 
 ### Osc
 
@@ -249,9 +249,11 @@ Activates the selected display mode instantly, rather than waiting for the 15-se
 
 ### CC Table
 
+All the CCs in one place.
+
 | CC# | Parameter |
 | --- | --- |
-| 1 | Mod wheel — aliased to CC 77 (LFO → pitch), so a performance wheel controls vibrato depth out of the box |
+| 1 | **Mod wheel** — aliased to CC 77 (LFO → pitch), so a performance wheel controls vibrato depth out of the box |
 | 20 | **Osc A** PIT — oscillator A pitch |
 | 21 | **Osc A** WAV — oscillator A waveshape |
 | 22 | **Osc A** DTY — oscillator A duty cycle (pulse only) |
