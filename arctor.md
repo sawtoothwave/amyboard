@@ -67,15 +67,18 @@ I'm not affiliated with or able to troubleshoot AMYboard or AMY itself, so I can
 - Arctor can be sensitive to gain-staging, particularly the FX section. When you save presets, you might have to fiddle around to make sure they don't clip.
 - Arctor's FX don't have wet/dry mix controls; they have individual volumes for wet and dry.
 - CV I/O isn't yet implemented; SPDIF I/O isn't either, but I don't know if it'll ever be.
+- Arctor might hiccup for a moment upon saving/deleting a preset.
+- Setting pitch-based LFO destination depth often creates a "zippering" effect when you first engage it. Haven't been able to quite figure this out.
 
 ### Future improvements
 
 Improvements I'm hoping to make to Arctor in future versions:
 
-- get Arctor working on other MIDI channels besides 12 (and let users set the MIDI channel on the board, without a computer)
+- fix some of the above issues, of course
+  - get Arctor working on other MIDI channels besides 12 (and let users set the MIDI channel on the board, without a computer)
+  - implement real wet/dry mixes for the effects (though this might not be possible without firmware updates)
+  - get CV I/O working (I'm not planning on implementing SPDIF I/O, but I might if anyone expresses interest)
 - improve menu snappiness
-- implement real wet/dry mixes for the effects (though this might not be possible without firmware updates)
-- get CV I/O working (I'm not planning on implementing SPDIF I/O, but I might if anyone expresses interest)
 - maybe some more display modes
 - utilizing the click encoder's LED, perhaps for mode identification
 
@@ -168,7 +171,7 @@ In param control mode:
 | **ATK** / **DEC** / **SUS** / **REL** - attack/decay/sustain/release envelope stage length |
 | **SHP** - envelope shape - alters the amplitude envelope shape, getting incrementally "snappier" (linear, normal, true exponential, DX7) |
 | **VEL** - velocity amount - higher values make the VCA envelope respond more sensitively to the velocity with which a note is triggered |
-| **LVL** - overall level of the preset |
+| **LVL** - overall level of the preset, including up to +16dB boost |
 
 ### FX
 
@@ -209,9 +212,25 @@ Presets are saved on your board, not inside arctor.py, so updating Arctor or upg
 
 ![scan presets](docs/screens/14-scan-presets.png)
 
-The Scan Preset function *looks* just like the Load Preset menu, but it **automatically loads presets as you scroll through the list**. This is handy for browsing/auditioning your presets without having to keep clicking "load" on each one. At any point, you can click on the encoder to bring you into param control for that preset.
+The Scan Preset function *looks* just like the Load Preset menu, but it **automatically loads presets as you scroll through the list**. This is handy for browsing/auditioning your presets without having to keep clicking "load" on each one. Clicking on a preset in scan mode will give you the option of opening it in param control, duplicating it, or deleting it. 
 
 n.b.: Unlike the standard "load preset" mode, "scan presets" will loop back to the beginning of the list when you hit the end, rather than stopping at the end of the list.
+
+### Acting on a preset you've found
+
+![scan actions](docs/screens/scan-actions.png)
+
+Click the encoder on whatever you've landed on and Arctor offers three things to do with it. The preset keeps playing the whole time, so you're always acting on the sound you're hearing. Hold the encoder (or pick **cancel**) to go back to scanning where you left off.
+
+**Open** takes you into param control for that preset&mdash;find a sound by ear, then go straight to editing it. This is the one that ends the scan: holding the encoder from param control returns you to the main Arctor menu, exactly as if you'd entered param control the normal way.
+
+**Duplicate** makes a copy under a new name, leaving the original untouched. It's a copy of the *saved* preset, so anything you've nudged by MIDI since loading it isn't baked in. Arctor pre-fills the name with the next free number&mdash;`bass` becomes `bass2`, and a second copy becomes `bass3`&mdash;and starts you on the ✓, so one more click accepts it. Turn counter-clockwise to get back to ⌫ and the letters if you'd rather type something else. If the name is already using all 12 characters, there's no room for a number, so Arctor steps the last letter instead (`brassbrassb` becomes `brassbrassc`).
+
+![duplicate name entry](docs/screens/scan-duplicate-name.png)
+
+**Delete** goes straight to the usual confirmation. Once it's gone you're dropped back into scanning with the next preset in the list selected *and playing*, so you can keep going down the list deleting as you audition. Deleting the last preset in the list leaves you on the new last one.
+
+n.b.: INIT can't be deleted, so it only offers open and duplicate. Duplicating INIT is a handy way to start a new sound from the defaults without overwriting anything.
 
 ## Display mode
 

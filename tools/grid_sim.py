@@ -532,16 +532,21 @@ def scan_checks(ns):
     tick(menu, lvl)                             # the list still draws (it is a _MenuLevel)
     check(any(p[0] in ('FLUSH', 'ROWS') for p in PUSHES), 'the scan list renders')
 
-    # A click opens Param Control ON the preset you landed on -- and what the grid
-    # shows must be LIVE state, so a MIDI CC that arrived while this preset was up
-    # is already reflected there rather than the saved snapshot's value.
+    # A click opens the ACTION menu for the preset you landed on; Open from there
+    # goes to Param Control -- and what the grid shows must be LIVE state, so a
+    # MIDI CC that arrived while this preset was up is already reflected there
+    # rather than the saved snapshot's value.
     saved_cc = ccs[0]
     landed = lvl.entries[lvl.idx].get('name')
     saved_val = int(lvl.entries[lvl.idx]['cc'][str(saved_cc)])
     ns['midi_cb']([0xB0 | (ns['SYNTH'] - 1), saved_cc, 77])   # a knob turn mid-scan
     menu.handle(0, True, False)                 # click
+    check(menu.cur.title.split('\n')[0] == landed and menu.stack[-2] is lvl,
+          'a click opens the action menu for the landed preset, over the live scan')
+    check(not writes, 'opening the actions does not end the scan (no write yet)')
+    dict(menu.cur.items)['Open']()
     check(menu.is_open and menu.cur.title == 'PARAM CONTROL',
-          'a click opens Param Control on the scanned preset')
+          'Open goes to Param Control on the scanned preset')
     check(not any(isinstance(l, ScanLevel) for l in menu.stack)
           and menu.stack[0].title == 'ARCTOR' and len(menu.stack) == 2,
           'it REPLACES the scan level, sitting directly on the root (no trapdoor '
@@ -578,6 +583,211 @@ def scan_checks(ns):
     check(writes == [('current_preset', landed)], 'the hold exit persists once too')
     check(ns['_current_preset_name'] == landed,
           'the scanned preset becomes the session current (Save->Overwrite target)')
+
+
+def scan_action_checks(ns):
+    """The action menu a click opens inside Scan Presets: Open / Duplicate / Delete.
+
+    What needs proving here is everything that touches the preset SET while a scan
+    is live -- because _ScanLevel snapshots the list at open and stays index-aligned
+    to it. Duplicate and Delete both invalidate that snapshot, so each must come
+    back on a rebuilt level, landing where the user expects, with the sound matching
+    the cursor. None of that is observable on the board while a sketch runs.
+    """
+    print('\n--- Scan actions (Open / Duplicate / Delete)')
+    SketchMenu = ns['SketchMenu']
+    ScanLevel = ns['_ScanLevel']
+    NameLevel = ns['_NameLevel']
+    PARAMS = ns['PARAMS']
+    INIT = ns['INIT_PRESET_NAME']
+
+    ccs = [p.cc for p in PARAMS[:3]]
+    def preset(name, v):
+        return {'name': name, 'cc': {str(c): v for c in ccs}}
+
+    # Alphabetical order, so the scan list is: INIT, arp, bass, cello.
+    ns['_presets'][:] = [preset('arp', 11), preset('bass', 22), preset('cello', 33)]
+    ns['_current_preset_name'] = ''
+    ns['_write_presets'] = lambda: True          # no flash on the host
+    writes = []
+    ns['_set_setting'] = lambda k, v: writes.append((k, v))
+    applied = []
+    real_apply = ns['_apply_preset']
+    ns['_apply_preset'] = lambda cc_map: (applied.append(cc_map), real_apply(cc_map))[1]
+
+    def open_scan():
+        m = SketchMenu()
+        m.open()
+        dict(m.cur.items)['Scan presets']()
+        return m
+
+    def names(scan):
+        return [e.get('name') for e in scan.entries]
+
+    def dismiss(menu, expect):
+        """Clear a confirmation toast the way the user does -- with an input.
+
+        SketchMenu.handle swallows the FIRST input while a toast is up (it only
+        dismisses; it does not also act on the menu underneath), so every
+        post-save/post-delete step here has to spend one. Skipping it in the sim
+        would test a device that does not exist -- and would silently turn the
+        next 'click' into a dismissal, which is exactly how these checks first
+        went wrong.
+        """
+        check(menu._toast_msg == expect,
+              'toast reads %r' % menu._toast_msg)
+        menu.handle(1, False, False)
+        check(not menu._toast_msg, 'and the first input only dismisses it')
+
+    # -- the menu itself ----------------------------------------------------
+    menu = open_scan()
+    lvl = menu.cur
+    check(names(lvl) == [INIT, 'arp', 'bass', 'cello'],
+          'scan list is INIT + saved alphabetically: %s' % names(lvl))
+
+    menu.handle(0, True, False)                  # click straight in, cursor never moved
+    check(applied and ns['_current_preset_name'] == INIT,
+          'clicking without turning first LOADS the landed preset, so the action '
+          'menu names what you are hearing')
+    acts = [lbl for lbl, _ in menu.cur.items]
+    check(acts == ['Open', 'Duplicate', 'Cancel'],
+          'INIT offers no Delete (it is virtual -- deleting it could only no-op): %s'
+          % acts)
+
+    menu.handle(0, False, True)                  # hold
+    check(menu.cur is lvl, 'a hold backs out of the actions into the live scan')
+    menu.handle(0, True, False)
+    dict(menu.cur.items)['Cancel']()
+    check(menu.cur is lvl, 'Cancel does the same')
+
+    menu.handle(2, False, False)                 # -> 'bass'
+    menu.handle(0, True, False)
+    acts = [lbl for lbl, _ in menu.cur.items]
+    check(acts == ['Open', 'Duplicate', 'Delete', 'Cancel'],
+          'a saved preset offers all four: %s' % acts)
+
+    # -- Duplicate ----------------------------------------------------------
+    dict(menu.cur.items)['Duplicate']()
+    nl = menu.cur
+    check(isinstance(nl, NameLevel) and nl.name == 'bass2',
+          'Duplicate opens name entry pre-filled with the next free number (%r)'
+          % nl.name)
+    check(ns['_NAME_RING'][nl.sel] == 'OK',
+          'the ring starts on OK, so accepting the seeded name is one click')
+    check(nl.src_cc == ns['_presets'][1]['cc'] and nl.src_cc is not ns['_presets'][1]['cc'],
+          'it carries the SOURCE preset\'s saved patch, by value not by reference')
+
+    # A CC arriving mid-flow must NOT end up in the copy: a duplicate is a copy of
+    # the saved patch, not of whatever the synth drifted to.
+    ns['midi_cb']([0xB0 | (ns['SYNTH'] - 1), ccs[0], 7])
+    menu.handle(0, True, False)                  # click OK
+    check(menu.cur.title.startswith('SAVE'),
+          'OK on a fresh name asks SAVE? (not OVERWRITE?)')
+    dict(menu.cur.items)['Yes']()
+    copy = ns['_presets'][ns['_find_preset']('bass2')]
+    check(copy['cc'] == {str(c): 22 for c in ccs},
+          'the copy holds the SAVED patch, not the CC-drifted live one')
+    check(isinstance(menu.cur, ScanLevel) and menu.stack[0].title == 'ARCTOR'
+          and len(menu.stack) == 2,
+          'saving a duplicate lands back on the scan, on the root (nothing stacked '
+          'up behind it)')
+    scan = menu.cur
+    check(names(scan) == [INIT, 'arp', 'bass', 'bass2', 'cello'],
+          'the rebuilt scan list includes the copy: %s' % names(scan))
+    check(scan.entries[scan.idx].get('name') == 'bass2',
+          'and the cursor is ON the copy, ready to audition')
+    check(writes[-1] == ('current_preset', 'bass2'),
+          'the copy becomes the session current (so Save->Overwrite targets it)')
+    dismiss(menu, 'PRESET SAVED!')
+
+    # Seeding is collision-proof: a second duplicate of bass cannot land on bass2.
+    while scan.entries[scan.idx].get('name') != 'bass':
+        menu.handle(-1, False, False)
+    menu.handle(0, True, False)
+    dict(menu.cur.items)['Duplicate']()
+    check(menu.cur.name == 'bass3',
+          'a second duplicate steps past the taken name (%r)' % menu.cur.name)
+    menu.handle(0, False, True)                  # hold out of name entry
+    menu.handle(0, False, True)                  # hold out of the actions
+
+    # -- Delete -------------------------------------------------------------
+    scan = menu.cur
+    while scan.entries[scan.idx].get('name') != 'bass':
+        menu.handle(1, False, False)
+    applied.clear()
+    menu.handle(0, True, False)
+    dict(menu.cur.items)['Delete']()
+    check(menu.cur.title.startswith('Delete preset\nbass?'),
+          'Delete goes straight to the confirm, no list in between')
+    dict(menu.cur.items)['No']()
+    check(not isinstance(menu.cur, ScanLevel) and 'Delete' in dict(menu.cur.items),
+          'No backs up to the action menu, preset intact')
+    check(ns['_find_preset']('bass') >= 0, 'and nothing was deleted')
+
+    dict(menu.cur.items)['Delete']()
+    dict(menu.cur.items)['Yes']()
+    check(ns['_find_preset']('bass') < 0, 'Yes deletes it')
+    scan = menu.cur
+    check(isinstance(scan, ScanLevel) and len(menu.stack) == 2,
+          'and lands back in the scan, on the root')
+    check(names(scan) == [INIT, 'arp', 'bass2', 'cello'],
+          'the rebuilt list no longer holds it: %s' % names(scan))
+    check(scan.entries[scan.idx].get('name') == 'bass2',
+          'the NEXT preset is highlighted (the one that took the deleted slot)')
+    check(applied and applied[-1] == ns['_presets'][ns['_find_preset']('bass2')]['cc'],
+          'and it is APPLIED -- you never hear a preset that no longer exists')
+    check(ns['_current_preset_name'] == 'bass2'
+          and writes[-1] == ('current_preset', 'bass2'),
+          'the pointer follows it, so nothing points at the deleted preset')
+    dismiss(menu, 'DELETED!')
+
+    # Deleting the LAST entry has nowhere to fall forward to -- it clamps back.
+    while scan.entries[scan.idx].get('name') != 'cello':
+        menu.handle(1, False, False)
+    check(scan.idx == len(scan.entries) - 1, 'cello is the last entry')
+    menu.handle(0, True, False)
+    dict(menu.cur.items)['Delete']()
+    dict(menu.cur.items)['Yes']()
+    scan = menu.cur
+    check(names(scan) == [INIT, 'arp', 'bass2']
+          and scan.entries[scan.idx].get('name') == 'bass2',
+          'deleting the end of the list lands on the new last, not off it')
+
+    # Down to the last saved preset, then past it: the list can never empty out,
+    # because INIT is virtual and always at 0.
+    for nm in ('arp', 'bass2'):
+        dismiss(menu, 'DELETED!')
+        while scan.entries[scan.idx].get('name') != nm:
+            menu.handle(1, False, False)
+        menu.handle(0, True, False)
+        dict(menu.cur.items)['Delete']()
+        dict(menu.cur.items)['Yes']()
+        scan = menu.cur
+    check(isinstance(scan, ScanLevel) and names(scan) == [INIT]
+          and scan.idx == 0 and ns['_current_preset_name'] == INIT,
+          'deleting the last saved preset leaves a one-entry scan on INIT, not an '
+          'empty list or a dead cursor')
+
+    # -- the name seed at the length cap ------------------------------------
+    # No room to append a number, so the last character steps through the ring.
+    dup = ns['_dup_name']
+    cap = ns['PRESET_NAME_MAX']
+    full = 'a' * cap
+    ns['_presets'][:] = [preset(full, 1)]
+    check(dup(full) == 'a' * (cap - 1) + 'b',
+          'a full-length name steps its last character instead (%r)' % dup(full))
+    ns['_presets'].append(preset('a' * (cap - 1) + 'b', 1))
+    check(dup(full) == 'a' * (cap - 1) + 'c',
+          'and keeps stepping past taken ones (%r)' % dup(full))
+    ring = ns['_NAME_RING'][:-2]
+    end = 'x' * (cap - 1) + ring[-1]             # last char is the END of the ring
+    ns['_presets'][:] = [preset(end, 1)]
+    check(dup(end) == 'x' * (cap - 1) + ring[0],
+          'stepping off the end of the ring wraps to its start (%r)' % dup(end))
+    ns['_presets'][:] = []
+    check(dup(INIT) == 'init2',
+          'duplicating INIT seeds a lowercase name -- the ring has no capitals, so '
+          '"INIT2" would be a name the editor could never reproduce (%r)' % dup(INIT))
 
 
 def main():
@@ -687,6 +897,7 @@ def main():
     hover_checks(ns)
     preset_apply_checks(ns)
     scan_checks(ns)
+    scan_action_checks(ns)
     display_mode_checks(ns)
     colour_scale_checks(ns)
     flash_store_checks(ns)

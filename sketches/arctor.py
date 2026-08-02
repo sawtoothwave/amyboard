@@ -1333,10 +1333,14 @@ def _find_preset(name):
     return -1
 
 
-def _save_preset(name):
+def _save_preset(name, cc=None):
     # Overwrite an existing same-name preset in place, else append a new one.
     # The MAX_PRESETS cap is enforced by the UI before it reaches a NEW name.
-    entry = {'name': name, 'cc': _capture_preset()}
+    # `cc` defaults to a snapshot of the LIVE patch (what Save always stores);
+    # Duplicate passes the source preset's stored map instead, so a copy is a
+    # copy of the SAVED patch rather than of whatever the synth happens to be
+    # playing. Copied, not aliased -- the two entries must not share a dict.
+    entry = {'name': name, 'cc': dict(cc) if cc is not None else _capture_preset()}
     i = _find_preset(name)
     if i >= 0:
         _presets[i] = entry
@@ -1372,6 +1376,46 @@ def _load_list():
     # Presets offered by the Load menu: the virtual INIT first (a fixed home row,
     # never sorted into the names), then the saved ones alphabetically.
     return [_init_preset_entry()] + _sorted_presets()
+
+
+def _dup_name(base):
+    # Seed name offered by Duplicate: the source name made unique, so the copy
+    # never opens sitting on an existing preset (clicking OK there would turn a
+    # duplicate into a silent OVERWRITE of some OTHER patch).
+    #
+    #   room to grow  -- append the next free number: bass -> bass2 -> bass3.
+    #   name is full  -- at PRESET_NAME_MAX there is nowhere to append, so step
+    #                    the LAST CHARACTER to the next one in the name-entry
+    #                    ring instead: brassbrassb -> brassbrassc. Wraps at the
+    #                    end of the ring, and keeps stepping past taken names.
+    #
+    # Candidates come only from _NAME_RING's plain characters, so whatever we
+    # seed is a name the user can also type/edit by hand -- which is why INIT is
+    # lowercased first (the ring has no capitals; 'INIT2' would be a name the
+    # editor could never reproduce). If every candidate is taken we return the
+    # base unchanged and let _commit_name's OVERWRITE confirm ask -- visibly --
+    # rather than inventing something.
+    if not base:
+        return base
+    if base == INIT_PRESET_NAME:
+        base = base.lower()
+    if len(base) < PRESET_NAME_MAX:
+        for n in range(2, 100):
+            cand = base + str(n)
+            if len(cand) <= PRESET_NAME_MAX and _find_preset(cand) < 0:
+                return cand
+        # Fall through: every suffix that FITS is taken (or the name is one char
+        # short of the cap and 10.. no longer fits) -- step the last char instead.
+    ring = _NAME_RING[:-2]              # plain chars only, no DEL/OK tokens
+    try:
+        pos = ring.index(base[-1])
+    except ValueError:                  # last char isn't typeable (e.g. a capital)
+        pos = -1
+    for k in range(1, len(ring) + 1):
+        cand = base[:-1] + ring[(pos + k) % len(ring)]
+        if _find_preset(cand) < 0:
+            return cand
+    return base
 
 
 def _restore_current_preset():
@@ -2530,15 +2574,12 @@ class _ScanLevel(_MenuLevel):
     #            one place in this menu where scrolling wraps, because here the
     #            ends aren't a boundary you're navigating to, they're just the
     #            seam in a loop you're listening through.
-    #   click -- open Param Control on the preset you've landed on: find it by ear,
-    #            then edit it. The scan level is REPLACED, not stacked under, so
-    #            Param Control sits directly on the root and a hold out of it behaves
-    #            exactly as it does when you enter Param Control the normal way --
-    #            back to the ARCTOR root. (Keeping the scan underneath meant a hold dropped
-    #            you back into scanning, which reads as a trapdoor.) What the grid
-    #            shows is LIVE state (param_values), not the saved snapshot -- so any
-    #            MIDI CC that arrived while this preset was up is already reflected
-    #            there, and a Save->Overwrite stores the patch as actually heard.
+    #   click -- open the action menu for the preset you've landed on (Open /
+    #            Duplicate / Delete), built by SketchMenu._open_scan_actions.
+    #            The scan level STAYS on the stack under it, so a hold out of the
+    #            actions drops back into scanning where you were, still hearing
+    #            the same preset. Open is the one action that leaves for good, and
+    #            it pops the scan level on its way out -- see _scan_open.
     #   hold  -- back to the root menu (the preset stays loaded either way).
     #
     # Nothing is applied on OPEN: the cursor starts on the current preset (if it
@@ -2554,19 +2595,24 @@ class _ScanLevel(_MenuLevel):
     # apply only the preset actually landed on, never the ones skimmed past.
     __slots__ = ('entries', 'touched')
 
-    def __init__(self, entries):
+    def __init__(self, entries, start_name=None):
         _MenuLevel.__init__(self, 'SCAN PRESETS',
                             [(e.get('name', '?')[:MENU_LABEL_MAX], None)
                              for e in entries])
-        # Snapshot of _load_list() taken at open: presets can't be added or
-        # deleted while we're on this level, so the labels and `entries` stay
-        # index-aligned for the life of the scan.
+        # Snapshot of _load_list() taken at open. The set CAN change underneath a
+        # scan now (Duplicate adds, Delete removes, both from the action menu), so
+        # neither of those edits this level in place -- each builds a FRESH
+        # _ScanLevel from a fresh _load_list() and swaps it in, which keeps the
+        # labels and `entries` index-aligned by construction. `start_name` is how
+        # they say where the new level should land (the copy, or the preset that
+        # took the deleted one's place); default is wherever the patch already is.
         self.entries = entries
         self.touched = False     # a preset was actually loaded (persist() no-ops
                                  # otherwise, so opening and backing straight out
                                  # never writes settings)
+        want = start_name if start_name is not None else _current_preset_name
         for i, e in enumerate(entries):
-            if e.get('name', '') == _current_preset_name:
+            if e.get('name', '') == want:
                 self.idx = i     # start where the patch already is
                 break
 
@@ -2603,10 +2649,17 @@ class _ScanLevel(_MenuLevel):
             self.idx = (self.idx + delta) % len(self.entries)   # wrap, don't clamp
             self._load(self.idx)
             menu.dirty = True
-        if click:                # found it by ear -> now edit it
-            self.persist()       # the scan ends here (the level is about to go)
-            menu._pop()          # drop this level, so Param Control opens ON the
-            menu._open_params()  # root and a hold out of it lands there, not here
+        if click:                # found it by ear -> now act on it
+            # Act on what you're HEARING. Nothing is applied when the scan opens,
+            # so if the cursor never moved, the landed preset was never loaded --
+            # and the action menu would name one preset while Open showed another
+            # in the grid (which draws live state) and Duplicate copied a third.
+            # Loading it here makes cursor, sound and menu title agree before any
+            # action is offered. It is a no-op in the usual case (you turned to
+            # get here, so it is already loaded).
+            if self.entries[self.idx].get('name', '') != _current_preset_name:
+                self._load(self.idx)
+            menu._open_scan_actions(self)
 
 
 # Name-entry ring: turning scrolls the active slot through these; a click acts on
@@ -2641,13 +2694,21 @@ class _NameLevel:
     # far; `sel` indexes _NAME_RING for the in-progress slot. Turn scrolls the
     # candidate, click commits it, hold (back) cancels the whole name. Like
     # _GridLevel it owns a full/dirty pair driving its own render path.
-    __slots__ = ('name', 'sel', 'dirty', 'full')
+    __slots__ = ('name', 'sel', 'dirty', 'full', 'src_cc')
 
-    def __init__(self):
-        self.name = ''
-        self.sel = 0
+    def __init__(self, initial='', src_cc=None):
+        # `initial` pre-fills the name (Duplicate seeds it with _dup_name); when it
+        # does, the ring starts on OK rather than 'a', because the seed is already
+        # the answer in the common case -- one click accepts it, and the SAVE?
+        # confirm still stands between that click and flash. Turning left from OK
+        # walks straight back into DEL/letters to edit it.
+        # `src_cc` is the patch to store on OK: None = the live one (a normal
+        # Save), a preset's stored map = a true copy of it (Duplicate).
+        self.name = initial
+        self.sel = (len(_NAME_RING) - 1) if initial else 0
         self.dirty = True
         self.full = True
+        self.src_cc = src_cc
 
     def handle(self, menu, delta, click, back):
         # Turn scrolls the ring candidate, click commits it (append char /
@@ -3667,6 +3728,9 @@ class SketchMenu:
         # Otherwise confirm: "SAVE?" (or "OVERWRITE?" if the name already exists)
         # with Yes/No. Yes saves + returns to the Arctor menu; No -- or a hold --
         # pops back to the name-entry screen. A new name at the cap is blocked.
+        # The patch stored on Yes comes from the level (lvl.src_cc): live for a
+        # Save, the source preset's map for a Duplicate.
+        cc = lvl.src_cc
         name = lvl.name.strip()
         if not name:
             return
@@ -3686,22 +3750,39 @@ class SketchMenu:
         else:
             head = 'OVERWRITE\n"%s"?' if exists else 'SAVE\n"%s"?'
             self._push_level(_MenuLevel(head % name[:MENU_LABEL_MAX], [
-                ('Yes', (lambda n=name: self._do_save(n))),
+                ('Yes', (lambda n=name, c=cc: self._do_save(n, c))),
                 ('No', self._pop),
             ]))
 
-    def _do_save(self, name):
+    def _do_save(self, name, src_cc=None):
         # Persist, flash a "PRESET SAVED!" toast, and drop to the main Arctor
         # menu (the toast auto-dismisses to it -- see render()). On success this
         # name becomes the session's "current" preset (the Overwrite target).
+        # `src_cc` set = this was a Duplicate: store that patch instead of the
+        # live one, and land back on the SCAN list with the new copy under the
+        # cursor rather than on the root, so the copy is immediately auditionable
+        # and the flow you came from is the flow you return to.
         global _current_preset_name
-        ok = _save_preset(name)
+        ok = _save_preset(name, src_cc)
         if ok:
             _current_preset_name = name
             _set_setting('current_preset', name)   # resume it after a reset
-        self.stack = [self._root()]
+        if src_cc is not None and ok:
+            self._scan_stack(name)
+        else:
+            self.stack = [self._root()]
         self._show_toast('PRESET SAVED!' if ok else 'SAVE FAILED')
         self._repaint()
+
+    def _scan_stack(self, landing_name):
+        # Rebuild the stack as root + a FRESH scan level landing on `landing_name`.
+        # Used by the two actions that change the preset set underneath a scan
+        # (Duplicate, Delete): the old scan level's `entries` snapshot is stale the
+        # moment flash is written, so it is thrown away rather than patched, and
+        # the new one re-reads _load_list(). Everything above the scan (the action
+        # menu, the confirm, the name entry) goes with it -- those screens are all
+        # about a preset that has just been created or destroyed.
+        self.stack = [self._root(), _ScanLevel(_load_list(), landing_name)]
 
     def _show_toast(self, msg):
         self._toast_msg = msg
@@ -3749,6 +3830,78 @@ class SketchMenu:
         # loads as it goes and the level stays put. See _ScanLevel.
         self._push_level(_ScanLevel(_load_list()))
 
+    # -- Scan actions --------------------------------------------------------
+    # Clicking a preset while scanning opens this menu instead of leaving for
+    # Param Control, so the preset you just found by ear can be edited, copied or
+    # thrown away without first backing out and re-finding it in another list.
+    # The preset is already loaded and still sounding underneath (see
+    # _ScanLevel.handle), so every action names the thing you are hearing.
+
+    def _open_scan_actions(self, scan):
+        entry = scan.entries[scan.idx]
+        name = entry.get('name', '?')
+        # Header is the preset's own name over a blank row: the actions below it
+        # are all destructive-or-creative, so which preset they mean has to be on
+        # screen, not remembered from the list you just left.
+        items = [('Open', (lambda s=scan: self._scan_open(s)))]
+        # INIT is the VIRTUAL init-defaults preset -- it isn't in _presets, so it
+        # cannot be deleted (Delete would silently no-op and still toast
+        # "DELETED!"). The row is omitted rather than shown-and-refused: there is
+        # nothing the user could do to make it work. Duplicating it IS meaningful
+        # (a named copy of the defaults to edit from), so that row stays.
+        items.append(('Duplicate', (lambda s=scan: self._scan_duplicate(s))))
+        if name != INIT_PRESET_NAME:
+            items.append(('Delete', (lambda s=scan: self._scan_delete(s))))
+        items.append(('Cancel', self._pop))
+        self._push_level(_MenuLevel('%s\n' % name[:MENU_LABEL_MAX], items))
+
+    def _scan_open(self, scan):
+        # The one action that ends the scan. Pop BOTH this action menu and the
+        # scan level beneath it, so Param Control sits directly on the root and a
+        # hold out of it lands there -- exactly as when you enter Param Control the
+        # normal way. (Leaving the scan underneath made a hold drop you back into
+        # scanning, which reads as a trapdoor.) What the grid shows is LIVE state
+        # (param_values), not the saved snapshot, so any MIDI CC that arrived while
+        # this preset was up is already reflected there and a Save->Overwrite
+        # stores the patch as actually heard.
+        scan.persist()           # the scan ends here (its level is about to go)
+        self._pop()              # the action menu
+        self._pop()              # the scan level
+        self._open_params()
+
+    def _scan_duplicate(self, scan):
+        # Copy the SAVED patch under a new name. The name screen opens pre-filled
+        # with _dup_name's seed (bass -> bass2), so the common case is one click.
+        # The copy takes the source's stored 'cc' rather than a live capture: the
+        # two are normally identical here (the preset is loaded), but a MIDI CC
+        # that arrived mid-scan would otherwise be baked into the "copy" and leave
+        # you with two presets of the same name-family that don't match.
+        entry = scan.entries[scan.idx]
+        if len(_presets) >= MAX_PRESETS:
+            # Say so NOW rather than after a name has been typed -- there is no
+            # name that would make it fit. (_commit_name blocks it again anyway.)
+            self._push_level(_MenuLevel('PRESETS FULL', [
+                ('Max %d reached' % MAX_PRESETS, None),
+                ('Back', self._pop),
+            ]))
+            return
+        # Copy the map here, not just in _save_preset: the name screen holds it
+        # across an unbounded number of ticks (the user is typing), and handing it
+        # the LIVE dict out of _presets would leave the pending copy aliased to the
+        # very preset it is copying.
+        self._push_level(_NameLevel(_dup_name(entry.get('name', '')),
+                                    dict(entry.get('cc') or {})))
+
+    def _scan_delete(self, scan):
+        # Straight into the same Y/N confirm the Delete list uses -- but tagged
+        # with the scan level so _do_delete knows to land back in the scan (with
+        # the next preset up) instead of on the delete list.
+        name = scan.entries[scan.idx].get('name', '?')
+        self._push_level(_MenuLevel('Delete preset\n%s?\n' % name, [
+            ('Yes', (lambda n=name, s=scan: self._do_delete(n, s))),
+            ('No', self._pop),
+        ]))
+
     def _delete_menu(self):
         # The delete list, rebuilt each time so it always reflects the current set.
         # Shown alphabetically (same order as Load, via _sorted_presets). Items
@@ -3773,8 +3926,11 @@ class SketchMenu:
             ('No', self._pop),
         ]))
 
-    def _do_delete(self, name):
+    def _do_delete(self, name, scan=None):
         global _current_preset_name
+        # Where the cursor was in the SCAN list, captured before the delete: the
+        # preset that slides into this slot is the "next" one we land on.
+        scan_idx = scan.idx if scan is not None else 0
         i = _find_preset(name)
         if i >= 0:
             del _presets[i]
@@ -3784,11 +3940,31 @@ class SketchMenu:
             # preset; fall back to init.
             _current_preset_name = ''
             _set_setting('current_preset', '')
-        # Flash "DELETED!" then land back on the refreshed delete list (or the root
-        # menu if that was the last one).
-        self.stack = [self._root()]
-        if _presets:
-            self.stack.append(self._delete_menu())
+        if scan is not None:
+            # Came from a scan: land back in it with the NEXT preset selected --
+            # same index, which after the removal is the one that follows (or the
+            # new last, if we just deleted the end of the list). The list can't go
+            # empty: the virtual INIT is always at 0.
+            lst = _load_list()
+            land = lst[min(scan_idx, len(lst) - 1)]
+            nxt = land.get('name', '')
+            # ...and APPLY it. Every other cursor move in a scan loads what it
+            # lands on; without this you would be highlighting one preset while
+            # still hearing the one that was just deleted -- a patch that no longer
+            # exists anywhere and can't be got back by moving the cursor.
+            try:
+                _apply_preset(land.get('cc'))
+            except Exception:
+                pass
+            _current_preset_name = nxt
+            _set_setting('current_preset', nxt)
+            self._scan_stack(nxt)
+        else:
+            # Flash "DELETED!" then land back on the refreshed delete list (or the
+            # root menu if that was the last one).
+            self.stack = [self._root()]
+            if _presets:
+                self.stack.append(self._delete_menu())
         self._show_toast('DELETED!')
         self._repaint()
 

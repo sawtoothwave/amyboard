@@ -223,7 +223,18 @@ def main():
     ns['_current_preset_name'] = 'chimey'
     dict(menu.cur.items)['Scan presets']()
     clear(); paint(); _snap(fb, '14-scan-presets', shots)
-    menu.handle(0, False, True)
+
+    # Clicking a scanned preset opens its action menu, and Duplicate opens name
+    # entry pre-seeded. Named rather than numbered for the reason given above the
+    # parameter-page loop: slotting these in as 15/16 would renumber every capture
+    # after them and break the links already in arctor.md.
+    menu.handle(0, True, False)
+    clear(); paint(); _snap(fb, 'scan-actions', shots)
+    dict(menu.cur.items)['Duplicate']()
+    clear(); paint(); _snap(fb, 'scan-duplicate-name', shots)
+    menu.handle(0, False, True)            # cancel name entry
+    menu.handle(0, False, True)            # back out of the actions
+    menu.handle(0, False, True)            # ...and out of the scan
     ns['_current_preset_name'] = 'padwarb'
 
     dict(menu.cur.items)['Delete preset']()
