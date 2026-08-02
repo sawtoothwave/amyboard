@@ -1,81 +1,37 @@
 # E16 Configuration
 
-This directory contains OXI e16 scene definitions and generation tools for controlling AMYboard.
+OXI e16 scene definitions for controlling AMYboard.
 
 ## Files
 
-- **`amyboard.json`** - Source definition for the AMYboard control scene
-- **`amyboard.oxie16`** - Compiled scene file (generated from JSON)
-- **`merge_scenes.py`** - Utility to merge scenes while preserving pages
-- **`generate-scene.js`** - Node.js script to compile JSON → .oxie16 (from brentvatne/oxi-e16-config)
+- **`arctor.json`** — source definition for the Arctor scene (**edit this**)
+- **`../e16 templates/arctor.oxie16`** — compiled scene, sent to the device (finished scenes live in `e16 templates/`)
+- **`generate-scene.js`** — compiler, JSON → `.oxie16` (from [brentvatne/oxi-e16-config](https://github.com/brentvatne/oxi-e16-config), plus a one-line patch so per-encoder `mode` reaches the turn action)
+- **`scene-schema.json`** — JSON Schema for the `.oxie16` format; the reference for what every field and value means
 
-## Quick Start
+The Arctor scene replaced an earlier `amyboard.json` (deleted: its CC map predated
+Drift, so it still put Cutoff/Reso on CC 28/29) and `merge_scenes.py` (deleted: it
+merged AMYboard pages into an existing scene to preserve MFT pages 1-3 — the Arctor
+scene is a scene of its own and needs no merge). Both are in git history.
 
-### 1. Install Dependencies
-
-```bash
-npm install
-```
-
-### 2. Generate Scene
+## Build
 
 ```bash
-node generate-scene.js amyboard.json amyboard.oxie16
+node generate-scene.js arctor.json "../e16 templates/arctor.oxie16"   # or: npm run generate
 ```
 
-This creates `amyboard.oxie16` from the JSON source file.
+No dependencies — plain Node.
 
-### 3. Merge with MFT Pages (Optional)
+## Layout
 
-If you want to preserve your existing MFT configuration:
+One page per Arctor param group, in the same row-major order as the on-device knob
+grid: **1 OSC** (49) · **2 VCF** (60) · **3 LFO** (37) · **4 VCA** (93) · **5 FX**
+(5). Channel 12, all outputs, push-to-reset on every knob.
 
-```bash
-python3 merge_scenes.py \
-  ../e16\ templates/MFT\ replace.oxie16 \
-  amyboard.oxie16 \
-  --preserve-pages 0-2 \
-  --output ../e16\ templates/MFT\ replace.oxie16
-```
+Full layout, encoder-mode rationale and the editing rules are in
+[../docs/E16_SETUP.md](../docs/E16_SETUP.md); the CC map is in
+[../docs/CC_MAPPING.md](../docs/CC_MAPPING.md).
 
-### 4. Transfer to Device
-
-Use the OXI app or your preferred method to load the `.oxie16` file onto your e16.
-
-## Editing the Configuration
-
-Edit `amyboard.json` to change:
-- Knob names and abbreviations
-- MIDI CC assignments
-- Default values
-- Page organization
-
-Then regenerate: `node generate-scene.js amyboard.json amyboard.oxie16`
-
-## Page Layout
-
-The current configuration uses:
-
-- **Page 0**: Empty (placeholder for future use)
-- **Page 1**: Empty (placeholder)
-- **Page 2**: Empty (placeholder)
-- **Page 3**: Oscillators + Filter (14 knobs)
-- **Page 4**: Modulators - Envelopes + LFO (15 knobs)
-- **Page 5-10**: Empty
-- **Page 11**: Effects (12 knobs)
-
-*Note: The OXI app displays pages as 1-indexed, so these become pages 1-12.*
-
-## Notes on MFT Preservation
-
-If you created your MFT scene with the OXI app directly, it won't have a JSON source file. The `merge_scenes.py` script provides a way to preserve those pages when adding AMYboard controls.
-
-Alternatively:
-1. Create a new scene with just pages 4, 8, 12 defined
-2. Manually import MFT pages into your device separately
-3. Copy/restore MFT pages on the e16 itself
-
-## References
-
-- [brentvatne/oxi-e16-config](https://github.com/brentvatne/oxi-e16-config) - E16 configuration framework
-- [../docs/CC_MAPPING.md](../docs/CC_MAPPING.md) - Complete CC assignments
-- [../docs/E16_SETUP.md](../docs/E16_SETUP.md) - Setup guide
+The source of truth for CCs, defaults and bipolarity is the `PARAMS` table in
+`sketches/arctor.py`. `arctor.json` copies from it; nothing enforces that, so when
+`PARAMS` changes, update `arctor.json` too.

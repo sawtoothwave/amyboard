@@ -8,7 +8,7 @@
 Controllers → MIDI → AMYboard → Audio Output
   ├── Keystep Pro (Keyboard/Gate)      → MIDI Channel 12 (Note On/Off)
   ├── Hermod+ (Sequencer/Clock)        → MIDI Channel 12 (Note/Clock/CV)
-  └── Oxi e16 (Parameters)             → MIDI Channel 12 (CC 1, 20-32, 40-43, 71-83)
+  └── Oxi e16 (Parameters)             → MIDI Channel 12 (CC 1, 20-34, 40-46, 71-87, 90-103)
 ```
 
 ### System Architecture
@@ -20,9 +20,9 @@ Controllers → MIDI → AMYboard → Audio Output
 - Persistent storage at `/user/` for configuration
 
 **Control Mapping**
-- E16 pages 4, 8, 12 send MIDI CCs on channel 12
+- E16 pages 1-5 (OSC / VCF / LFO / VCA / FX) send MIDI CCs on channel 12, one page
+  per Arctor param group
 - The frozen rebuild baseline for CC assignments lives in `docs/CC_MAPPING.md`
-- Pages 1-3 reserved for MFT (Keystep Pro) control
 
 ### Core Components
 
@@ -46,9 +46,9 @@ Controllers → MIDI → AMYboard → Audio Output
 - The launcher is the encoder reader **when it is present** and feeds each sketch abstract input (`launcher.delta/.click/.back`) while reading `launcher.menu_depth`. This is what lets one universal gesture — click in / hold out / turn scroll — span both the launcher and each sketch's own menu. A sketch run **without** the launcher (copied on as its own boot file) can read the encoder itself instead — Arctor does, so it stays fully usable as a single file. The two never read the encoder at once. Full details in [MENU.md](MENU.md).
 
 **OXI E16 Configuration**
-- `e16-config/amyboard.json`: Source definition (pages 4, 8, 12)
-- `e16-config/amyboard.oxie16`: Compiled scene file
-- CC assignments documented in `docs/CC_MAPPING.md`
+- `e16-config/arctor.json`: Source definition (pages 1-5; every `PARAMS` row)
+- `e16 templates/arctor.oxie16`: Compiled scene file (built from `arctor.json`)
+- CC assignments documented in `docs/CC_MAPPING.md`; page/knob layout in `docs/E16_SETUP.md`
 
 **Deployment / Verification**
 - Sketches deploy to internal flash (`/user/sketches`), not the SD card: the board's FatFs can read but not write the large exFAT card. The wrapper launcher (`wrapper_sketch.py`, deployed to the boot file `/user/current/sketch.py`) loads from `/user/sketches` first.

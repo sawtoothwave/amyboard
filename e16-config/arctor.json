@@ -1,0 +1,158 @@
+{
+  "_readme": [
+    "Source definition for the Arctor OXI e16 scene. Build with:",
+    "  node e16-config/generate-scene.js e16-config/arctor.json 'e16 templates/arctor.oxie16'",
+    "",
+    "One e16 page per Arctor Param Control page (Osc / VCF / LFO / VCA / FX), laid",
+    "out 4-wide in the SAME row-major order as the on-device knob grid, so a knob",
+    "sits where its cell does on the OLED. Gaps are deliberate: they reproduce the",
+    "device's section breaks (e.g. LFO row 1 is the LFO itself, row 2 its shared",
+    "destinations, row 3 the two per-oscillator tremolos).",
+    "",
+    "Every CC and every `default` is copied from the PARAMS table in",
+    "sketches/arctor.py -- pushing a knob sends its INIT value, so a push resets",
+    "the parameter to exactly what a fresh patch has. `bipolar` marks the six",
+    "center-at-64 parameters (both osc tunings, filter env amount, the three EQ",
+    "bands) so the e16 draws a center-anchored ring and reads -63..+64.",
+    "",
+    "`mode` 9 = 3 CC values per detent, MEASURED on hardware as the largest step",
+    "the e16 will send: modes 0-2 are slower than 1 CC/detent, 3-7 are acceleration",
+    "(1 per detent until you turn fast), 8 steps by 2, 9 by 3, and 10 is ignored and",
+    "falls back to 1 -- so the published LSp2/LSp4/LSp6 = 2x/4x/6x table is wrong.",
+    "Set on the parameters Arctor reads as a handful of discrete buckets (waves 21",
+    "CCs/bucket, filter type and both envelope shapes 32 CCs/bucket): 3 is well",
+    "under the 21-CC narrowest bucket, so no bucket can be stepped over from any",
+    "starting value, it just takes ~7 detents per wave instead of 21. `mode` 5 =",
+    "Acc2 on the two osc tunings: their map is wide octave/fifth bands around narrow",
+    "+/-35-cent detune wings, so slow turns still land on single cents while a fast",
+    "turn crosses an octave.",
+    "",
+    "Channel 12 is set once per page; every action inherits it (channel 0 = 'use",
+    "page'). Page output 0 = ALL e16 outputs (TRS1/TRS2/USB/BLE); every action",
+    "inherits that too (output 12 = 'use page')."
+  ],
+  "title": "Arctor",
+  "icon": [0, 0, 0, 0, 0, 48, 0, 72, 0, 72, 0, 132, 0, 132, 1, 4, 254, 2, 0, 2, 0, 2, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0],
+  "selectedPreset": 0,
+  "pages": [
+    {
+      "title": "OSC",
+      "channel": 12,
+      "output": 0,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "ATUN", "name": "OscA Tun", "cc": 20, "default": 64, "bipolar": true, "mode": 5, "color": 49},
+        {"abbr": "AWAV", "name": "OscA Wav", "cc": 21, "default": 52, "mode": 9, "color": 49},
+        {"abbr": "ADTY", "name": "OscA Dty", "cc": 22, "default": 64, "color": 49},
+        {"abbr": "ALVL", "name": "OscA Lvl", "cc": 23, "default": 127, "color": 49},
+
+        {"abbr": "BTUN", "name": "OscB Tun", "cc": 24, "default": 64, "bipolar": true, "mode": 5, "color": 49},
+        {"abbr": "BWAV", "name": "OscB Wav", "cc": 25, "default": 0, "mode": 9, "color": 49},
+        {"abbr": "BDTY", "name": "OscB Dty", "cc": 26, "default": 64, "color": 49},
+        {"abbr": "BLVL", "name": "OscB Lvl", "cc": 27, "default": 0, "color": 49},
+
+        {"abbr": "DRFT", "name": "Drift Am", "cc": 28, "default": 0, "color": 49},
+        {"abbr": "DRHZ", "name": "Drift Hz", "cc": 29, "default": 48, "color": 49},
+        {"abbr": "PORT", "name": "Porta", "cc": 34, "default": 0, "color": 49},
+        null,
+
+        null, null, null, null
+      ]
+    },
+    {
+      "title": "VCF",
+      "channel": 12,
+      "output": 0,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "CUT", "name": "Cutoff", "cc": 74, "default": 127, "color": 60},
+        {"abbr": "RES", "name": "Reso", "cc": 71, "default": 0, "color": 60},
+        {"abbr": "ENV", "name": "Flt Env", "cc": 30, "default": 64, "bipolar": true, "color": 60},
+        {"abbr": "TYPE", "name": "Flt Type", "cc": 31, "default": 48, "mode": 9, "color": 60},
+
+        {"abbr": "ATK", "name": "VCF Atk", "cc": 40, "default": 0, "color": 60},
+        {"abbr": "DEC", "name": "VCF Dec", "cc": 41, "default": 34, "color": 60},
+        {"abbr": "SUS", "name": "VCF Sus", "cc": 42, "default": 25, "color": 60},
+        {"abbr": "REL", "name": "VCF Rel", "cc": 43, "default": 31, "color": 60},
+
+        {"abbr": "SHAP", "name": "VCF Shp", "cc": 45, "default": 48, "mode": 9, "color": 60},
+        {"abbr": "KBD", "name": "Kbd Trk", "cc": 32, "default": 0, "color": 60},
+        {"abbr": "VEL", "name": "Vel>Flt", "cc": 33, "default": 0, "color": 60},
+        null,
+
+        null, null, null, null
+      ]
+    },
+    {
+      "title": "LFO",
+      "channel": 12,
+      "output": 0,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "RATE", "name": "Lfo Rate", "cc": 76, "default": 0, "color": 37},
+        {"abbr": "SHAP", "name": "Lfo Wave", "cc": 78, "default": 0, "mode": 9, "color": 37},
+        null,
+        null,
+
+        {"abbr": "VIB", "name": "Lfo>Vib", "cc": 77, "default": 0, "color": 37},
+        {"abbr": "PWM", "name": "Lfo>Pwm", "cc": 83, "default": 0, "color": 37},
+        {"abbr": "FLT", "name": "Lfo>Flt", "cc": 80, "default": 0, "color": 37},
+        null,
+
+        {"abbr": "TRMA", "name": "Lfo>AmpA", "cc": 81, "default": 0, "color": 37},
+        {"abbr": "TRMB", "name": "Lfo>AmpB", "cc": 82, "default": 0, "color": 37},
+        null,
+        null,
+
+        null, null, null, null
+      ]
+    },
+    {
+      "title": "VCA",
+      "channel": 12,
+      "output": 0,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "ATK", "name": "VCA Atk", "cc": 73, "default": 0, "color": 93},
+        {"abbr": "DEC", "name": "VCA Dec", "cc": 75, "default": 25, "color": 93},
+        {"abbr": "SUS", "name": "VCA Sus", "cc": 79, "default": 127, "color": 93},
+        {"abbr": "REL", "name": "VCA Rel", "cc": 72, "default": 34, "color": 93},
+
+        {"abbr": "SHAP", "name": "VCA Shp", "cc": 46, "default": 48, "mode": 9, "color": 93},
+        {"abbr": "VEL", "name": "Vel>Amp", "cc": 44, "default": 38, "color": 93},
+        {"abbr": "VOL", "name": "Mstr Lvl", "cc": 84, "default": 84, "color": 93},
+        null,
+
+        null, null, null, null,
+        null, null, null, null
+      ]
+    },
+    {
+      "title": "FX",
+      "channel": 12,
+      "output": 0,
+      "type": "cc",
+      "encoders": [
+        {"abbr": "EQLO", "name": "EQ Low", "cc": 85, "default": 64, "bipolar": true, "color": 5},
+        {"abbr": "EQMD", "name": "EQ Mid", "cc": 86, "default": 64, "bipolar": true, "color": 5},
+        {"abbr": "EQHI", "name": "EQ High", "cc": 87, "default": 64, "bipolar": true, "color": 5},
+        null,
+
+        {"abbr": "CHLV", "name": "Cho Lvl", "cc": 90, "default": 0, "color": 5},
+        {"abbr": "CHDP", "name": "Cho Dep", "cc": 91, "default": 64, "color": 5},
+        {"abbr": "CHHZ", "name": "Cho Rate", "cc": 92, "default": 44, "color": 5},
+        null,
+
+        {"abbr": "ECLV", "name": "Ech Lvl", "cc": 95, "default": 0, "color": 5},
+        {"abbr": "ECTM", "name": "Ech Time", "cc": 96, "default": 43, "color": 5},
+        {"abbr": "ECFB", "name": "Ech Fbk", "cc": 97, "default": 40, "color": 5},
+        {"abbr": "ECTN", "name": "Ech Tone", "cc": 98, "default": 0, "color": 5},
+
+        {"abbr": "RVLV", "name": "Rev Lvl", "cc": 100, "default": 0, "color": 5},
+        {"abbr": "RVDC", "name": "Rev Dcy", "cc": 101, "default": 108, "color": 5},
+        {"abbr": "RVDP", "name": "Rev Damp", "cc": 102, "default": 64, "color": 5},
+        {"abbr": "RVXO", "name": "Rev Xovr", "cc": 103, "default": 99, "color": 5}
+      ]
+    }
+  ]
+}

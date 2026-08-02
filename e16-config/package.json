@@ -5,6 +5,6 @@
   "main": "generate-scene.js",
   "type": "commonjs",
   "scripts": {
-    "generate": "node generate-scene.js amyboard.json amyboard.oxie16"
+    "generate": "node generate-scene.js arctor.json '../e16 templates/arctor.oxie16'"
   }
 }

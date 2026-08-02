@@ -1,114 +1,183 @@
 # E16 Configuration Setup
 
-This guide walks through setting up the OXI e16 to control AMYboard.
+The OXI e16 scene for **Arctor**, the AMYboard polysynth (`sketches/arctor.py`).
 
-## Prerequisites
+The scene mirrors Arctor's own Param Control menu: **one e16 page per param group**,
+laid out in the same row-major order as the on-device knob grid, so a knob sits where
+its cell sits on the OLED. All 50 editable parameters are on the controller.
 
-- OXI e16 controller
-- AMYboard synthesizer
-- Node.js (LTS recommended)
-- MIDI connection between e16 and AMYboard
+| e16 page | Group | LED colour | Knobs |
+|---|---|---|---|
+| 1 | OSC | 49 (red) | 11 |
+| 2 | VCF | 60 (red-orange) | 11 |
+| 3 | LFO | 37 (amber/brown) | 7 |
+| 4 | VCA | 93 (green) | 7 |
+| 5 | FX | 5 (blue) | 14 |
 
-## Overview
+Pages 6-12 are empty.
 
-The AMYboard control uses three dedicated pages on the e16:
-- **Page 4**: Oscillators + Filter
-- **Page 8**: Envelopes (VCF + VCA)
-- **Page 12**: LFO
-
-Pages 1-3 are reserved for your existing MFT configuration and will be preserved.
+The five indices were picked **on hardware**, off a colour chart loaded onto the
+controller — the palette's index→hue mapping isn't documented anywhere, and the
+names in the OXI docs don't survive contact with the LEDs. The e16 has no clean
+orange or yellow: the warm end of the palette runs red → pink, so VCF and LFO use
+the most separable warm tones rather than true orange/yellow. If you need to re-pick
+one, regenerate a chart page — 16 encoders, `"color"` set to its own index and
+`"lower": 100` so every ring stays lit — on one of the empty pages.
 
 ## Page Layout
 
-Which parameters sit on each page (CCs match [CC_MAPPING.md](CC_MAPPING.md) for what each does; exact knob positions are defined in `e16-config/amyboard.json`):
+`*` marks a bipolar knob (centre-detent, reads -63..+64); the number is the CC.
+Blank cells are deliberate — they reproduce the section breaks of Arctor's own grid
+(see the `section` column of `PARAMS` in `sketches/arctor.py`).
 
-- **Page 4 — Oscillators + Filter:** Osc A/B Pitch (20/24), Wave (21/25), Duty (22/26), Level (23/27); Filter Env Amount (30), Filter Type (31), Key Scale (32), Resonance (71), Cutoff (74).
-- **Page 8 — Envelopes:** VCF A/D/S/R (40/41/42/43); VCA A/D/S/R (73/75/79/72).
-- **Page 12 — LFO:** Freq (76), Waveshape (78), → Pitch/Vibrato (77, also mod wheel CC 1), → PWM (83), → Filter (80), → Osc A/B Amp/Tremolo (81/82).
+```
+PAGE 1  OSC                              PAGE 2  VCF
+  ATUN* 20 | AWAV  21 | ADTY 22 | ALVL 23   CUT  74 | RES  71 | ENV* 30 | TYPE 31
+  BTUN* 24 | BWAV  25 | BDTY 26 | BLVL 27   ATK  40 | DEC  41 | SUS  42 | REL  43
+  DRFT  28 | DRHZ  29 | PORT 34 |    .      SHAP 45 | KBD  32 | VEL  33 |   .
 
-## Configuration Files
+PAGE 3  LFO                              PAGE 4  VCA
+  RATE  76 | SHAP  78 |   .    |   .        ATK  73 | DEC  75 | SUS  79 | REL  72
+  VIB   77 | PWM   83 | FLT 80 |   .        SHAP 46 | VEL  44 | VOL  84 |   .
+  TRMA  81 | TRMB  82 |   .    |   .
 
-### `amyboard.json`
-Source definition file describing the e16 pages, knob assignments, and MIDI CC mappings.
+PAGE 5  FX
+  EQLO* 85 | EQMD* 86 | EQHI* 87 |   .
+  CHLV  90 | CHDP  91 | CHHZ  92 |   .
+  ECLV  95 | ECTM  96 | ECFB  97 | ECTN 98
+  RVLV 100 | RVDC 101 | RVDP 102 | RVXO 103
+```
 
-Generated from this file: `amyboard.oxie16` (the actual config sent to the device)
+What each CC does is in [CC_MAPPING.md](CC_MAPPING.md). The knob abbreviations are
+4 characters (the e16's limit) and, unlike Arctor's on-device grid, carry their own
+context — the e16 has no section headers above a row, so `ATK`/`SHAP`/`VEL` are
+disambiguated only by the page they sit on, and the osc controls take an A/B prefix.
+
+## Scene Behaviour
+
+- **MIDI channel 12**, set once per page; every action inherits it (`channel: 0` =
+  "use page channel").
+- **All outputs.** Page `output: 0` = ALL (TRS1, TRS2, USB, BLE); every action
+  inherits it (`output: 12` = "use page output").
+- **Push = reset to INIT.** Every knob's push action is `SetToDefault` (type 4) and
+  its `defaultValue` is copied from that parameter's `default` in Arctor's `PARAMS`
+  table — so a push sends exactly the value a fresh INIT patch has (Cutoff → 127,
+  Osc A Level → 127, Osc B Level → 0, Master Level → 84 ≈ +12 dB, effects → off).
+- **Bipolar knobs** (`bipolar: true`, default 64): Osc A/B Tune, Filter Env Amount,
+  and the three EQ bands. These are the six parameters flagged `bipolar=True` in
+  `PARAMS`; everything else is unipolar, including Drift Amount and Vel→Filter,
+  which are 0-at-the-bottom depths rather than centre-zero.
+- **Encoder modes.** Most knobs are `mode 3` (1 CC per detent). Two exceptions, both
+  mirroring the `stepped` flag in `PARAMS`:
+  - `mode 9` (3 CC/detent) on the parameters Arctor reads as a few wide discrete
+    buckets — Osc A/B Wave and LFO Wave (21 CCs per wave), Filter Type and the two
+    envelope Shapes (32 CCs per bucket). Without it, changing one filter type takes
+    32 detents; with it, 11.
+  - `mode 5` (Acc2) on Osc A/B Tune, whose map is wide octave/fifth bands around
+    narrow ±35-cent detune wings: a slow turn still resolves single cents, a fast
+    one crosses an octave.
+
+### What `mode` actually does — MEASURED
+
+Both published sources are wrong about this field, so it was probed on the hardware
+(a scratch page carrying the same knob at all 11 modes, one per encoder):
+
+| `mode` | Measured behaviour |
+|---|---|
+| 0, 1, 2 | Slower than 1 CC/detent (division) |
+| 3-6 | 1 CC/detent, with progressively more acceleration on fast turns |
+| 7 | Above 1 CC/detent even on a slow turn |
+| 8 | **2 CC/detent** |
+| 9 | **3 CC/detent — the largest step the e16 will send** |
+| 10 | Ignored; falls back to 1 CC/detent |
+
+The OXI skill doc's `LSp2 / LSp4 / LSp6 = 2x / 4x / 6x` for modes 8/9/10 is not what
+the firmware does — 9 steps by 3, and 10 is out of range. The published JSON Schema
+is closer (it caps `mode` at 7) but wrong the other way, since 8 and 9 do work; the
+copy in `e16-config/scene-schema.json` is widened to 0-10 to match.
+
+**Why this can't match the on-device editor.** Param Control steps in *bucket index*
+space — `_bucket_advance` moves one entry in a param's `steps` table, so one detent
+is always exactly one wave. The e16 sends absolute CC values and knows nothing about
+where the boundaries are, so the best it can do is 3 CCs per detent: ~7 detents per
+wave, ~11 per filter type. The step is well under the narrowest 21-CC bucket, so no
+bucket can ever be stepped over from any starting value — it is slower than the
+board's own encoder, never wrong. Closing that gap would take relative-CC
+("nudge") parameters in the sketch, which is deliberately not built.
+
+## Files
+
+| File | Role |
+|---|---|
+| `e16-config/arctor.json` | Source definition — edit this |
+| `e16 templates/arctor.oxie16` | Compiled scene — send this to the device |
+| `e16-config/generate-scene.js` | Compiler (JSON → `.oxie16`), from [brentvatne/oxi-e16-config](https://github.com/brentvatne/oxi-e16-config) |
+| `e16-config/scene-schema.json` | JSON Schema for the `.oxie16` format (field/value reference) |
 
 ## Workflow
 
-### Step 1: Set Up e16-config Locally
-
 ```bash
-cd amyboard
-npm install  # Install generate-scene.js dependencies
+node e16-config/generate-scene.js e16-config/arctor.json "e16 templates/arctor.oxie16"
 ```
 
-### Step 2: Generate the AMYboard Scene
+Then transfer `e16 templates/arctor.oxie16` to the e16 with the OXI app. Finished
+scenes live in `e16 templates/` alongside the other ones; `e16-config/` holds the
+source and the toolchain.
 
-```bash
-node e16-config/generate-scene.js e16-config/amyboard.json e16-config/amyboard.oxie16
+The generator needs no dependencies (plain Node, no `npm install`).
+
+## Editing
+
+Change a knob in `arctor.json` and regenerate. Encoder fields:
+
+```json
+{"abbr": "CUT", "name": "Cutoff", "cc": 74, "default": 127, "color": 46}
+{"abbr": "ENV", "name": "Flt Env", "cc": 30, "default": 64, "bipolar": true, "color": 46}
+{"abbr": "TYPE", "name": "Flt Type", "cc": 31, "default": 48, "mode": 10, "color": 46}
 ```
 
-This creates `amyboard.oxie16` from the JSON source.
+`abbr` ≤ 4 chars, `name` ≤ 8 chars, `null` for an empty slot (16 per page, 12 pages).
 
-### Step 3: Preserve MFT Pages
+**When Arctor's `PARAMS` table changes, update `arctor.json` to match** — the CC,
+the default and the bipolar flag all come from there, and nothing enforces it.
 
-Since we want to keep your existing MFT pages (1-3), you need to merge them:
+## Notes
 
-```bash
-# Backup the original
-cp "e16 templates/MFT replace.oxie16" "e16 templates/MFT replace.oxie16.backup"
-
-# Extract MFT pages and merge with AMYboard pages
-python3 e16-config/merge_scenes.py \
-  "e16 templates/MFT replace.oxie16" \
-  e16-config/amyboard.oxie16 \
-  --preserve-pages 0-2 \
-  --output "e16 templates/MFT replace.oxie16"
-```
-
-### Step 4: Transfer to Device
-
-Transfer `e16 templates/MFT replace.oxie16` to your e16 using the OXI app or your preferred method.
-
-## Important Notes
-
-- **CC Channel**: All AMYboard CCs are on MIDI channel 12
-- **Push to Reset**: Pressing any knob returns it to its default value
-- **Frequency Defaults**: 
-  - Osc A pitch → 440 Hz (center dead zone, CC 60-68)
-  - Osc B pitch → 440 Hz (center dead zone, CC 60-68)
-  - Both oscillators reference 440 Hz, so they are unison at center; the stepped tuning map adds fifths/octaves away from center.
-- **Persistence**: Knob positions are stored on the e16 scene, not on the AMYboard
-
-## CC Reference
-
-See [CC_MAPPING.md](CC_MAPPING.md) for complete MIDI CC assignments and default values.
-
-## AMYboard Sketch
-
-The AMYboard runs `sketches/arctor.py` which:
-1. Listens to MIDI CCs on channel 12
-2. Maps them to AMY synthesizer parameters live (no voice reset on change)
-3. Plays channel-12 notes on a 6-voice polyphonic synth
-4. Also supports CV1 (1V/oct pitch) and CV2 (gate) for monophonic CV play
-
-To deploy: `python deploy_auto.py --sketch sketches/arctor.py` writes it to
-internal flash (`/user/sketches/`), which the wrapper launcher loads from. See
-`DEPLOYMENT_COMMAND.txt`. (Sketches go to flash, not the SD card, which the board
-can read but not write.)
+- Knob positions live in the e16 scene, not on the AMYboard. Arctor keeps its own
+  copy of every value (presets, `amyboard_state.json`), so after a power cycle the
+  two can disagree until a knob is touched.
+- The synth also accepts these CCs from anything else on channel 12 — the e16 is not
+  privileged.
+- Arctor deploys with `python deploy_auto.py --sketch sketches/arctor.py`
+  (see `DEPLOYMENT_COMMAND.txt`).
 
 ## Troubleshooting
 
-### E16 pages show, but knobs don't control anything
-1. Check MIDI channel (should be 12)
-2. Verify USB connection between e16 and AMYboard
-3. Check AMYboard logs (connect via `mpremote` and look for errors)
+**Pages show, but knobs do nothing.** Check the e16 is on channel 12 and that the
+scene's pages are the Arctor ones (the OXI app shows the page channel). Check the
+MIDI cable/USB link, then Arctor's CC monitor display mode — it lists incoming CCs,
+so if a knob's CC never appears the message is not arriving.
 
-### Settings don't persist across power cycles
-1. Verify `/user/` directory exists on AMYboard
-2. Check for write permission issues in `sketches/arctor.py`
-3. Look at `amyboard_state.json` on the device
+**A knob moves the wrong parameter.** The scene and the sketch disagree; regenerate
+from `arctor.json` and compare against `PARAMS` in `sketches/arctor.py`.
 
-### Wrong frequency mappings
-1. Edit the frequency range in `sketches/arctor.py` function `cc_to_freq()`
-2. Adjust default CC values in `e16-config/amyboard.json`
+**Scene fails to load silently in the OXI app.** Almost always a malformed action
+object — every action needs all 11/12 fields, and encoder keys must be in the order
+`name, abbr, color, push_action, turn_actions, bipolar`. The generator handles both;
+hand-editing the `.oxie16` does not.
+
+One version wrinkle, if the app does reject this scene: encoders end with
+`"bipolar": false` here (what the schema requires and what current scenes use), but
+the older export in `e16 templates/MFT replace.oxie16` ends with `"color2": 0`
+instead. If your app is on the older form, rename that one key in
+`generate-scene.js` (`emptyEncoder` and `buildEncoder`) and regenerate — at which
+point the bipolar knobs lose their centre display, since that firmware has no
+bipolar flag.
+
+**Validating a scene before sending it:**
+
+```bash
+python -c "import json,jsonschema; \
+  jsonschema.validate(json.load(open('e16 templates/arctor.oxie16')), \
+                      json.load(open('e16-config/scene-schema.json')))"
+```
