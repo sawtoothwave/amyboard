@@ -38,7 +38,7 @@ import amy, amyboard, midi, math, time, json
 # for how a board written by the pre-rename build keeps its saved presets.
 SKETCH_NAME  = 'ARCTOR'
 VERSION      = '1.0'
-VERSION_DATE = '2026_07_30'
+VERSION_DATE = '2026_08_02'
 
 # --- Launcher integration ---------------------------------------------------
 # This sketch always talks to a "launcher-shaped" input object (the global
@@ -2949,7 +2949,7 @@ ABOUT_C_DIM    = 6       # its label
 def _about_lines():
     # (text, bright). '' starts a block gap instead of a row. Dim = the label,
     # bright = the thing being credited, so the card scans without any rules.
-    # NB the version row is 'v1.0  2026_07_30' = exactly 16 chars: a two-digit
+    # NB the version row is 'v1.0  2026_08_02' = exactly 16 chars: a two-digit
     # minor ('v1.10') would push it over and lose the last date digit.
     return (
         (SKETCH_NAME, True),
