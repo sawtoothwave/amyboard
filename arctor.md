@@ -114,7 +114,7 @@ In param control mode:
 *A couple notes about sending MIDI CC to Arctor:*
 
 1. CC data you send into Arctor will be reflected in real-time on the corresponding parameter(s). Saving an Arctor preset captures the current state of every parameter, including adjustments from external CC data. So if you're using external MIDI to modify an Arctor sound, saving will capture everything you changed. 
-2. To make external MIDI assignment easier, Arctro will display a parameter's corresponding CC number if you just leave the cursor idle on that parameter for a few seconds. (You can also consult the complete CC table in the [appendix](#appendix).)
+2. To make external MIDI assignment easier, Arctor will display a parameter's corresponding CC number if you just leave the cursor idle on that parameter for a few seconds. (You can also consult the complete CC table in the [appendix](#appendix).)
 
 ### Osc
 
